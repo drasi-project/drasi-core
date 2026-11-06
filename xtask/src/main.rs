@@ -80,6 +80,7 @@ struct PluginArtifactMetadata {
     plugin_type: String,
     version: String,
     sdk_version: String,
+    abi_version: String,
     core_version: String,
     lib_version: String,
     target_triple: String,
@@ -546,6 +547,27 @@ fn has_rustls_crypto_provider_marker(plugin: &Path) -> std::io::Result<bool> {
         .any(|window| window == drasi_ffi_primitives::RUSTLS_RING_PROVIDER_MARKER))
 }
 
+fn plugin_binary_abi_version(binary: &[u8]) -> Result<&str, String> {
+    let version = drasi_ffi_primitives::read_plugin_abi_version(binary).map_err(str::to_string)?;
+    semver::Version::parse(version)
+        .map_err(|error| format!("invalid plugin FFI ABI version {version:?}: {error}"))?;
+    Ok(version)
+}
+
+fn validate_plugin_artifact(
+    metadata: &PluginArtifactMetadata,
+    binary: &[u8],
+) -> Result<(), String> {
+    let binary_abi = plugin_binary_abi_version(binary)?;
+    if metadata.abi_version != binary_abi {
+        return Err(format!(
+            "FFI ABI metadata disagrees with binary: metadata={}, binary={binary_abi}",
+            metadata.abi_version
+        ));
+    }
+    Ok(())
+}
+
 fn plugin_build_command(options: PluginBuildOptions<'_>) -> Command {
     let mut cmd = Command::new(options.build_tool);
     cmd.current_dir(options.workspace_root);
@@ -695,6 +717,7 @@ fn build_plugins(args: &[String]) {
     let lib_ext = plugin_lib_ext(target.as_deref());
     let mut missing_binaries = Vec::new();
     let mut plugins_without_rustls_provider = Vec::new();
+    let mut plugins_with_invalid_metadata = Vec::new();
 
     for info in &result.plugins {
         let name = &info.package.name;
@@ -732,7 +755,20 @@ fn build_plugins(args: &[String]) {
                 src.display()
             );
             missing_binaries.push(name.clone());
+            continue;
         }
+
+        let abi_version = match fs::read(&dst)
+            .map_err(|error| error.to_string())
+            .and_then(|binary| plugin_binary_abi_version(&binary).map(str::to_string))
+        {
+            Ok(version) => version,
+            Err(error) => {
+                eprintln!("ERROR: cannot read FFI ABI from {lib_name}: {error}");
+                plugins_with_invalid_metadata.push(name.clone());
+                continue;
+            }
+        };
 
         // Generate metadata.json alongside the plugin binary
         let metadata = PluginArtifactMetadata {
@@ -741,6 +777,7 @@ fn build_plugins(args: &[String]) {
             plugin_type: info.plugin_type.clone(),
             version: info.package.version.clone(),
             sdk_version: result.sdk_version.clone(),
+            abi_version,
             core_version: result.core_version.clone(),
             lib_version: result.lib_version.clone(),
             target_triple: target_triple.clone(),
@@ -750,14 +787,18 @@ fn build_plugins(args: &[String]) {
         let metadata_path = plugins_dir.join(format!("{lib_name}.metadata.json"));
         let metadata_json =
             serde_json::to_string_pretty(&metadata).expect("failed to serialize metadata");
-        fs::write(&metadata_path, metadata_json).unwrap_or_else(|e| {
-            eprintln!("Failed to write metadata for {name}: {e}");
-        });
+        if let Err(error) = fs::write(&metadata_path, metadata_json) {
+            eprintln!("Failed to write metadata for {name}: {error}");
+            plugins_with_invalid_metadata.push(name.clone());
+        }
 
         clean_build_artifacts(&build_dir, &lib_name);
     }
 
-    if !missing_binaries.is_empty() || !plugins_without_rustls_provider.is_empty() {
+    if !missing_binaries.is_empty()
+        || !plugins_without_rustls_provider.is_empty()
+        || !plugins_with_invalid_metadata.is_empty()
+    {
         if !missing_binaries.is_empty() {
             eprintln!(
                 "\n=== {} of {} plugin binaries missing after build ===",
@@ -776,6 +817,15 @@ fn build_plugins(args: &[String]) {
         }
         for name in &plugins_without_rustls_provider {
             eprintln!("  - {name}");
+        }
+        if !plugins_with_invalid_metadata.is_empty() {
+            eprintln!(
+                "\n=== {} plugin binaries have invalid ABI metadata ===",
+                plugins_with_invalid_metadata.len()
+            );
+            for name in &plugins_with_invalid_metadata {
+                eprintln!("  - {name}");
+            }
         }
         eprintln!("\nContents of build directory ({}):", build_dir.display());
         match fs::read_dir(&build_dir) {
@@ -843,7 +893,6 @@ const DEFAULT_REGISTRY: &str = "ghcr.io/drasi-project";
 struct PublishablePlugin {
     metadata: PluginArtifactMetadata,
     binary_path: PathBuf,
-    metadata_path: PathBuf,
 }
 
 fn discover_publishable_plugins(plugins_dir: &Path) -> Vec<PublishablePlugin> {
@@ -909,10 +958,17 @@ fn discover_publishable_plugins(plugins_dir: &Path) -> Vec<PublishablePlugin> {
                 std::process::exit(1);
             }
 
+            let validation = fs::read(&binary_path)
+                .map_err(|error| error.to_string())
+                .and_then(|binary| validate_plugin_artifact(&metadata, &binary));
+            if let Err(error) = validation {
+                eprintln!("Invalid plugin artifact {}: {error}", binary_path.display());
+                std::process::exit(1);
+            }
+
             plugins.push(PublishablePlugin {
                 metadata,
                 binary_path,
-                metadata_path: path,
             });
         }
     }
@@ -1069,14 +1125,9 @@ fn publish_plugins(args: &[String]) {
             publish_result.catalog_fail_count
         );
         if let Some(path) = report_path {
-            let report = serde_json::json!({
-                "schema_version": 1,
-                "artifacts": artifacts,
-                "artifact_failures": publish_result.fail_count,
-                "catalog_successes": publish_result.catalog_success_count,
-                "catalog_failures": publish_result.catalog_fail_count,
-            });
-            if let Err(error) = fs::write(&path, report.to_string()) {
+            if let Err(error) =
+                write_publication_report(Path::new(&path), &publish_result, &artifacts)
+            {
                 eprintln!("Cannot write publication report {path}: {error}");
                 std::process::exit(1);
             }
@@ -1086,6 +1137,21 @@ fn publish_plugins(args: &[String]) {
             std::process::exit(publish_result.exit_code());
         }
     });
+}
+
+fn write_publication_report(
+    path: &Path,
+    result: &PublishBatchResult,
+    artifacts: &[serde_json::Value],
+) -> std::io::Result<()> {
+    let report = serde_json::json!({
+        "schema_version": 1,
+        "artifacts": artifacts,
+        "artifact_failures": result.fail_count,
+        "catalog_successes": result.catalog_success_count,
+        "catalog_failures": result.catalog_fail_count,
+    });
+    fs::write(path, report.to_string())
 }
 
 async fn publish_batch<'a, Upload, UploadFuture, Catalog, CatalogFuture, Sign>(
@@ -1101,35 +1167,41 @@ where
     UploadFuture: std::future::Future<Output = Result<String, String>>,
     Catalog: FnMut(String) -> CatalogFuture,
     CatalogFuture: std::future::Future<Output = Result<(), String>>,
-    Sign: FnMut(&str) -> Result<(), String>,
+    Sign: FnMut(&str) -> Result<(), SignatureFailure>,
 {
     let mut result = PublishBatchResult::default();
     let mut artifacts = Vec::new();
     for (plugin, reference) in publications {
         match upload(reference.clone(), plugin).await {
             Ok(url) => {
-                if result.record_pushed_artifact(
-                    sign,
-                    reference,
-                    &plugin.metadata.target_triple,
-                    &url,
-                    &mut sign_and_verify,
-                ) {
-                    artifacts.push(serde_json::json!({
-                        "name": plugin.metadata.name,
-                        "version": plugin.metadata.version,
-                        "type": plugin.metadata.plugin_type,
-                        "kind": plugin.metadata.kind,
-                        "target": plugin.metadata.target_triple,
-                        "sdk_version": plugin.metadata.sdk_version,
-                        "core_version": plugin.metadata.core_version,
-                        "lib_version": plugin.metadata.lib_version,
-                        "reference": reference,
-                        "digest_reference": digest_reference(reference, &url),
-                        "signed": sign,
-                        "verified": sign,
-                    }));
-                }
+                let signature_error = result
+                    .record_pushed_artifact(
+                        sign,
+                        reference,
+                        &plugin.metadata.target_triple,
+                        &url,
+                        &mut sign_and_verify,
+                    )
+                    .err();
+                let signed =
+                    sign && !matches!(&signature_error, Some(SignatureFailure::Signing(_)));
+                let verified = sign && signature_error.is_none();
+                artifacts.push(serde_json::json!({
+                    "name": plugin.metadata.name,
+                    "version": plugin.metadata.version,
+                    "type": plugin.metadata.plugin_type,
+                    "kind": plugin.metadata.kind,
+                    "target": plugin.metadata.target_triple,
+                    "sdk_version": plugin.metadata.sdk_version,
+                    "abi_version": plugin.metadata.abi_version,
+                    "core_version": plugin.metadata.core_version,
+                    "lib_version": plugin.metadata.lib_version,
+                    "reference": reference,
+                    "digest_reference": digest_reference(reference, &url),
+                    "signed": signed,
+                    "verified": verified,
+                    "signature_error": signature_error,
+                }));
             }
             Err(error) => {
                 eprintln!("  ✗ {reference} — {error}");
@@ -1170,22 +1242,22 @@ impl PublishBatchResult {
         target_triple: &str,
         manifest_url: &str,
         sign_and_verify: F,
-    ) -> bool
+    ) -> Result<(), SignatureFailure>
     where
-        F: FnOnce(&str) -> Result<(), String>,
+        F: FnOnce(&str) -> Result<(), SignatureFailure>,
     {
         if sign {
             let digest_ref = digest_reference(reference, manifest_url);
             if let Err(e) = sign_and_verify(&digest_ref) {
                 eprintln!("  ✗ {reference} ({target_triple}) — {e}");
                 self.record_failure();
-                return false;
+                return Err(e);
             }
         }
 
         println!("  ✓ {reference} → {manifest_url}");
         self.success_count += 1;
-        true
+        Ok(())
     }
 
     fn record_failure(&mut self) {
@@ -1215,6 +1287,21 @@ impl PublishBatchResult {
 
     fn should_update_directory(&self) -> bool {
         self.success_count > 0 && !self.has_failures()
+    }
+}
+
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(tag = "stage", content = "error", rename_all = "snake_case")]
+enum SignatureFailure {
+    Signing(String),
+    Verification(String),
+}
+
+impl std::fmt::Display for SignatureFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Signing(error) | Self::Verification(error) => formatter.write_str(error),
+        }
     }
 }
 
@@ -1260,7 +1347,7 @@ fn make_tag(
 /// - Public-key verification override: set `COSIGN_VERIFY_KEY` to a public key path or KMS reference
 ///
 /// Returns an error on failure so the publish batch exits non-zero.
-fn cosign_sign_and_verify(reference: &str) -> Result<(), String> {
+fn cosign_sign_and_verify(reference: &str) -> Result<(), SignatureFailure> {
     let max_attempts = env_usize("COSIGN_MAX_ATTEMPTS", 3).max(1);
     let retry_delay = Duration::from_secs(env_u64("COSIGN_RETRY_DELAY_SECONDS", 10));
 
@@ -1272,9 +1359,11 @@ fn cosign_sign_and_verify_with_program(
     program: &str,
     max_attempts: usize,
     retry_delay: Duration,
-) -> Result<(), String> {
-    cosign_sign_with_program(reference, program, max_attempts, retry_delay)?;
+) -> Result<(), SignatureFailure> {
+    cosign_sign_with_program(reference, program, max_attempts, retry_delay)
+        .map_err(SignatureFailure::Signing)?;
     cosign_verify_with_program(reference, program, max_attempts, retry_delay)
+        .map_err(SignatureFailure::Verification)
 }
 
 fn cosign_sign_with_program(
@@ -1539,9 +1628,10 @@ async fn publish_single_plugin(
     let reference: oci_client::Reference = reference_str.parse()?;
 
     let binary_data = fs::read(&plugin.binary_path)?;
+    validate_plugin_artifact(&plugin.metadata, &binary_data)?;
     let binary_size = binary_data.len();
 
-    let metadata_json = fs::read(&plugin.metadata_path)?;
+    let metadata_json = serde_json::to_vec_pretty(&plugin.metadata)?;
 
     let binary_layer = ImageLayer::new(
         bytes::Bytes::from(binary_data),
@@ -1563,42 +1653,11 @@ async fn publish_single_plugin(
         None,
     );
 
-    let mut annotations = BTreeMap::new();
-    annotations.insert(
-        "org.opencontainers.image.title".to_string(),
-        plugin.metadata.name.clone(),
+    let manifest = oci_client::manifest::OciImageManifest::build(
+        &layers,
+        &config,
+        Some(plugin_annotations(&plugin.metadata)),
     );
-    annotations.insert(
-        "org.opencontainers.image.version".to_string(),
-        plugin.metadata.version.clone(),
-    );
-    annotations.insert(
-        "io.drasi.plugin.kind".to_string(),
-        plugin.metadata.kind.clone(),
-    );
-    annotations.insert(
-        "io.drasi.plugin.type".to_string(),
-        plugin.metadata.plugin_type.clone(),
-    );
-    annotations.insert(
-        "io.drasi.plugin.sdk-version".to_string(),
-        plugin.metadata.sdk_version.clone(),
-    );
-    annotations.insert(
-        "io.drasi.plugin.core-version".to_string(),
-        plugin.metadata.core_version.clone(),
-    );
-    annotations.insert(
-        "io.drasi.plugin.lib-version".to_string(),
-        plugin.metadata.lib_version.clone(),
-    );
-    annotations.insert(
-        "io.drasi.plugin.target-triple".to_string(),
-        plugin.metadata.target_triple.clone(),
-    );
-
-    let manifest =
-        oci_client::manifest::OciImageManifest::build(&layers, &config, Some(annotations));
 
     let response = client
         .push(&reference, &layers, config, auth, Some(manifest))
@@ -1611,6 +1670,23 @@ async fn publish_single_plugin(
     );
 
     Ok(response.manifest_url)
+}
+
+fn plugin_annotations(metadata: &PluginArtifactMetadata) -> BTreeMap<String, String> {
+    [
+        ("org.opencontainers.image.title", &metadata.name),
+        ("org.opencontainers.image.version", &metadata.version),
+        ("io.drasi.plugin.kind", &metadata.kind),
+        ("io.drasi.plugin.type", &metadata.plugin_type),
+        ("io.drasi.plugin.sdk-version", &metadata.sdk_version),
+        ("io.drasi.plugin.abi-version", &metadata.abi_version),
+        ("io.drasi.plugin.core-version", &metadata.core_version),
+        ("io.drasi.plugin.lib-version", &metadata.lib_version),
+        ("io.drasi.plugin.target-triple", &metadata.target_triple),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_string(), value.clone()))
+    .collect()
 }
 
 /// Publish a zero-byte directory entry to the plugin directory package.
@@ -1778,6 +1854,172 @@ mod tests {
             kind: kind.map(str::to_string),
             path: Some(PathBuf::from(name)),
         }
+    }
+
+    fn artifact_metadata() -> PluginArtifactMetadata {
+        PluginArtifactMetadata {
+            name: "drasi-source-mock".to_string(),
+            kind: "mock".to_string(),
+            plugin_type: "source".to_string(),
+            version: "0.1.0".to_string(),
+            sdk_version: "0.11.3".to_string(),
+            abi_version: "0.14.0".to_string(),
+            core_version: "0.5.10".to_string(),
+            lib_version: "0.9.3".to_string(),
+            target_triple: "aarch64-apple-darwin".to_string(),
+            description: None,
+            license: None,
+        }
+    }
+
+    #[test]
+    fn publication_preserves_sdk_package_annotation_and_adds_distinct_abi() {
+        let metadata = artifact_metadata();
+        let annotations = plugin_annotations(&metadata);
+        assert_eq!(annotations["io.drasi.plugin.sdk-version"], "0.11.3");
+        assert_eq!(annotations["io.drasi.plugin.abi-version"], "0.14.0");
+        assert_eq!(annotations["io.drasi.plugin.core-version"], "0.5.10");
+        assert_eq!(annotations["io.drasi.plugin.lib-version"], "0.9.3");
+        let json = serde_json::to_value(&metadata).expect("artifact metadata JSON");
+        assert_eq!(json["sdk_version"], "0.11.3");
+        assert_eq!(json["abi_version"], "0.14.0");
+    }
+
+    #[test]
+    fn publication_requires_exact_agreement_between_metadata_and_binary_abi() {
+        let mut metadata = artifact_metadata();
+        let binary = b"binary\0drasi-plugin-ffi-abi=0.14.0\0";
+        validate_plugin_artifact(&metadata, binary).expect("matching ABI");
+        for abi in ["0.13.0", "0.14.1", "invalid", ""] {
+            metadata.abi_version = abi.to_string();
+            let error =
+                validate_plugin_artifact(&metadata, binary).expect_err("incorrect metadata");
+            assert!(error.contains("disagrees with binary"), "{error}");
+        }
+        assert!(validate_plugin_artifact(&metadata, b"legacy binary").is_err());
+        assert!(plugin_binary_abi_version(b"drasi-plugin-ffi-abi=invalid\0").is_err());
+    }
+
+    #[test]
+    fn legacy_publication_metadata_must_not_infer_abi_from_package_version() {
+        let mut json = serde_json::to_value(artifact_metadata()).expect("artifact JSON");
+        json.as_object_mut()
+            .expect("metadata object")
+            .remove("abi_version");
+        let error = serde_json::from_value::<PluginArtifactMetadata>(json)
+            .err()
+            .expect("missing ABI metadata");
+        assert!(error.to_string().contains("abi_version"), "{error}");
+    }
+
+    #[test]
+    fn publication_preflight_rejects_invalid_artifacts_before_credentials_or_upload() {
+        for scenario in [
+            "valid",
+            "legacy",
+            "mixed-legacy",
+            "mismatch",
+            "patch-mismatch",
+            "missing-marker",
+            "invalid-version",
+        ] {
+            let dir = test_temp_dir(scenario);
+            let mut metadata = artifact_metadata();
+            let binary: &[u8] = match scenario {
+                "missing-marker" => b"legacy binary",
+                "invalid-version" => {
+                    metadata.abi_version = "invalid".to_string();
+                    b"binary\0drasi-plugin-ffi-abi=invalid\0"
+                }
+                _ => b"binary\0drasi-plugin-ffi-abi=0.14.0\0",
+            };
+            if scenario == "mismatch" {
+                metadata.abi_version = "0.13.0".to_string();
+            } else if scenario == "patch-mismatch" {
+                metadata.abi_version = "0.14.1".to_string();
+            }
+            let mut json = serde_json::to_value(&metadata).expect("metadata JSON");
+            if scenario == "legacy" {
+                json.as_object_mut()
+                    .expect("metadata object")
+                    .remove("abi_version");
+            }
+            fs::write(
+                dir.join("libdrasi_source_mock.metadata.json"),
+                serde_json::to_vec(&json).expect("metadata bytes"),
+            )
+            .expect("write metadata");
+            fs::write(dir.join("libdrasi_source_mock.dylib"), binary)
+                .expect("write binary fixture");
+            if scenario == "mixed-legacy" {
+                json.as_object_mut()
+                    .expect("metadata object")
+                    .remove("abi_version");
+                fs::write(
+                    dir.join("libdrasi_source_legacy.metadata.json"),
+                    serde_json::to_vec(&json).expect("legacy metadata bytes"),
+                )
+                .expect("write legacy metadata");
+                fs::write(dir.join("libdrasi_source_legacy.dylib"), binary)
+                    .expect("write legacy binary");
+            }
+            for dry_run in [false, true] {
+                let output = Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::artifact_preflight_probe",
+                        "--ignored",
+                        "--nocapture",
+                    ])
+                    .env("ABI_PREFLIGHT_PLUGINS_DIR", &dir)
+                    .env("ABI_PREFLIGHT_DRY_RUN", dry_run.to_string())
+                    .env_remove("OCI_REGISTRY_PASSWORD")
+                    .env_remove("GHCR_TOKEN")
+                    .output()
+                    .expect("run publication preflight");
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert_eq!(
+                    output.status.code(),
+                    Some(i32::from(scenario != "valid" || !dry_run)),
+                    "{scenario}, dry_run={dry_run}: {stderr}"
+                );
+                let expected_error = match scenario {
+                    "valid" if dry_run => "",
+                    "valid" => "env var required for authentication",
+                    "legacy" | "mixed-legacy" => "missing field `abi_version`",
+                    "mismatch" | "patch-mismatch" => "disagrees with binary",
+                    "missing-marker" => "missing plugin FFI ABI version marker",
+                    "invalid-version" => "invalid plugin FFI ABI version",
+                    _ => unreachable!("unknown preflight fixture"),
+                };
+                assert!(
+                    stderr.contains(expected_error),
+                    "{scenario}, dry_run={dry_run}: {stderr}"
+                );
+                if scenario != "valid" {
+                    assert!(
+                        !stderr.contains("env var required for authentication"),
+                        "all artifacts must pass ABI preflight before credentials are used"
+                    );
+                }
+            }
+            fs::remove_dir_all(&dir).expect("remove artifact fixtures");
+        }
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture invoked by publication_preflight_rejects_invalid_artifacts_before_credentials_or_upload"]
+    fn artifact_preflight_probe() {
+        let plugins_dir = std::env::var("ABI_PREFLIGHT_PLUGINS_DIR").expect("fixture directory");
+        let mut args = vec![
+            "--plugins-dir".to_string(),
+            plugins_dir,
+            "--sign".to_string(),
+        ];
+        if std::env::var("ABI_PREFLIGHT_DRY_RUN").as_deref() == Ok("true") {
+            args.push("--dry-run".to_string());
+        }
+        publish_plugins(&args);
     }
 
     struct EnvGuard {
@@ -1969,7 +2211,7 @@ exit 2
             &[("MOCK_COSIGN_CALLS", calls.to_str().unwrap())],
             &["COSIGN_KEY", "COSIGN_VERIFY_KEY"],
         );
-        let error = cosign_sign_with_program(
+        let error = cosign_sign_and_verify_with_program(
             reference,
             script.to_str().unwrap(),
             1,
@@ -1977,8 +2219,9 @@ exit 2
         )
         .expect_err("failed signing command should fail publication");
 
-        assert!(error.contains("signing failed"));
-        assert!(error.contains(reference));
+        assert!(matches!(&error, SignatureFailure::Signing(_)));
+        assert!(error.to_string().contains("signing failed"));
+        assert!(error.to_string().contains(reference));
         assert_eq!(read_calls(&calls), format!("sign --yes {reference}\n"));
         fs::remove_dir_all(dir).expect("test temp dir should be removed");
     }
@@ -2027,7 +2270,8 @@ exit 2
         )
         .expect_err("failed verification should fail publication");
 
-        assert!(error.contains("verification failed"));
+        assert!(matches!(&error, SignatureFailure::Verification(_)));
+        assert!(error.to_string().contains("verification failed"));
         assert!(read_calls(&calls)
             .contains("sign --yes ghcr.io/drasi-project/reaction/sse@sha256:abc\n"));
         assert!(read_calls(&calls).contains("verify --certificate-identity https://github.com/drasi-project/drasi-core/.github/workflows/publish-plugins.yml@refs/heads/main --certificate-oidc-issuer https://token.actions.githubusercontent.com ghcr.io/drasi-project/reaction/sse@sha256:abc\n"));
@@ -2243,7 +2487,8 @@ exit 2
         )
         .expect_err("unexpected workflow/ref should be rejected by verification");
 
-        assert!(error.contains("unexpected workflow identity"));
+        assert!(matches!(&error, SignatureFailure::Verification(_)));
+        assert!(error.to_string().contains("unexpected workflow identity"));
         assert!(read_calls(&calls).contains("@refs/heads/feature"));
         fs::remove_dir_all(dir).expect("test temp dir should be removed");
     }
@@ -2386,11 +2631,11 @@ exit 2
             "https://ghcr.io/v2/drasi-project/reaction/sse/manifests/sha256:abc",
             |reference| {
                 assert_eq!(reference, "ghcr.io/drasi-project/reaction/sse@sha256:abc");
-                Err("signing failed".to_string())
+                Err(SignatureFailure::Signing("signing failed".to_string()))
             },
         );
 
-        assert!(!ok);
+        assert!(matches!(ok, Err(SignatureFailure::Signing(_))));
         assert_eq!(
             result,
             PublishBatchResult {
@@ -2414,7 +2659,7 @@ exit 2
             |_| Ok(()),
         );
 
-        assert!(ok);
+        assert!(ok.is_ok());
         assert_eq!(
             result,
             PublishBatchResult {
@@ -2445,7 +2690,9 @@ exit 2
 
     #[test]
     fn publication_process_exit_matches_required_outcomes() {
-        for scenario in ["success", "catalog", "upload", "sign", "verify"] {
+        let directory = test_temp_dir("publication-reports");
+        for scenario in ["success", "unsigned", "catalog", "upload", "sign", "verify"] {
+            let report_path = directory.join(format!("{scenario}.json"));
             let output = Command::new(std::env::current_exe().expect("test executable"))
                 .args([
                     "--exact",
@@ -2454,11 +2701,12 @@ exit 2
                     "--nocapture",
                 ])
                 .env("PUBLICATION_TEST_SCENARIO", scenario)
+                .env("PUBLICATION_TEST_REPORT", &report_path)
                 .output()
                 .expect("run publication subprocess");
             assert_eq!(
                 output.status.code(),
-                Some(i32::from(scenario != "success")),
+                Some(i32::from(!["success", "unsigned"].contains(&scenario))),
                 "{scenario}: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
@@ -2466,7 +2714,69 @@ exit 2
                 assert!(String::from_utf8_lossy(&output.stderr)
                     .contains("test/drasi-plugin-directory:reaction.http"));
             }
+            let report: serde_json::Value = serde_json::from_slice(
+                &fs::read(report_path).expect("retained publication report"),
+            )
+            .expect("publication report JSON");
+            let artifacts = report["artifacts"].as_array().expect("pushed artifacts");
+            assert_eq!(
+                artifacts.len(),
+                if scenario == "upload" { 1 } else { 2 },
+                "{scenario}"
+            );
+            for artifact in artifacts {
+                let ptype = artifact["type"].as_str().expect("plugin type");
+                assert_eq!(
+                    artifact["digest_reference"],
+                    format!("test/{ptype}/http@sha256:{}", "a".repeat(64)),
+                    "every successful upload must retain its immutable digest"
+                );
+                assert_eq!(artifact["reference"], format!("test/{ptype}/http:test"));
+                let signing_failed = scenario == "sign" && ptype == "source";
+                let verification_failed = scenario == "verify" && ptype == "source";
+                assert_eq!(
+                    artifact["signed"],
+                    scenario != "unsigned" && !signing_failed
+                );
+                assert_eq!(
+                    artifact["verified"],
+                    scenario != "unsigned" && !signing_failed && !verification_failed
+                );
+                if signing_failed || verification_failed {
+                    assert_eq!(
+                        artifact["signature_error"]["stage"],
+                        if signing_failed {
+                            "signing"
+                        } else {
+                            "verification"
+                        }
+                    );
+                    assert_eq!(
+                        artifact["signature_error"]["error"],
+                        format!("{scenario} failed")
+                    );
+                } else {
+                    assert!(artifact["signature_error"].is_null());
+                }
+            }
+            assert_eq!(
+                report["artifact_failures"],
+                usize::from(["upload", "sign", "verify"].contains(&scenario))
+            );
+            assert_eq!(
+                report["catalog_failures"],
+                usize::from(scenario == "catalog")
+            );
+            assert_eq!(
+                report["catalog_successes"],
+                if ["success", "unsigned"].contains(&scenario) {
+                    2
+                } else {
+                    usize::from(scenario == "catalog")
+                }
+            );
         }
+        fs::remove_dir_all(directory).expect("remove publication reports");
     }
 
     #[test]
@@ -2482,6 +2792,7 @@ exit 2
                     plugin_type: (*ptype).into(),
                     version: "1.0.0".into(),
                     sdk_version: "1.0.0".into(),
+                    abi_version: "0.14.0".into(),
                     core_version: "1.0.0".into(),
                     lib_version: "1.0.0".into(),
                     target_triple: "target".into(),
@@ -2489,7 +2800,6 @@ exit 2
                     license: None,
                 },
                 binary_path: PathBuf::new(),
-                metadata_path: PathBuf::new(),
             })
             .collect();
         let publications: Vec<_> = plugins
@@ -2508,7 +2818,7 @@ exit 2
                 .block_on(publish_batch(
                     &publications,
                     "test",
-                    true,
+                    scenario != "unsigned",
                     |reference, _| {
                         std::future::ready(
                             if scenario == "upload" && reference.contains("/source/") {
@@ -2529,22 +2839,24 @@ exit 2
                         )
                     },
                     |reference| {
-                        if ["sign", "verify"].contains(&scenario.as_str())
-                            && reference.contains("/source/")
-                        {
-                            Err(format!("{scenario} failed"))
+                        if reference.contains("/source/") && scenario == "sign" {
+                            Err(SignatureFailure::Signing("sign failed".to_string()))
+                        } else if reference.contains("/source/") && scenario == "verify" {
+                            Err(SignatureFailure::Verification("verify failed".to_string()))
                         } else {
                             Ok(())
                         }
                     },
                 ));
-        if ["success", "catalog"].contains(&scenario.as_str()) {
+        if ["success", "unsigned", "catalog"].contains(&scenario.as_str()) {
             assert_eq!(catalog_calls, 2);
-            assert_eq!(artifacts.len(), 2);
         } else {
             assert_eq!(catalog_calls, 0);
-            assert_eq!(artifacts.len(), 1);
         }
+        let report_path =
+            std::env::var("PUBLICATION_TEST_REPORT").expect("publication report path");
+        write_publication_report(Path::new(&report_path), &result, &artifacts)
+            .expect("write retained publication report");
         std::process::exit(result.exit_code());
     }
 

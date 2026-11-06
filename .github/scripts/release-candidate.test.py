@@ -32,7 +32,8 @@ class CandidateTests(unittest.TestCase):
         self.root = self.base / "source"
         self.root.mkdir()
         (self.root / "Cargo.toml").write_text(
-            '[workspace]\nmembers=["base","plugin","internal","excluded"]\nresolver="2"\n')
+            '[workspace]\nmembers=["base","plugin","internal","excluded","components/plugin-sdk"]\n'
+            'resolver="2"\n')
         for directory, name, extra in (
             ("base", "candidate-fixture-base", ""),
             ("plugin", "drasi-source-fixture", (
@@ -40,6 +41,8 @@ class CandidateTests(unittest.TestCase):
                 '[dependencies]\ncandidate-fixture-base={path="../base",version="99.0.0"}\n')),
             ("internal", "candidate-internal", ""),
             ("excluded", "candidate-excluded", ""),
+            ("components/plugin-sdk", "drasi-plugin-sdk",
+             '[package.metadata.drasi]\nffi-abi-version="0.14.0"\n'),
         ):
             folder = self.root / directory
             (folder / "src").mkdir(parents=True)
@@ -47,11 +50,12 @@ class CandidateTests(unittest.TestCase):
             (folder / "Cargo.toml").write_text(
                 f'[package]\nname="{name}"\nversion="99.0.0"\nedition="2021"\n'
                 'license="Apache-2.0"\ndescription="Packaging fixture"\n'
-                + ('publish=false\n' if directory == "internal" else "") + extra)
+                + ('publish=false\n' if directory in ("internal", "components/plugin-sdk") else "") + extra)
         (self.root / "rust-toolchain.toml").write_text((ROOT / "rust-toolchain.toml").read_text())
         (self.root / "release-plz.toml").write_text(
             '[workspace]\ndependencies_update=false\n'
             '[[package]]\nname="candidate-excluded"\nrelease=false\npublish=false\n')
+        self.sdk_manifest = self.root / "components/plugin-sdk/Cargo.toml"
         self.command("cargo", "generate-lockfile", "--offline")
         self.command("git", "init", "-q")
         self.command("git", "add", ".")
@@ -76,6 +80,8 @@ class CandidateTests(unittest.TestCase):
                          {p["name"] for p in self.data["crates"]})
         self.assertEqual(["drasi-source-fixture"], [p["name"] for p in self.data["plugins"]])
         self.assertEqual("locked", self.data["mode"])
+        self.assertEqual("0.14.0", self.data["abi_version"])
+        self.assertEqual(self.data["abi_version"], candidate.ffi_abi_version(self.prepared))
         self.assertIs(self.data["branch_test"], False)
         self.assertEqual(self.data["baseline_lock_sha256"], self.data["lock_sha256"])
         self.assertEqual(candidate.sha(self.root / "Cargo.lock"), candidate.sha(self.prepared / "Cargo.lock"))
@@ -127,6 +133,54 @@ class CandidateTests(unittest.TestCase):
                 candidate.write_json(self.bundle / "candidate.json",
                                      self.data | {"source_commit": value})
                 with self.assertRaisesRegex(ValueError, "source commit"):
+                    candidate.load(self.bundle, candidate.sha(self.bundle / "candidate.json"))
+
+    def test_candidate_abi_comes_from_selected_source_not_trusted_tooling_or_package_version(self):
+        self.sdk_manifest.write_text(self.sdk_manifest.read_text().replace('"0.14.0"', '"0.13.0"'))
+        bundle = self.base / "older-abi"
+        candidate.freeze(self.root, bundle)
+        result = candidate.load(bundle, candidate.sha(bundle / "candidate.json"))
+        self.assertEqual("0.13.0", result["abi_version"])
+        self.assertEqual("99.0.0", result["versions"]["drasi-plugin-sdk"])
+
+    def test_candidate_abi_is_independent_of_rust_declaration_formatting_or_presence(self):
+        abi_source = self.sdk_manifest.parent / "src/ffi/metadata.rs"
+        abi_source.parent.mkdir()
+        abi_source.write_text(
+            'pub const FFI_SDK_VERSION: &str =\n    env!("DRASI_FFI_ABI_VERSION");\n')
+        self.assertEqual("0.14.0", candidate.ffi_abi_version(self.root))
+        abi_source.unlink()
+        self.assertEqual("0.14.0", candidate.ffi_abi_version(self.root))
+
+    def test_candidate_requires_an_explicit_source_abi(self):
+        original = self.sdk_manifest.read_text()
+        declaration = '[package.metadata.drasi]\nffi-abi-version="0.14.0"\n'
+        for replacement in ("", '[package.metadata]\ndrasi=14\n',
+                            '[package.metadata.drasi]\n',
+                            '[package.metadata.drasi]\nffi-abi-version=""\n',
+                            '[package.metadata.drasi]\nffi-abi-version=14\n',
+                            '[package.metadata.drasi]\nffi-abi-version=true\n',
+                            '[package.metadata.drasi]\nffi-abi-version=[]\n'):
+            with self.subTest(replacement=replacement):
+                self.sdk_manifest.write_text(original.replace(declaration, replacement))
+                with self.assertRaisesRegex(ValueError, "explicit FFI ABI"):
+                    candidate.freeze(self.root, self.base / "invalid-abi")
+        self.assertFalse((self.base / "invalid-abi").exists())
+
+    def test_candidate_rejects_duplicate_abi_metadata(self):
+        with self.sdk_manifest.open("a") as manifest:
+            manifest.write('ffi-abi-version="0.13.0"\n')
+        with self.assertRaises(candidate.tomllib.TOMLDecodeError):
+            candidate.ffi_abi_version(self.root)
+
+    def test_legacy_candidate_without_abi_requires_new_preparation(self):
+        for value in (None, "", 14):
+            with self.subTest(abi_version=value):
+                updated = self.data | {"abi_version": value}
+                if value is None:
+                    updated.pop("abi_version")
+                candidate.write_json(self.bundle / "candidate.json", updated)
+                with self.assertRaisesRegex(ValueError, "prepare a new candidate"):
                     candidate.load(self.bundle, candidate.sha(self.bundle / "candidate.json"))
 
     def test_real_multi_package_verification_of_unpublished_versions(self):
@@ -232,6 +286,7 @@ class CandidateTests(unittest.TestCase):
                 "target": target, "reference": f"{reference}:nightly-123-2-{suffix}",
                 "digest_reference": f"{reference}@sha256:" + "a" * 64,
                 "sdk_version": "1.0.0", "core_version": "1.0.0", "lib_version": "1.0.0",
+                "abi_version": self.data["abi_version"],
                 "signed": True, "verified": True,
             }
             candidate.write_json(reports / f"{target}.json", {
@@ -256,6 +311,9 @@ class CandidateTests(unittest.TestCase):
         result = json.loads((self.base / "ready.json").read_text())
         self.assertEqual(8, len(result["artifacts"]))
         self.assertEqual("locked", result["mode"])
+        self.assertEqual("0.14.0", result["abi_version"])
+        self.assertTrue(all(artifact["abi_version"] == result["abi_version"]
+                            for artifact in result["artifacts"]))
         self.assertEqual("refs/heads/main", result["source_ref"])
         self.assertIs(result["branch_test"], False)
         self.assertEqual(candidate.IDENTITY, result["certificate_identity"])
@@ -310,9 +368,13 @@ class CandidateTests(unittest.TestCase):
         for field, value in (("signed", False), ("verified", False),
                              ("digest_reference", "test:latest"), ("version", "0.0.0"),
                              ("reference", "ghcr.io/drasi-project/source/fixture:official"),
-                             ("sdk_version", "0.0.0")):
+                             ("sdk_version", "0.0.0"), ("abi_version", None),
+                             ("abi_version", "0.13.0"), ("abi_version", "0.14.1")):
             altered = copy.deepcopy(original)
-            altered["artifacts"][0][field] = value
+            if value is None:
+                altered["artifacts"][0].pop(field)
+            else:
+                altered["artifacts"][0][field] = value
             candidate.write_json(path, altered)
             with self.subTest(field=field), self.assertRaises(ValueError):
                 self.produce(reports, packages)
@@ -442,13 +504,19 @@ class SdkProvenanceTests(unittest.TestCase):
         self.base = Path(self.temp.name)
         self.root = self.base / "sdk-probe"
         (self.root / "src").mkdir(parents=True)
-        chrono_version = next(
-            package["version"] for package in
-            candidate.tomllib.loads((ROOT / "Cargo.lock").read_text())["package"]
-            if package["name"] == "chrono")
+        packages = candidate.tomllib.loads((ROOT / "Cargo.lock").read_text())["package"]
+        sdk_manifest = candidate.tomllib.loads(
+            (ROOT / "components/plugin-sdk/Cargo.toml").read_text())
+        build_dependencies = []
+        for name, version in sdk_manifest["build-dependencies"].items():
+            locked_version = next(
+                package["version"] for package in packages
+                if package["name"] == name and package["version"].startswith(version + "."))
+            build_dependencies.append(f'{name}="={locked_version}"\n')
         (self.root / "Cargo.toml").write_text(
             '[package]\nname="sdk-provenance-probe"\nversion="0.0.0"\nedition="2021"\n'
-            f'[build-dependencies]\nchrono="={chrono_version}"\n[workspace]\n')
+            '[package.metadata.drasi]\nffi-abi-version="0.14.0"\n'
+            '[build-dependencies]\n' + "".join(build_dependencies) + '[workspace]\n')
         (self.root / "build.rs").write_bytes((ROOT / "components/plugin-sdk/build.rs").read_bytes())
         (self.root / "rust-toolchain.toml").write_bytes((ROOT / "rust-toolchain.toml").read_bytes())
         (self.root / "src/main.rs").write_text(
@@ -502,6 +570,40 @@ class SdkProvenanceTests(unittest.TestCase):
                     "cargo", "run", "--locked", "--quiet",
                     env={"DRASI_BUILD_GIT_SHA": value}, success=False)
                 self.assertIn("DRASI_BUILD_GIT_SHA must be a full 40-character hexadecimal", result.stderr)
+
+    def test_manifest_abi_is_emitted_and_changes_invalidate_cache(self):
+        (self.root / "src/main.rs").write_text(
+            'fn main() { println!("{}", env!("DRASI_FFI_ABI_VERSION")); }\n')
+        args = ("cargo", "run", "--locked", "--quiet")
+        self.assertEqual("0.14.0", self.command(*args).stdout.strip())
+        manifest = self.root / "Cargo.toml"
+        original = manifest.read_text()
+        for version in ("0.13.0", "0.15.7-rc.1+build.2", "0.14.0"):
+            with self.subTest(version=version):
+                manifest.write_text(original.replace('"0.14.0"', f'"{version}"'))
+                self.assertEqual(version, self.command(*args).stdout.strip())
+
+    def test_build_rejects_missing_nonstring_and_invalid_abi_metadata(self):
+        manifest = self.root / "Cargo.toml"
+        original = manifest.read_text()
+        for declaration in ("", 'ffi-abi-version=14\n', 'ffi-abi-version=true\n',
+                            'ffi-abi-version=""\n', 'ffi-abi-version="invalid"\n',
+                            'ffi-abi-version="0.14"\n', 'ffi-abi-version="01.14.0"\n'):
+            with self.subTest(declaration=declaration):
+                manifest.write_text(original.replace('ffi-abi-version="0.14.0"\n', declaration))
+                result = self.command("cargo", "run", "--locked", "--quiet", success=False)
+                self.assertIn("[package.metadata.drasi] ffi-abi-version must be", result.stderr)
+
+    def test_packaged_sdk_build_reads_included_manifest_metadata(self):
+        (self.root / "src/main.rs").write_text(
+            'fn main() { println!("{}", env!("DRASI_FFI_ABI_VERSION")); }\n')
+        self.command("cargo", "package", "--locked", "--quiet", "--allow-dirty")
+        packaged = self.root / "target/package/sdk-provenance-probe-0.0.0"
+        manifest = candidate.tomllib.loads((packaged / "Cargo.toml").read_text())
+        self.assertEqual("0.14.0", manifest["package"]["metadata"]["drasi"]["ffi-abi-version"])
+        self.assertTrue((packaged / "build.rs").is_file())
+        self.assertEqual("0.14.0", self.command(
+            "cargo", "run", "--locked", "--quiet", cwd=packaged).stdout.strip())
 
 
 class WorkflowTests(unittest.TestCase):
@@ -803,6 +905,66 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual("", publish["env"]["COSIGN_REPOSITORY"])
         self.assertEqual("${{ needs.select-mode.outputs.certificate_identity }}",
                          publish["env"]["COSIGN_VERIFY_CERTIFICATE_IDENTITY"])
+
+    def test_real_and_dry_run_publication_use_trusted_tooling_and_selected_artifacts(self):
+        document = repair_tests.workflow(ROOT / ".github/workflows/publish-plugins.yml")
+        job = document["jobs"]["build-and-publish"]
+        self.assertEqual("prepared", job["defaults"]["run"]["working-directory"])
+        publication_steps = [step for step in job["steps"] if step.get("name") in (
+            "Publish plugins (per-architecture tag)", "Publish plugins (dry run)",
+        )]
+        self.assertEqual(2, len(publication_steps))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "prepared").mkdir()
+            (root / "Cargo.lock").write_text("trusted publisher lock")
+            (root / "prepared/Cargo.lock").write_text("historical candidate lock")
+            tools = root / "tools"
+            tools.mkdir()
+            cargo = tools / "cargo"
+            cargo.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os, sys\n"
+                "from pathlib import Path\n"
+                "Path(os.environ['CARGO_CALL']).write_text(json.dumps({\n"
+                "    'cwd': str(Path.cwd()), 'args': sys.argv[1:],\n"
+                "    'lock': Path('Cargo.lock').read_text(),\n"
+                "}))\n")
+            cargo.chmod(0o755)
+            for step in publication_steps:
+                self.assertEqual(".", step["working-directory"])
+                for target, suffix in candidate.TARGETS.items():
+                    with self.subTest(step=step["name"], target=target):
+                        call = root / "cargo-call.json"
+                        result = subprocess.run(
+                            ["bash", "-e", "-c", step["run"]],
+                            cwd=root / step["working-directory"],
+                            env=os.environ | {
+                                "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+                                "CARGO_CALL": str(call), "TARGET": target, "ARCH_SUFFIX": suffix,
+                                "INPUT_REGISTRY": candidate.TEST_REGISTRY,
+                                "INPUT_TAG": "nightly-123-2", "INPUT_PRE_RELEASE": "",
+                                "INPUT_SIGN": "true",
+                            }, capture_output=True, text=True, timeout=10)
+                        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                        invoked = json.loads(call.read_text())
+                        self.assertEqual(root.resolve(), Path(invoked["cwd"]).resolve())
+                        self.assertEqual("trusted publisher lock", invoked["lock"])
+                        args = invoked["args"]
+                        self.assertEqual(["run", "--locked", "-p", "xtask", "--", "publish-plugins"],
+                                         args[:6])
+                        self.assertEqual(f"prepared/target/{target}/release/plugins",
+                                         args[args.index("--plugins-dir") + 1])
+                        self.assertEqual(target, args[args.index("--target") + 1])
+                        self.assertEqual(candidate.TEST_REGISTRY, args[args.index("--registry") + 1])
+                        self.assertEqual(suffix, args[args.index("--arch-suffix") + 1])
+                        if step["name"] == "Publish plugins (dry run)":
+                            self.assertIn("--dry-run", args)
+                        else:
+                            self.assertIn("--sign", args)
+                            self.assertNotIn("--dry-run", args)
+                            self.assertEqual("prepared/publication.json",
+                                             args[args.index("--report") + 1])
 
     def test_candidate_commit_reaches_native_manylinux_and_cross_builds(self):
         document = repair_tests.workflow(ROOT / ".github/workflows/publish-plugins.yml")
