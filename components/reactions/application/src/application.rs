@@ -604,7 +604,7 @@ impl Reaction for ApplicationReaction {
                         .map_err(|e| log::warn!("Failed to observe application forwarding: {e}"))
                         .ok()
                 };
-                let mut work = (change_count > 0).then(|| telemetry.reaction_work());
+                let mut work = (change_count > 0).then(|| telemetry.reaction_acceptance_work());
                 let forward = async {
                     let permit = app_tx.reserve().await?;
                     if let Some(profiling) = &mut query_result.profiling {

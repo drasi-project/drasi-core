@@ -95,9 +95,10 @@ pub(crate) async fn run_loop(
         }
 
         let input_rows = query_result.results.iter().filter(|diff| !matches!(diff, ResultDiff::Noop)).count();
-        let processing = telemetry.reaction_input(&query_result.query_id, input_rows);
+        let processing = telemetry.reaction_input_context(&query_result.query_id, input_rows, &execution_context);
         let mut delivery_failed = false;
-        for (diff_index, diff) in query_result.results.iter().enumerate() {
+        for (ordinal, (diff_index, diff)) in query_result.results.iter().enumerate()
+            .filter(|(_, diff)| !matches!(diff, ResultDiff::Noop)).enumerate() {
             if matches!(diff, ResultDiff::Noop) {
                 continue;
             }
@@ -115,6 +116,7 @@ pub(crate) async fn run_loop(
                 &telemetry,
                 &execution_context,
                 &processing,
+                ordinal,
             )
             .await;
 
@@ -208,6 +210,7 @@ async fn process_diff(
     telemetry: &WorkerTelemetry,
     execution_context: &ExecutionContext,
     processing: &drasi_lib::observability::ReactionInput,
+    ordinal: usize,
 ) -> anyhow::Result<()> {
     let Some(diff_payload) = DiffPayload::from_result_diff(diff) else {
         return Ok(());
@@ -319,7 +322,7 @@ async fn process_diff(
                         .context("SendMessage create RPC failed")?;
                     match outcome {
                         DeliveryResult::Delivered(response) => {
-                            processing.handled(1);
+                            processing.handled_rows(&[ordinal]);
                             let next_state = response_to_activation(
                                 response,
                                 message_id.clone(),
@@ -358,7 +361,7 @@ async fn process_diff(
                         Ok(outcome) => {
                             match outcome {
                                 DeliveryResult::Delivered(response) => {
-                                    processing.handled(1);
+                                    processing.handled_rows(&[ordinal]);
                                     let next_state = match response {
                                         SendMessageResult::Message => match activation {
                                             ActivationState::Present(existing) => {
@@ -478,7 +481,7 @@ async fn process_diff(
                     {
                         Ok(outcome) => match outcome {
                             DeliveryResult::Delivered(()) => {
-                                processing.handled(1);
+                                processing.handled_rows(&[ordinal]);
                                 clear_activation_state(base, activation_cache, &state_key)
                                 .await
                                 .with_context(|| {

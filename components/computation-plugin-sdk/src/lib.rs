@@ -32,6 +32,7 @@ pub mod progress;
 pub mod telemetry_bridge;
 mod telemetry_capture;
 pub mod telemetry_transport;
+pub mod timing_transport;
 mod transaction;
 pub mod transport;
 pub mod wire;
@@ -269,6 +270,17 @@ macro_rules! export_computation_plugin {
                 Ok(export) => unsafe { export.entry(out) },
                 Err(error) => Err($crate::transport::Failure::failed(error.clone())),
             })
+        }
+        #[no_mangle]
+        pub extern "C" fn drasi_computation_plugin_telemetry_v3(
+        ) -> *const $crate::abi::telemetry::PluginTelemetryV3 {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match __drasi_computation_export() {
+                    Ok(export) => export.telemetry_v3(),
+                    Err(_) => std::ptr::null(),
+                }
+            }))
+            .unwrap_or(std::ptr::null())
         }
     };
 }

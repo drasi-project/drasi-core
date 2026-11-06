@@ -161,6 +161,7 @@ pub(crate) struct OperationFields<'a> {
     pub output_count: Option<usize>,
     pub change_count: Option<usize>,
     pub completion: Option<&'static str>,
+    pub handled_latency: bool,
     pub publication_mode: Option<&'static str>,
     pub queue_id: Option<&'a str>,
     pub handling_outcome: Option<&'static str>,
@@ -191,6 +192,7 @@ pub(crate) struct ComponentObservations {
     state: Mutex<BindingState>,
     pub(super) lifetime: super::TelemetryLifetime,
     pub(super) plugins: Mutex<BTreeMap<String, super::PluginTelemetry>>,
+    pub(super) handled_histograms: Mutex<BTreeMap<Arc<str>, Histogram>>,
 }
 
 #[derive(Debug)]
@@ -350,11 +352,16 @@ impl ComponentObservations {
             state: Mutex::new(BindingState { up }),
             lifetime: super::TelemetryLifetime::default(),
             plugins: Mutex::new(BTreeMap::new()),
+            handled_histograms: Mutex::new(BTreeMap::new()),
         }))
     }
 
     pub(crate) fn current() -> Option<Arc<Self>> {
         CURRENT.with(|current| current.borrow().clone())
+    }
+
+    pub(crate) fn telemetry(&self) -> &GraphTelemetry {
+        &self.config
     }
 
     pub(crate) fn current_or_disabled() -> Arc<Self> {
@@ -752,8 +759,8 @@ impl ComponentObservations {
                 adapter.prepare_operation(&span, parent, links, self.config.policy().sampling())?;
                 let operation_context = adapter.span_context(&span);
                 // Another layer can enable a span filtered out of the trace layer.
-                if !operation_context.is_empty() {
-                    context = operation_context;
+                if operation_context.trace().is_some() {
+                    context = context.with_trace_from(&operation_context);
                 }
             }
         }
@@ -773,12 +780,23 @@ impl ComponentObservations {
         let mut scope = ExecutionScope::capture()
             .with_context(context)
             .with_adapter(self.config.context_adapter().cloned());
+        if self.config.handled_branch_tracker().is_some() {
+            scope = scope.with_timing_lifetime(Some(self.lifetime.clone()));
+        }
         if ExecutionScope::current_component().is_none() {
             if let Some(identity) = self.config.scope() {
                 scope = scope.with_component(identity.clone(), self.generation);
             }
         }
         Ok(OperationObservation {
+            handled_branch: if operation == ObservedOperation::Handle
+                && fields.completion == Some("handled")
+                && fields.handled_latency
+            {
+                self.handled_branch(scope.context())
+            } else {
+                None
+            },
             owner: self.clone(),
             operation,
             span,
@@ -794,6 +812,7 @@ impl ComponentObservations {
 }
 
 pub(crate) struct OperationObservation {
+    handled_branch: Option<super::handled_branch::HandledBranchObservation>,
     owner: Arc<ComponentObservations>,
     operation: ObservedOperation,
     span: Span,
@@ -899,6 +918,11 @@ impl OperationObservation {
             .owner
             .scope(self.scope.scope(future.instrument(self.span.clone())))
             .await;
+        if result.is_ok() {
+            if let Some(branch) = &self.handled_branch {
+                branch.finish(None);
+            }
+        }
         self.finish(if result.is_ok() { 0 } else { 1 });
         result
     }
@@ -1100,6 +1124,77 @@ mod tests {
     use super::*;
     use crate::observability::{TelemetryOptions, TelemetryProfile, TelemetrySettings};
     use drasi_computation_contracts::{ComponentId, ComponentSemanticKind};
+
+    #[test]
+    fn operation_span_replacement_preserves_the_original_timing_lease() {
+        use crate::observability::{
+            HandledBranchTracker, TraceContextAdapter, TraceContextGuard, TraceContextV1,
+        };
+
+        fn context(id: u8) -> ExecutionContext {
+            ExecutionContext::new(TraceContextV1::new([id; 16], [id; 8], 0, None).unwrap())
+        }
+
+        #[derive(Debug)]
+        struct Adapter;
+        struct Guard;
+        impl TraceContextGuard for Guard {}
+        impl TraceContextAdapter for Adapter {
+            fn enter(&self, _: &ExecutionContext) -> Box<dyn TraceContextGuard> {
+                Box::new(Guard)
+            }
+            fn current_context(&self) -> ExecutionContext {
+                context(2)
+            }
+            fn span_context(&self, _: &Span) -> ExecutionContext {
+                context(2)
+            }
+            fn set_parent(&self, _: &Span, _: &ExecutionContext) -> super::super::Result<()> {
+                Ok(())
+            }
+            fn add_link(&self, _: &Span, _: &TraceContextV1) -> super::super::Result<()> {
+                Ok(())
+            }
+        }
+
+        for enabled in [false, true] {
+            tracing::subscriber::with_default(tracing_subscriber::registry(), || {
+                let tracker = HandledBranchTracker::new(Default::default()).unwrap();
+                let parent = context(1).with_handled_branch(tracker.start().unwrap());
+                let token = parent.handled_branch().unwrap().token();
+                let graph = TelemetryOptions::new(
+                    TelemetrySettings::new(TelemetryProfile::Basic)
+                        .with_metrics(false)
+                        .with_tracing(enabled),
+                )
+                .with_instance_id("instance")
+                .with_context_adapter(Arc::new(Adapter))
+                .resolve("graph", None)
+                .unwrap();
+                let owner = graph
+                    .observations(
+                        ComponentId::try_new("source").unwrap(),
+                        ComponentRole::Source,
+                        ComponentSemanticKind::Source,
+                        1,
+                    )
+                    .unwrap();
+                let observation = owner
+                    .begin(ObservedOperation::Publish, &parent, Default::default())
+                    .unwrap();
+                assert_eq!(
+                    observation.context().trace(),
+                    context(if enabled { 2 } else { 1 }).trace()
+                );
+                assert_eq!(
+                    observation.context().handled_branch().unwrap().token(),
+                    token
+                );
+                drop((observation, parent));
+                assert_eq!(tracker.diagnostics().unwrap().records, 0);
+            });
+        }
+    }
 
     #[test]
     fn query_hooks_stay_unbound_when_detail_collection_is_disabled() {

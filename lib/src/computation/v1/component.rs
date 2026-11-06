@@ -239,6 +239,13 @@ pub trait Transformer: ComputationComponent {
 /// A consumer beside legacy Reaction. Its descriptor has input ports only.
 #[async_trait]
 pub trait EnvelopeSink: ComputationComponent {
+    /// Administrative/forwarding outlets can complete their local contract
+    /// without performing terminal effect work. Their success must not produce
+    /// source-to-handled latency or be mistaken for the downstream worker.
+    fn observes_handled_branch_latency(&self) -> bool {
+        true
+    }
+
     /// Read only at an operation boundary. The graph owns bounded collection,
     /// timers and delivery receipts; no success is reported merely for buffering.
     fn batching(&self) -> anyhow::Result<Option<SinkBatching>> {

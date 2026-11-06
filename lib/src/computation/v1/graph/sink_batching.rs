@@ -265,6 +265,17 @@ impl SinkBatchState {
                     .map(|(_, input)| input.input.clone())
                     .collect();
                 if !batch.is_empty() {
+                    let handling =
+                        if sink.completion() == SinkCompletion::Handled
+                            && sink.observes_handled_branch_latency()
+                        {
+                            batch.iter().filter_map(|input| {
+                            crate::observability::ComponentObservations::current_or_disabled()
+                                .handled_branch(&input.execution_context)
+                        }).collect::<Vec<_>>()
+                        } else {
+                            Vec::new()
+                        };
                     let observation =
                         crate::observability::ComponentObservations::current_or_disabled()
                             .batch(
@@ -298,6 +309,9 @@ impl SinkBatchState {
                         .run(sink.handle_batch(batch))
                         .await
                         .map_err(|error| component_error(node, "handle batch", error))?;
+                    for branch in handling {
+                        branch.finish(None);
+                    }
                 }
             } else if is_new(0) {
                 let observation = observe(
@@ -308,6 +322,7 @@ impl SinkBatchState {
                         input_port: Some(first.input.port.as_str()),
                         input_count: Some(1),
                         change_count: Some(first.input.envelope.changes().operations().len()),
+                        handled_latency: sink.observes_handled_branch_latency(),
                         completion: Some(if sink.completion() == SinkCompletion::Handled {
                             "handled"
                         } else {
@@ -328,6 +343,7 @@ impl SinkBatchState {
             }
             self.completed = count;
             self.acknowledge().await?;
+            self.completion_context = self.completion_context.clone().without_handled_branch();
         }
         self.flushing = false;
         self.deadline = None;

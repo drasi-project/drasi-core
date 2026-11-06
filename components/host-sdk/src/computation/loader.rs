@@ -50,6 +50,7 @@ impl NativePlugin {
                 || Some(exported.output_follow()),
                 || Some(exported.telemetry()),
                 || Some(exported.telemetry_v2()),
+                || Some(exported.telemetry_v3()),
             )
         }
     }
@@ -357,6 +358,7 @@ impl NativePlugin {
                 || None,
                 || None,
                 || None,
+                || None,
             )
         }
     }
@@ -388,10 +390,12 @@ impl NativePlugin {
         output_follow: impl FnOnce() -> Option<*const abi::output_follow::PluginOutputFollowV1>,
         telemetry: impl FnOnce() -> Option<*const abi::telemetry::PluginTelemetryV1>,
         telemetry_v2: impl FnOnce() -> Option<*const abi::telemetry::PluginTelemetryV2>,
+        telemetry_v3: impl FnOnce() -> Option<*const abi::telemetry::PluginTelemetryV3>,
     ) -> anyhow::Result<Arc<Self>> {
         let manifest = unsafe { read_metadata(metadata())? };
         let telemetry = unsafe { read_telemetry(telemetry())? };
         let telemetry_v2 = unsafe { read_telemetry_v2(telemetry_v2())? };
+        let telemetry_v3 = unsafe { read_telemetry_v3(telemetry_v3())? };
         let telemetry = telemetry.or_else(|| {
             telemetry_v2.map(|extension| abi::telemetry::PluginTelemetryV1 {
                 header: abi::Header::new::<abi::telemetry::PluginTelemetryV1>(),
@@ -580,6 +584,7 @@ impl NativePlugin {
                 )?
                 .with_telemetry(telemetry)
                 .with_telemetry_v2(telemetry_v2)
+                .with_telemetry_v3(telemetry_v3)
                 .with_activation_credentials(activation_credentials)?
                 .with_consumer(consumer_binding)?
                 .with_consumer_progress(consumer_progress)?
@@ -737,6 +742,10 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
         unsafe { library.get::<abi::telemetry::TelemetryFnV2>(abi::telemetry::SYMBOL_V2) }
             .ok()
             .map(|symbol| *symbol);
+    let telemetry_v3 =
+        unsafe { library.get::<abi::telemetry::TelemetryFnV3>(abi::telemetry::SYMBOL_V3) }
+            .ok()
+            .map(|symbol| *symbol);
     if metadata.is_none()
         && entry.is_none()
         && services.is_none()
@@ -754,6 +763,7 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
         && output_follow.is_none()
         && telemetry.is_none()
         && telemetry_v2.is_none()
+        && telemetry_v3.is_none()
     {
         return Ok(None);
     }
@@ -784,6 +794,7 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
             || output_follow.map(|entry| entry()),
             || telemetry.map(|entry| entry()),
             || telemetry_v2.map(|entry| entry()),
+            || telemetry_v3.map(|entry| entry()),
         )?
     }))
 }
@@ -801,6 +812,23 @@ unsafe fn read_metadata(metadata: *const abi::Metadata) -> anyhow::Result<Plugin
     .context("invalid native computation plugin metadata")?;
     manifest.validate()?;
     Ok(manifest)
+}
+
+unsafe fn read_telemetry_v3(
+    table: Option<*const abi::telemetry::PluginTelemetryV3>,
+) -> anyhow::Result<Option<abi::telemetry::PluginTelemetryV3>> {
+    let Some(table) = table else {
+        return Ok(None);
+    };
+    let table = unsafe { checked_table(table)? };
+    anyhow::ensure!(
+        table.version == abi::telemetry::VERSION_V3
+            && table.capabilities == (abi::telemetry::CONTEXT | abi::telemetry::HANDLED_TIMING)
+            && table.reserved == 0
+            && table.begin.is_some(),
+        "invalid telemetry V3 extension"
+    );
+    Ok(Some(*table))
 }
 
 unsafe fn read_configuration(
@@ -1274,6 +1302,10 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
         unsafe { library.get::<abi::telemetry::TelemetryFnV2>(abi::telemetry::SYMBOL_V2) }
             .ok()
             .map(|symbol| *symbol);
+    let telemetry_v3 =
+        unsafe { library.get::<abi::telemetry::TelemetryFnV3>(abi::telemetry::SYMBOL_V3) }
+            .ok()
+            .map(|symbol| *symbol);
     if metadata.is_none()
         && !has_entry
         && activation_credentials.is_none()
@@ -1291,6 +1323,7 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
         && output_follow.is_none()
         && telemetry.is_none()
         && telemetry_v2.is_none()
+        && telemetry_v3.is_none()
     {
         return Ok(None);
     }
@@ -1302,6 +1335,7 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
     unsafe { read_services(services.map(|entry| entry()))? };
     unsafe { read_telemetry(telemetry.map(|entry| entry()))? };
     unsafe { read_telemetry_v2(telemetry_v2.map(|entry| entry()))? };
+    unsafe { read_telemetry_v3(telemetry_v3.map(|entry| entry()))? };
     unsafe { read_activation_credentials(activation_credentials.map(|entry| entry()))? };
     unsafe { read_recovery(recovery.map(|entry| entry()))? };
     unsafe { read_consumer(consumer.map(|entry| entry()))? };

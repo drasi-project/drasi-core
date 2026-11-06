@@ -152,7 +152,7 @@ pub const METRICS: &[MetricDefinition] = &[
     metric!("drasi.reaction.dedup_skips", Counter, One, Persistence, true, ["reaction_id", "query_id"], "reaction dedup owner", "Actual skipped result envelopes, once at the deciding adapter or worker"),
     metric!("drasi.reaction.gaps_detected", Counter, One, Persistence, true, ["reaction_id", "query_id"], "reaction recovery owner", "Actual gap detections, not coalesced inspection reports"),
     metric!("drasi.reaction.recovery_triggers", Counter, One, Persistence, true, ["reaction_id", "query_id", "policy"], "reaction recovery owner", "Actual recovery-policy invocations, not reset completions"),
-    metric!("drasi.pipeline.end_to_end.duration", Histogram, Seconds, Deferred, true, ["query_id", "phase"], "future handled-branch timing owner", "Reserved and never emitted until validated source-to-handled-sink timing exists"),
+    metric!("drasi.pipeline.end_to_end.duration", Histogram, Seconds, Deferred, true, ["query_id", "phase"], "host handled-branch timing owner", "Explicit opt-in; successful fully handled query-output envelope per sink from a valid live source origin; not graph-wide completion"),
 ];
 
 pub fn metric_definition(name: &str) -> Option<&'static MetricDefinition> {

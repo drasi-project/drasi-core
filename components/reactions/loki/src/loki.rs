@@ -593,7 +593,7 @@ impl Reaction for LokiReaction {
 
                 let observation = telemetry.reaction(&query_result_arc.execution_context, total_values)
                     .map_err(|e| warn!("Failed to observe Loki push: {e}")).ok();
-                let mut work = telemetry.reaction_work();
+                let mut work = telemetry.reaction_work_context(&query_result_arc.execution_context);
                 let push = Self::push_to_loki(
                     &client,
                     &endpoint,

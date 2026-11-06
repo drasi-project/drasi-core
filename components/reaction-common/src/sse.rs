@@ -182,8 +182,22 @@ impl SseRenderer {
         &self,
         result: &QueryResult,
         timestamp: i64,
-        mut report_error: impl FnMut(String),
+        report_error: impl FnMut(String),
     ) -> Vec<SseEvent> {
+        self.render_with_completion(result, timestamp, report_error)
+            .into_iter()
+            .map(|(event, _)| event)
+            .collect()
+    }
+
+    /// `None` carries the whole envelope; `Some` is a stable ordinal in its
+    /// original non-Noop row set. Missing templates do not renumber later rows.
+    pub fn render_with_completion(
+        &self,
+        result: &QueryResult,
+        timestamp: i64,
+        mut report_error: impl FnMut(String),
+    ) -> Vec<(SseEvent, Option<usize>)> {
         let config = self
             .routes
             .get(&result.query_id)
@@ -195,13 +209,21 @@ impl SseRenderer {
             })
             .or(self.default_template.as_ref());
         let Some(config) = config else {
-            return vec![SseEvent {
-                path: self.base_path.clone(),
-                payload: default_payload(result, timestamp).to_string(),
-            }];
+            return vec![(
+                SseEvent {
+                    path: self.base_path.clone(),
+                    payload: default_payload(result, timestamp).to_string(),
+                },
+                None,
+            )];
         };
         let mut events = Vec::new();
-        for change in &result.results {
+        for (ordinal, change) in result
+            .results
+            .iter()
+            .filter(|change| !matches!(change, ResultDiff::Noop))
+            .enumerate()
+        {
             let (spec, operation) = match change {
                 ResultDiff::Add { .. } => (config.added.as_ref(), "ADD"),
                 ResultDiff::Update { .. } => (config.updated.as_ref(), "UPDATE"),
@@ -284,7 +306,7 @@ impl SseRenderer {
                         default()
                     })
             };
-            events.push(SseEvent { path, payload });
+            events.push((SseEvent { path, payload }, Some(ordinal)));
         }
         events
     }

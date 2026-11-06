@@ -138,6 +138,8 @@ fn valid_trace_state_key(key: &str) -> bool {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExecutionContext {
     trace: Option<Arc<TraceContextV1>>,
+    handled_branch: Option<super::HandledBranchContext>,
+    handled_output: Option<Arc<super::HandledBranchOutput>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -151,6 +153,8 @@ impl ExecutionContext {
     pub fn new(trace: TraceContextV1) -> Self {
         Self {
             trace: Some(Arc::new(trace)),
+            handled_branch: None,
+            handled_output: None,
         }
     }
 
@@ -159,11 +163,49 @@ impl ExecutionContext {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.trace.is_none()
+        self.trace.is_none() && self.handled_branch.is_none()
+    }
+
+    pub fn handled_branch(&self) -> Option<&super::HandledBranchContext> {
+        self.handled_branch.as_ref()
+    }
+
+    pub fn handled_output(&self) -> Option<&super::HandledBranchOutput> {
+        self.handled_output.as_deref()
+    }
+
+    pub fn with_handled_output(mut self, output: super::HandledBranchOutput) -> Self {
+        self.handled_output = Some(Arc::new(output));
+        self
+    }
+
+    pub fn with_handled_branch(mut self, context: super::HandledBranchContext) -> Self {
+        self.handled_branch = Some(context);
+        self.handled_output = None;
+        self
+    }
+
+    /// Select a new span identity without replacing the input's timing owner.
+    pub fn with_trace_from(mut self, context: &Self) -> Self {
+        self.trace = context.trace.clone();
+        self
+    }
+
+    /// Only for an explicitly unsupported propagation boundary. The caller must
+    /// diagnose coverage loss and prevent ambient timing inheritance on receipt.
+    pub fn without_handled_branch(mut self) -> Self {
+        self.handled_branch = None;
+        self.handled_output = None;
+        self
     }
 
     /// Explicit transport encoding; this is not an event or persistence codec.
     pub fn encode(&self) -> Result<Vec<u8>> {
+        if self.handled_branch.is_some() {
+            return Err(TelemetryError::Unsupported(
+                "handled-branch context in trace-only V1 transport",
+            ));
+        }
         crate::encode_bounded_messagepack(
             &ExecutionContextRecord {
                 version: 1,
@@ -183,6 +225,8 @@ impl ExecutionContext {
         }
         Ok(Self {
             trace: record.trace.map(Arc::new),
+            handled_branch: None,
+            handled_output: None,
         })
     }
 
@@ -190,6 +234,8 @@ impl ExecutionContext {
     pub fn transport_size(&self) -> usize {
         if self.is_empty() {
             0
+        } else if self.handled_branch.is_some() {
+            4096 + 32
         } else {
             MAX_EXECUTION_CONTEXT_BYTES + 32
         }

@@ -73,6 +73,7 @@ struct Binding {
     opening: bool,
     requests: Option<mpsc::Sender<Request>>,
     failure: Option<ActivationFailure>,
+    telemetry: Option<crate::observability::GraphTelemetry>,
 }
 
 enum ActivationFailure {
@@ -238,6 +239,16 @@ impl SourceAdmission {
         sequence: u64,
         input: &EnvelopeMessage,
     ) -> Result<AdmissionReceipt, PipeError> {
+        let telemetry = self
+            .binding
+            .lock()
+            .map_err(|_| backend("source admission binding poisoned"))?
+            .telemetry
+            .clone();
+        let context = match telemetry {
+            Some(telemetry) => telemetry.source_timing(&input.execution_context, &input.envelope),
+            None => input.execution_context.clone(),
+        };
         self.submit(
             |reply| {
                 self.channel
@@ -249,7 +260,7 @@ impl SourceAdmission {
                 Ok(Request::Admit {
                     session: session.clone(),
                     sequence,
-                    input: input.clone(),
+                    input: EnvelopeMessage::new(input.envelope.clone(), context),
                     operation_context: ExecutionContext::current(),
                     reply,
                 })
@@ -382,6 +393,8 @@ impl SourceAdmission {
             .map_err(|_| backend("QoS channel already has a graph admission owner"))?;
         let (send, receive) = mpsc::channel(PENDING_REQUESTS);
         binding.requests = Some(send);
+        binding.telemetry = crate::observability::ComponentObservations::current()
+            .map(|owner| owner.telemetry().clone());
         self.activation_changed.notify_waiters();
         Ok(AdmissionLease {
             service: self.clone(),
@@ -397,6 +410,7 @@ impl SourceAdmission {
         });
         if binding.generation == generation {
             binding.requests.take();
+            binding.telemetry.take();
             binding.opening = false;
             self.activation_changed.notify_waiters();
         }

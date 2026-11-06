@@ -228,6 +228,7 @@ struct State {
     metadata: Metadata,
     entries: BTreeMap<u64, ChangeEnvelope>,
     contexts: BTreeMap<u64, ExecutionContext>,
+    timing_floor: Option<u64>,
     oldest: Option<u64>,
     retained: usize,
     source_position: Option<Bytes>,
@@ -251,6 +252,28 @@ impl State {
 
     fn publish_metadata(&mut self, metadata: Metadata) {
         self.metadata = metadata;
+        if let Some(floor) = self.timing_floor {
+            let completed = self
+                .metadata
+                .cursors
+                .values()
+                .filter(|cursor| !cursor.retired)
+                .map(|cursor| cursor.position)
+                .min()
+                .unwrap_or(self.metadata.head);
+            if completed >= floor {
+                for (_, context) in self.contexts.range_mut(floor..=completed) {
+                    *context = context.clone().without_handled_branch();
+                }
+                self.timing_floor = self
+                    .contexts
+                    .range((
+                        std::ops::Bound::Excluded(completed),
+                        std::ops::Bound::Unbounded,
+                    ))
+                    .find_map(|(position, context)| context.handled_branch().map(|_| *position));
+            }
+        }
         self.observations.set_depth(self.pending_depth());
     }
     fn prepare_append(
@@ -343,6 +366,12 @@ impl State {
         } = message;
         self.contexts.retain(|position, _| *position >= retain_from);
         if !execution_context.is_empty() {
+            if execution_context.handled_branch().is_some() {
+                self.timing_floor = Some(
+                    self.timing_floor
+                        .map_or(position, |floor| floor.min(position)),
+                );
+            }
             self.contexts.insert(position, execution_context);
         }
         self.source_position = envelope.system().source_position().cloned();
@@ -510,6 +539,7 @@ impl QosChannel {
             state: Mutex::new(State {
                 observations,
                 contexts: BTreeMap::new(),
+                timing_floor: None,
                 metadata,
                 entries: BTreeMap::new(),
                 oldest: None,
@@ -1006,6 +1036,7 @@ impl QosChannel {
             state: Mutex::new(State {
                 observations: observations.clone(),
                 contexts: BTreeMap::new(),
+                timing_floor: None,
                 metadata,
                 entries,
                 oldest,
@@ -1546,6 +1577,7 @@ impl ResourceCleanup for QosChannel {
             store.transaction.shutdown().await?;
         }
         state.contexts.clear();
+        state.timing_floor = None;
         self.persistent
             .lock()
             .map_err(|_| backend("QoS storage poisoned"))?

@@ -128,6 +128,15 @@ async fn ready(drasi: &DrasiLib, status: ComponentStatus) {
 }
 
 async fn blocked_worker(instance: &str, fail_checkpoint: bool, fail_effect: bool) {
+    blocked_worker_with_timing(instance, fail_checkpoint, fail_effect, false).await;
+}
+
+async fn blocked_worker_with_timing(
+    instance: &str,
+    fail_checkpoint: bool,
+    fail_effect: bool,
+    timing: bool,
+) {
     let metrics = RecordingMetrics::default();
     let (source, input) = ApplicationSource::new(
         "source",
@@ -143,19 +152,17 @@ async fn blocked_worker(instance: &str, fail_checkpoint: bool, fail_effect: bool
         inner: MemoryStateStoreProvider::new(),
         fail: AtomicBool::new(false),
     });
+    let mut settings = TelemetrySettings::new(TelemetryProfile::Persistence)
+        .with_tracing(false)
+        .with_sampling(RootSampling::Never);
+    if timing {
+        settings = settings.with_handled_branch_latency(Default::default());
+    }
     let drasi = DrasiLib::builder()
         .with_id(instance)
-        .with_telemetry(
-            TelemetryOptions::new(
-                TelemetrySettings::new(TelemetryProfile::Persistence)
-                    .with_tracing(false)
-                    .with_sampling(RootSampling::Never),
-            )
-            .with_metric_context(
-                MetricRegistrationContext::new(Arc::new(metrics.clone()), Default::default())
-                    .unwrap(),
-            ),
-        )
+        .with_telemetry(TelemetryOptions::new(settings).with_metric_context(
+            MetricRegistrationContext::new(Arc::new(metrics.clone()), Default::default()).unwrap(),
+        ))
         .with_state_store_provider(store.clone())
         .with_source(source)
         .with_query(
@@ -197,6 +204,9 @@ async fn blocked_worker(instance: &str, fail_checkpoint: bool, fail_effect: bool
         })
         .await;
     assert_eq!(metrics.count("drasi.reaction.results_processed", &[]), 0);
+    assert!(metrics
+        .histogram("drasi.pipeline.end_to_end.duration", &[])
+        .is_empty());
     metrics
         .wait_for(|| {
             metrics
@@ -213,6 +223,12 @@ async fn blocked_worker(instance: &str, fail_checkpoint: bool, fail_effect: bool
         assert_eq!(
             metrics.count("drasi.reaction.results_processed", &[]),
             u64::from(!fail_effect)
+        );
+        assert_eq!(
+            metrics
+                .histogram("drasi.pipeline.end_to_end.duration", &[])
+                .len(),
+            usize::from(timing && !fail_effect)
         );
         assert_eq!(
             metrics
@@ -263,10 +279,31 @@ async fn blocked_worker(instance: &str, fail_checkpoint: bool, fail_effect: bool
             .len(),
         2
     );
-    assert!(metrics
-        .matching("drasi.pipeline.end_to_end.duration", &[])
-        .is_empty());
+    if timing {
+        metrics
+            .wait_for(|| {
+                metrics
+                    .histogram("drasi.pipeline.end_to_end.duration", &[])
+                    .len()
+                    == 2
+            })
+            .await;
+    } else {
+        assert!(metrics
+            .matching("drasi.pipeline.end_to_end.duration", &[])
+            .is_empty());
+    }
     drasi.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn handled_latency_counts_worker_completion_not_queue_acceptance() {
+    blocked_worker_with_timing("worker-latency", false, false, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handled_latency_survives_checkpoint_failure_after_real_effects() {
+    blocked_worker_with_timing("worker-latency-checkpoint", true, false, true).await;
 }
 
 #[tokio::test(flavor = "current_thread")]

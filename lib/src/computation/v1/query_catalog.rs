@@ -519,6 +519,9 @@ impl ComputationComponent for QueryResultsOutlet {
 }
 #[async_trait::async_trait]
 impl EnvelopeSink for QueryResultsOutlet {
+    fn observes_handled_branch_latency(&self) -> bool {
+        false
+    }
     fn completion(&self) -> SinkCompletion {
         SinkCompletion::Handled
     }

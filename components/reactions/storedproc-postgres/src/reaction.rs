@@ -182,7 +182,7 @@ impl PostgresStoredProcReaction {
             }
             let observation = telemetry.reaction(&query_result_arc.execution_context, change_count)
                 .map_err(|e| log::warn!("Failed to observe PostgreSQL processing: {e}")).ok();
-            let mut work = telemetry.reaction_work();
+            let mut work = telemetry.reaction_work_context(&query_result_arc.execution_context);
             let process = async {
             let mut failure = None;
             let mut handled = 0;

@@ -51,7 +51,7 @@ enum FlushControl {
     Stop,
 }
 
-type PendingInputs = HashMap<u64, (ExecutionContext, ReactionInput, usize)>;
+type PendingInputs = HashMap<u64, (ExecutionContext, ReactionInput, Vec<usize>)>;
 
 pub(crate) async fn run(params: FixedRunnerParams) {
     let telemetry = params.base.worker_telemetry().await;
@@ -164,8 +164,9 @@ pub(crate) async fn run(params: FixedRunnerParams) {
 
         // Build all items first so the last one can be flagged terminal; the
         // checkpoint only advances once a result's terminal item is acked.
-        let mut built_items: Vec<(BatchKey, crate::proto::ProtoQueryResultItem)> = Vec::new();
-        for result in &query_result.results {
+        let mut built_items: Vec<(BatchKey, crate::proto::ProtoQueryResultItem, usize)> = Vec::new();
+        for (ordinal, result) in query_result.results.iter()
+            .filter(|result| !matches!(result, drasi_lib::channels::ResultDiff::Noop)).enumerate() {
             if matches!(result, drasi_lib::channels::ResultDiff::Noop) {
                 debug!("[{reaction_name}] Ignoring noop result");
                 continue;
@@ -177,14 +178,14 @@ pub(crate) async fn run(params: FixedRunnerParams) {
             };
             let effective_metadata = merge_metadata(&base_metadata, &built.request_metadata);
             let key = BatchKey::new(query_id.clone(), effective_metadata);
-            built_items.push((key, built.item));
+            built_items.push((key, built.item, ordinal));
         }
 
         let last_idx = built_items.len().saturating_sub(1);
         let input_rows = query_result.results.iter()
             .filter(|diff| !matches!(diff, drasi_lib::channels::ResultDiff::Noop)).count();
-        let processing = telemetry.reaction_input(&query_id, input_rows);
-        for (i, (key, item)) in built_items.into_iter().enumerate() {
+        let processing = telemetry.reaction_input_context(&query_id, input_rows, &execution_context);
+        for (i, (key, item, ordinal)) in built_items.into_iter().enumerate() {
             let is_terminal = i == last_idx;
 
             if pending
@@ -220,7 +221,7 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                 None => pending = Some(PendingBatch::new(key, item, is_terminal)),
             }
             pending_contexts.entry(input_id)
-                .or_insert_with(|| (execution_context.clone(), processing.clone(), 0)).2 += 1;
+                .or_insert_with(|| (execution_context.clone(), processing.clone(), Vec::new())).2.push(ordinal);
 
             if pending
                 .as_ref()
@@ -381,7 +382,7 @@ async fn flush_pending(
         // cannot grow `pending` without bound.
         if sent {
             for (_, input, rows) in pending_contexts.values() {
-                input.handled(*rows);
+                input.handled_rows(rows);
             }
         }
         work.finish(sent);

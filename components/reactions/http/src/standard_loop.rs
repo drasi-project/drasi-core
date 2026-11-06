@@ -75,13 +75,14 @@ pub(crate) async fn run_standard_loop(
             telemetry.reaction(&query_result_arc.execution_context, change_count)
                 .map_err(|e| warn!("Failed to observe HTTP processing: {e}")).ok()
         };
-        let input = telemetry.reaction_input(query_name, change_count);
+        let input = telemetry.reaction_input_context(query_name, change_count, &query_result_arc.execution_context);
         let mut work = (change_count > 0).then(|| telemetry.reaction_work());
         let mut stop = false;
         let process = async {
         let mut delivery_failed = false;
         let mut dropped = false;
-        for result in &query_result.results {
+        for (ordinal, result) in query_result.results.iter()
+            .filter(|result| !matches!(result, drasi_lib::channels::ResultDiff::Noop)).enumerate() {
             let notification = match DefaultChangeNotification::from_diff(query_result, result) {
                 Some(n) => n,
                 // Noop variant: no notification, drop silently.
@@ -117,7 +118,7 @@ pub(crate) async fn run_standard_loop(
             };
 
             match outcome {
-                Ok(DeliveryOutcome::Delivered) => input.handled(1),
+                Ok(DeliveryOutcome::Delivered) => input.handled_rows(&[ordinal]),
                 Ok(DeliveryOutcome::Dropped) => dropped = true,
                 Err(e) => {
                     error!("[{reaction_name}] Failed to process result: {e}");

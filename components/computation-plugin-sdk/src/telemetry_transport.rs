@@ -25,7 +25,10 @@ struct Creation {
 pub fn encode_creation(request: &[u8]) -> anyhow::Result<Vec<u8>> {
     let component = ExecutionScope::current_component();
     let frame = Creation {
-        execution_context: ExecutionContext::current().encode()?.into(),
+        execution_context: ExecutionContext::current()
+            .without_handled_branch()
+            .encode()?
+            .into(),
         semantic_kind: component.and_then(|component| component.identity.semantic_kind()),
         request: request.to_vec().into(),
     };
@@ -255,6 +258,9 @@ pub fn encode_reply(
     outputs: &[ExecutionContext],
     contextual: bool,
 ) -> anyhow::Result<Vec<u8>> {
+    if let Some(transport) = ExecutionScope::current_timing_transport() {
+        return crate::timing_transport::encode_reply(payload, outputs, transport.as_ref());
+    }
     if !contextual {
         anyhow::ensure!(
             outputs.iter().all(ExecutionContext::is_empty),
@@ -305,11 +311,12 @@ pub(crate) fn export_operation(
     let scope = scope
         .or_else(|| ExecutionScope::current_plugin_telemetry().map(|_| ExecutionScope::capture()));
     match scope {
-        Some(scope) => crate::transport::export_component_operation(
+        Some(scope) => crate::transport::export_timing_operation(
             scope.scope(future),
             runtime,
             damaged,
             cleanup,
+            ExecutionScope::current_timing_transport(),
         ),
         None => crate::transport::export_component_operation(future, runtime, damaged, cleanup),
     }

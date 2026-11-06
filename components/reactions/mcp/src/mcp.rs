@@ -541,11 +541,12 @@ impl Reaction for McpReaction {
                     telemetry.reaction(&query_result_context, change_count)
                         .map_err(|e| warn!("Failed to observe MCP processing: {e}")).ok()
                 };
-                let processing = telemetry.reaction_input(&query_id, change_count);
+                let processing = telemetry.reaction_input_context(&query_id, change_count, &query_result_context);
                 let mut work = (change_count > 0).then(|| telemetry.reaction_work());
                 let process = async {
                 let mut failed = false;
-                for diff in &query_result.results {
+                for (ordinal, diff) in query_result.results.iter()
+                    .filter(|diff| !matches!(diff, ResultDiff::Noop)).enumerate() {
                     apply_diff(&query_id, diff, &processing_state.current_results).await;
 
                     let (template, operation) = match diff {
@@ -568,7 +569,7 @@ impl Reaction for McpReaction {
                         Some(t) => t,
                         None => {
                             if !matches!(diff, ResultDiff::Noop) {
-                                processing.handled(1);
+                                processing.handled_rows(&[ordinal]);
                             }
                             continue;
                         },
@@ -658,7 +659,7 @@ impl Reaction for McpReaction {
                         debug!(
                             "[{reaction_id}] No subscribers for {uri}, skipping {operation} notification"
                         );
-                        processing.handled(1);
+                        processing.handled_rows(&[ordinal]);
                         continue;
                     }
 
@@ -693,7 +694,7 @@ impl Reaction for McpReaction {
                         processing_state.cleanup_session(&session_id).await;
                     }
                     if delivered {
-                        processing.handled(1);
+                        processing.handled_rows(&[ordinal]);
                     }
                 }
                 if let Some(work) = &mut work {

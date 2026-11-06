@@ -49,6 +49,7 @@ pub(crate) struct BatchItem {
     // Sequence IDs can repeat on replay; this identifies the dequeued input.
     pub input_id: u64,
     pub processing: drasi_lib::observability::ReactionInput,
+    pub ordinal: usize,
 }
 
 /// Run forwarding and batching concurrently inside the owned processor.
@@ -117,7 +118,7 @@ pub(crate) async fn run_adaptive_loop(
                         .or_insert(item.execution_context);
                     meta.push((item.query_id, item.sequence, item.is_terminal));
                     payloads.push(item.payload);
-                    inputs.push(item.processing);
+                    inputs.push((item.processing, item.ordinal));
                 }
                 let (completed, seen) = batch_checkpoint_candidates(meta);
 
@@ -128,8 +129,8 @@ pub(crate) async fn run_adaptive_loop(
                 let outcome = deliver_batch(&client, &config, &reaction_name, payloads).await;
                 let failed = !matches!(&outcome, Ok(DeliveryOutcome::Delivered));
                 if !failed {
-                    for input in inputs {
-                        input.handled(1);
+                    for (input, ordinal) in inputs {
+                        input.handled_rows(&[ordinal]);
                     }
                 }
                 work.finish(!failed);
@@ -252,7 +253,7 @@ pub(crate) async fn run_adaptive_loop(
                 .filter_map(|d| DefaultChangeNotification::from_diff(query_result, d))
                 .collect();
             let last_idx = notifications.len().saturating_sub(1);
-            let processing = telemetry.reaction_input(query_id, notifications.len());
+            let processing = telemetry.reaction_input_context(query_id, notifications.len(), &query_result_arc.execution_context);
 
             let mut batcher_closed = false;
             for (i, notification) in notifications.iter().enumerate() {
@@ -265,6 +266,7 @@ pub(crate) async fn run_adaptive_loop(
                     execution_context: query_result_arc.execution_context.clone(),
                     input_id,
                     processing: processing.clone(),
+                    ordinal: i,
                 };
                 if batch_tx.send(item).await.is_err() {
                     error!("[{reaction_name}] Failed to send to batch channel — batcher exited");

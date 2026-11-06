@@ -18,10 +18,11 @@ fn actual_native_metrics_and_logs_without_otel() -> anyhow::Result<()> {
         };
         runtime.block_on(telemetry_support::metrics_contract())?;
     }
+    Ok(())
+}
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn required_native_metrics_fail_before_a_context_only_constructor() -> anyhow::Result<()>
-    {
+#[tokio::test(flavor = "current_thread")]
+async fn required_native_metrics_fail_before_a_context_only_constructor() -> anyhow::Result<()> {
         use drasi_host_sdk::computation;
         use drasi_lib::{computation::v1::*, observability::*};
         use telemetry_support::*;
@@ -46,6 +47,4 @@ fn actual_native_metrics_and_logs_without_otel() -> anyhow::Result<()> {
         drop(graph);
         logging.shutdown(std::time::Duration::from_secs(2)).await?;
         Ok(())
-    }
-    Ok(())
 }

@@ -1,0 +1,15 @@
+[package]
+name = "handled-branch-ownership"
+edition = "2021"
+publish = false
+
+[workspace]
+members = ["fixture"]
+
+[dev-dependencies]
+drasi-computation-contracts = { path = "../../../components/computation-contracts" }
+libloading = "0.8"
+tokio = { version = "1", features = ["macros", "rt", "time", "test-util"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

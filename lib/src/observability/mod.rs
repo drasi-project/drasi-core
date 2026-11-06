@@ -24,6 +24,7 @@ mod bootstrap;
 mod component_log;
 mod detail_metrics;
 mod event_history;
+mod handled_branch;
 mod log_runtime;
 mod logging;
 #[cfg(test)]

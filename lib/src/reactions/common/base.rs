@@ -686,6 +686,7 @@ impl ReactionBase {
                 continue;
             }
             let telemetry = self.worker_telemetry().await;
+            let input = telemetry.reaction_input_context(query_id, change_count, &context);
             let mut work = telemetry.reaction_work();
             let observation = telemetry
                 .reaction(&context, change_count)
@@ -697,6 +698,7 @@ impl ReactionBase {
             };
             if result.is_ok() {
                 work.handled(query_id, change_count, 1);
+                input.completed();
             }
             work.finish(result.is_ok());
             match result {

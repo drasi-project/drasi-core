@@ -62,6 +62,7 @@ pub(super) mod recovery_tests;
 pub struct NativeFactory {
     telemetry: Option<abi::telemetry::PluginTelemetryV1>,
     telemetry_v2: Option<abi::telemetry::PluginTelemetryV2>,
+    telemetry_v3: Option<abi::telemetry::PluginTelemetryV3>,
     metadata: FactoryMetadata,
     configuration_details: Option<drasi_computation_plugin_sdk::ConfigDetails>,
     descriptor: FactoryDescriptor,
@@ -139,6 +140,7 @@ impl NativeFactory {
         Ok(Self {
             telemetry: None,
             telemetry_v2: None,
+            telemetry_v3: None,
             descriptor,
             port_formats,
             metadata,
@@ -179,6 +181,13 @@ impl NativeFactory {
         extension: Option<abi::telemetry::PluginTelemetryV2>,
     ) -> Self {
         self.telemetry_v2 = extension;
+        self
+    }
+    pub(super) fn with_telemetry_v3(
+        mut self,
+        extension: Option<abi::telemetry::PluginTelemetryV3>,
+    ) -> Self {
+        self.telemetry_v3 = extension;
         self
     }
 
@@ -1026,6 +1035,7 @@ impl NativeFactory {
                 self.telemetry,
                 context_enabled && self.telemetry.is_some(),
             )?
+            .with_timing_extension(self.telemetry_v3)
             .with_telemetry_binding(telemetry_binding)
         };
         let component = match self.batching {

@@ -197,6 +197,12 @@ the same two symbols.
 Use the corresponding SDK export macro rather than writing these interfaces by
 hand. Unknown versions or a malformed advertised extension must fail explicitly.
 
+The telemetry family evolves through separate V1, V2 and optional V3 exports.
+V3 adds transient handled-branch ownership transport; it does not append fields
+to frozen base/V1/V2 tables or change persisted/event payloads. Host-owned
+monotonic clocks and Rust ownership objects do not cross FFI. Native input/reply
+leases and callback contexts have separate retain/release obligations.
+
 ### Version Validation
 
 Package versions, component configuration versions and binary interface versions

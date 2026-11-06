@@ -161,6 +161,24 @@ Admission and handled-consumer callbacks use the same negotiated context family.
 V2 separately advertises context, span, log and metric capabilities.
 Malformed advertised extensions fail rather than falling back to another ABI.
 
+The optional `drasi_computation_plugin_telemetry_v3` extension transports
+handled-branch timing ownership through host callbacks and separate bounded
+frames. It leaves V1/V2/base tables and payload meanings unchanged. Only opaque
+owner/lease identities cross the boundary, never a clock, `Instant`, Rust
+ownership object or recorder. The host owns starts and measurements. The SDK
+acquires carriers when importing input; returned buffers retain output ownership
+until the host imports or discards the reply. Scoped polling, cancellation/drop,
+retained inputs and emission continuations keep this ownership local to its actual
+owner. Host callback contexts are retained separately.
+
+Forward the actual input/current `ExecutionContext`, including its transient
+timing and query-output attribution. Do not create an origin in a plugin or
+manufacture one for replay/bootstrap/scheduled output. Explicitly use an
+unavailable reason when an output merges multiple unknown origins. A selected
+batch trace parent is not every input's timing origin. Timing capacity loss
+must not fail the business operation; it becomes unavailable timing. Tracing
+and OTel are not required. The runtime metric remains default-off.
+
 Factories require an owning runtime scope for internal collection. Raw/direct
 constructor callers outside graph construction must supply an explicit `ExecutionScope::with_plugin_telemetry`
 binding; they cannot infer ownership from a process-global "current instance".

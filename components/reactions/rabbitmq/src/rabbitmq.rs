@@ -627,11 +627,12 @@ impl Reaction for RabbitMQReaction {
                     telemetry.reaction(&query_result_arc.execution_context, change_count)
                         .map_err(|e| log::warn!("Failed to observe RabbitMQ publication: {e}")).ok()
                 };
-                let processing = telemetry.reaction_input(query_name, change_count);
+                let processing = telemetry.reaction_input_context(query_name, change_count, &query_result_arc.execution_context);
                 let mut work = (change_count > 0).then(|| telemetry.reaction_work());
                 let process = async {
                 let mut publish_failed = false;
-                for result in &query_result.results {
+                for (ordinal, result) in query_result.results.iter()
+                    .filter(|result| !matches!(result, ResultDiff::Noop)).enumerate() {
                     match result {
                         ResultDiff::Add { data, .. } => {
                             if let Some(spec) = query_config.added.as_ref() {
@@ -655,7 +656,7 @@ impl Reaction for RabbitMQReaction {
                                     error!("[{reaction_name}] Failed to publish result: {e}");
                                     publish_failed = true;
                                 } else {
-                                    processing.handled(1);
+                                    processing.handled_rows(&[ordinal]);
                                 }
                             }
                         }
@@ -681,7 +682,7 @@ impl Reaction for RabbitMQReaction {
                                     error!("[{reaction_name}] Failed to publish result: {e}");
                                     publish_failed = true;
                                 } else {
-                                    processing.handled(1);
+                                    processing.handled_rows(&[ordinal]);
                                 }
                             }
                         }
@@ -712,7 +713,7 @@ impl Reaction for RabbitMQReaction {
                                     error!("[{reaction_name}] Failed to publish result: {e}");
                                     publish_failed = true;
                                 } else {
-                                    processing.handled(1);
+                                    processing.handled_rows(&[ordinal]);
                                 }
                             }
                         }
@@ -738,7 +739,7 @@ impl Reaction for RabbitMQReaction {
                                     error!("[{reaction_name}] Failed to publish result: {e}");
                                     publish_failed = true;
                                 } else {
-                                    processing.handled(1);
+                                    processing.handled_rows(&[ordinal]);
                                 }
                             }
                         }

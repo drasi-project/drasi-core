@@ -10,6 +10,7 @@ mod execution;
 mod execution_scope;
 #[cfg(feature = "metrics-facade")]
 pub mod facade;
+mod handled_branch;
 mod lifetime;
 #[cfg(feature = "otel-context")]
 mod otel;
@@ -26,6 +27,7 @@ pub use catalogue::*;
 pub use execution::*;
 #[cfg(feature = "tracing-context")]
 pub use execution_scope::*;
+pub use handled_branch::*;
 pub use lifetime::*;
 #[cfg(feature = "otel-context")]
 pub use otel::*;
@@ -114,7 +116,7 @@ impl BatchTraceParent {
             }) {
                 continue;
             }
-            let size = context.transport_size();
+            let size = context.clone().without_handled_branch().transport_size();
             if links.len() < limits.max_links && size <= limits.max_bytes.saturating_sub(bytes) {
                 bytes += size;
                 links.push(trace.clone());
@@ -173,6 +175,7 @@ impl TelemetryProfile {
             sampling: RootSampling::Always,
             distributed_tracing: false,
             native_metrics: false,
+            handled_branch: None,
         }
     }
 }
@@ -223,6 +226,7 @@ pub struct TelemetrySettings {
     sampling: RootSampling,
     distributed_tracing: bool,
     native_metrics: bool,
+    handled_branch: Option<HandledBranchLimits>,
 }
 
 impl Default for TelemetrySettings {
@@ -241,6 +245,7 @@ impl TelemetrySettings {
             sampling: RootSampling::Always,
             distributed_tracing: false,
             native_metrics: false,
+            handled_branch: None,
         }
     }
 
@@ -275,6 +280,13 @@ impl TelemetrySettings {
         self
     }
 
+    /// Opt-in source-to-handled-sink timing, independent of traces and sampling.
+    /// Metric disablement/exclusions still take precedence.
+    pub fn with_handled_branch_latency(mut self, limits: HandledBranchLimits) -> Self {
+        self.handled_branch = Some(limits);
+        self
+    }
+
     pub fn resolve(&self) -> Result<ResolvedTelemetry> {
         if self.exclusions.len() > 64 || self.exclusions.iter().any(|value| value.len() > 256) {
             return Err(TelemetryError::Invalid(
@@ -288,6 +300,10 @@ impl TelemetrySettings {
         policy.sampling = self.sampling;
         policy.distributed_tracing = self.distributed_tracing;
         policy.native_metrics = self.native_metrics;
+        policy.handled_branch = self
+            .handled_branch
+            .map(HandledBranchLimits::validate)
+            .transpose()?;
         if self.native_metrics && !policy.metrics {
             return Err(TelemetryError::Invalid(
                 "required native metrics need enabled metric collection".into(),
@@ -306,6 +322,7 @@ pub struct ResolvedTelemetry {
     sampling: RootSampling,
     distributed_tracing: bool,
     native_metrics: bool,
+    handled_branch: Option<HandledBranchLimits>,
 }
 
 impl Default for ResolvedTelemetry {
@@ -315,6 +332,11 @@ impl Default for ResolvedTelemetry {
 }
 
 impl ResolvedTelemetry {
+    pub fn handled_branch_limits(&self) -> Option<HandledBranchLimits> {
+        self.handled_branch
+            .filter(|_| self.allows_metric("drasi.pipeline.end_to_end.duration"))
+    }
+
     pub fn native_metrics_required(&self) -> bool {
         self.native_metrics
     }
@@ -368,7 +390,13 @@ impl ResolvedTelemetry {
             && METRICS
                 .iter()
                 .find(|metric| metric.name == name)
-                .map_or(true, |metric| self.allows_detail(metric.detail))
+                .map_or(true, |metric| {
+                    if metric.name == "drasi.pipeline.end_to_end.duration" {
+                        self.handled_branch.is_some() && self.profile != TelemetryProfile::Off
+                    } else {
+                        self.allows_detail(metric.detail)
+                    }
+                })
     }
 }
 

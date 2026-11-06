@@ -426,7 +426,7 @@ impl Reaction for AzureStorageReaction {
                 }
                 let observation = telemetry.reaction(&query_result_arc.execution_context, change_count)
                     .map_err(|e| warn!("Failed to observe Azure Storage processing: {e}")).ok();
-                let mut work = telemetry.reaction_work();
+                let mut work = telemetry.reaction_work_context(&query_result_arc.execution_context);
                 let process = async {
                 let mut failure = None;
                 for result in &query_result.results {

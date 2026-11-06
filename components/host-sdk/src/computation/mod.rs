@@ -27,6 +27,7 @@ mod progress;
 mod proxy;
 mod source_schema;
 mod telemetry;
+mod timing;
 mod transaction;
 
 pub use activation_credentials::{NativeIdentityProviders, NativeIdentityResource};

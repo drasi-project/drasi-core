@@ -545,8 +545,9 @@ impl Reaction for ProfilerReaction {
                                         })
                                         .ok()
                                 };
-                                let mut work =
-                                    (change_count > 0).then(|| telemetry.reaction_work());
+                                let mut work = (change_count > 0).then(|| {
+                                    telemetry.reaction_work_context(&query_result.execution_context)
+                                });
                                 let add_sample = async {
                                     stats.write().await.add_sample(profiling);
                                 };

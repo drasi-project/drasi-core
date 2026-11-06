@@ -58,6 +58,8 @@ pub struct ExecutionScope {
     adapter: Option<Arc<dyn TraceContextAdapter>>,
     dispatch: tracing::Dispatch,
     transport_required: bool,
+    timing_transport: Option<Arc<dyn super::HandledBranchTransport>>,
+    timing_lifetime: Option<super::TelemetryLifetime>,
     #[cfg(feature = "metrics-facade")]
     plugin_telemetry: Option<super::PluginTelemetry>,
     #[cfg(feature = "metrics-facade")]
@@ -76,6 +78,8 @@ impl ExecutionScope {
             adapter: None,
             dispatch: tracing::dispatcher::get_default(Clone::clone),
             transport_required: false,
+            timing_transport: None,
+            timing_lifetime: None,
             #[cfg(feature = "metrics-facade")]
             plugin_telemetry: None,
             #[cfg(feature = "metrics-facade")]
@@ -89,6 +93,37 @@ impl ExecutionScope {
             generation,
         }));
         self
+    }
+
+    pub fn with_timing_transport(
+        mut self,
+        transport: Option<Arc<dyn super::HandledBranchTransport>>,
+    ) -> Self {
+        self.timing_transport = transport;
+        self
+    }
+
+    pub fn current_timing_transport() -> Option<Arc<dyn super::HandledBranchTransport>> {
+        CURRENT.with(|current| {
+            current
+                .borrow()
+                .as_ref()
+                .and_then(|scope| scope.timing_transport.clone())
+        })
+    }
+
+    pub fn with_timing_lifetime(mut self, lifetime: Option<super::TelemetryLifetime>) -> Self {
+        self.timing_lifetime = lifetime;
+        self
+    }
+
+    pub fn current_timing_lifetime() -> Option<super::TelemetryLifetime> {
+        CURRENT.with(|current| {
+            current
+                .borrow()
+                .as_ref()
+                .and_then(|scope| scope.timing_lifetime.clone())
+        })
     }
 
     #[cfg(feature = "metrics-facade")]
@@ -201,7 +236,8 @@ impl ExecutionScope {
         self.adapter
             .as_ref()
             .map(|adapter| adapter.current_context())
-            .filter(|context| !context.is_empty())
+            .filter(|context| context.trace().is_some())
+            .map(|context| self.context.clone().with_trace_from(&context))
             .unwrap_or_else(|| self.context.clone())
     }
 

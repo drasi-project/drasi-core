@@ -3236,6 +3236,7 @@ async fn run_node(
                                 input_port: Some(input.port.as_str()),
                                 input_count: Some(1),
                                 change_count: Some(input.envelope.changes().operations().len()),
+                                handled_latency: sink.observes_handled_branch_latency(),
                                 completion: Some(if sink.completion() == SinkCompletion::Handled {
                                     "handled"
                                 } else {
@@ -3266,10 +3267,13 @@ async fn run_node(
             check_descriptor(component, node)?;
             if matches!(component, Component::Source(_)) {
                 let emission = emissions.first().expect("source output");
+                let parent = crate::observability::ComponentObservations::current_or_disabled()
+                    .telemetry()
+                    .source_timing(&emission.execution_context, &emission.envelope);
                 let publication = observe(
                     node,
                     crate::observability::ObservedOperation::Publish,
-                    &emission.execution_context,
+                    &parent,
                     crate::observability::OperationFields {
                         output_port: Some(emission.port.as_str()),
                         output_count: Some(1),
@@ -3355,6 +3359,8 @@ async fn run_node(
             .map_err(|source| GraphError::Pipe { edge, source })?;
         }
         drop(consumed);
+        processing_scope = processing_scope
+            .with_context(processing_scope.context().clone().without_handled_branch());
     }
 }
 
@@ -3452,7 +3458,10 @@ async fn forward_emissions(
                 "output port has no bound relationship",
             ));
         }
-        let context = publication_context.unwrap_or(&emission.execution_context);
+        let context = owner.telemetry().output_timing(
+            publication_context.unwrap_or(&emission.execution_context),
+            &emission.envelope,
+        );
         let mut multicast = BTreeSet::new();
         let mut accepted_branches = 0;
         for output in outputs.iter().filter(|output| output.port == emission.port) {
@@ -3471,7 +3480,7 @@ async fn forward_emissions(
             let observation = observe(
                 node,
                 crate::observability::ObservedOperation::Send,
-                context,
+                &context,
                 crate::observability::OperationFields {
                     output_port: Some(emission.port.as_str()),
                     queue_id: Some(&output.queue_id),

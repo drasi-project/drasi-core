@@ -462,7 +462,7 @@ impl Reaction for LogReaction {
                     telemetry.reaction(&query_result_arc.execution_context, change_count)
                         .map_err(|e| log::warn!("Failed to observe log output: {e}")).ok()
                 };
-                let mut work = (change_count > 0).then(|| telemetry.reaction_work());
+                let mut work = (change_count > 0).then(|| telemetry.reaction_work_context(&query_result_arc.execution_context));
                 let output = async {
                 let mut render_failed = false;
                 #[allow(clippy::print_stdout)]

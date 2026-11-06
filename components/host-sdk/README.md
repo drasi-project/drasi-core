@@ -130,6 +130,27 @@ Single-owner progress and source admission cannot be supplied alongside this
 binding. Non-opt-in factories keep their existing construction and processing.
 
 The Host attaches the actual set with `ComponentRecovery::with_consumer_progress`.
+
+Handled-branch latency additionally negotiates the optional telemetry V3
+extension, independently of unchanged base/V1/V2 tables. The Host retains
+graph-local timing resolvers, not an origin's clock or an idle completed origin.
+Imported input and reply carriers acquire bounded host leases. Producer-owned
+reply buffers retain their leases until host import or buffer release; callback
+contexts outlive outstanding native owners. Component telemetry lifetimes fence
+replacement/retirement, while release remains available for cleanup.
+
+Ordinary native operations use V3 only after an enabled timing origin binds a
+resolver. Disabled timing performs no timing callback or context-copy allocation.
+V1/V2-only propagation is an explicit coverage gap, not a loader downgrade or a
+business-processing failure. Host-observed terminal `Handled` calls remain
+measurable with retained input provenance. Existing consumer-wrapper callbacks
+continue through their frozen negotiated interface, without pretending to
+transport V3 ownership or changing their completion/durability semantics.
+
+Build the actual SDK fixture before qualification:
+`make build-native-telemetry-fixtures`; the
+`native_handled_branch_latency` test then exercises a native transformer retaining
+input across a continuation and the final source-to-sink histogram without OTel.
 An optional immutable native cursor comparator is captured separately and attached
 with `with_consumer_positions`. It interprets bounded source positions, not a
 generic minimum scalar, and can run while source/transformer processing is pending.

@@ -21,6 +21,42 @@ fn added() -> ResultDiff {
     }
 }
 
+#[test]
+fn completion_metadata_preserves_whole_frames_and_original_row_ordinals() {
+    let input = result(
+        "q",
+        vec![
+            added(),
+            ResultDiff::Noop,
+            ResultDiff::Delete {
+                data: json!({"id":2}),
+                row_signature: 43,
+            },
+            added(),
+        ],
+    );
+    let default = SseRenderer::new("/events".into(), HashMap::new(), None);
+    let events = default.render_with_completion(&input, 456, |error| panic!("{error}"));
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].1, None);
+    let routed = SseRenderer::new("/events".into(), HashMap::new(), Some(config("", None)));
+    let events = routed.render_with_completion(&input, 456, |error| panic!("{error}"));
+    assert_eq!(
+        events
+            .iter()
+            .map(|(_, ordinal)| *ordinal)
+            .collect::<Vec<_>>(),
+        [Some(0), Some(2)]
+    );
+    assert_eq!(
+        events
+            .into_iter()
+            .map(|(event, _)| event)
+            .collect::<Vec<_>>(),
+        render(&routed, &input)
+    );
+}
+
 fn config(body: &str, path: Option<&str>) -> QueryConfig {
     QueryConfig {
         added: Some(TemplateSpec::with_extension(

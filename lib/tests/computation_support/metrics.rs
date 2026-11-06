@@ -92,6 +92,16 @@ impl RecordingMetrics {
         self.0.lock().unwrap().is_empty()
     }
 
+    pub fn labels(&self, name: &str) -> Vec<BTreeMap<String, String>> {
+        self.0
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|key| key.0 == name)
+            .map(|key| key.1.clone())
+            .collect()
+    }
+
     pub async fn wait_for(&self, predicate: impl Fn() -> bool) {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {

@@ -58,6 +58,46 @@ or component identity and is not serializable as event data. `InputEnvelope`,
 `OutputEnvelope` and `EnvelopeMessage` carry it separately from `ChangeEnvelope`.
 Never put tracing metadata in `ProcessingContext`, annotations, rows or receipts.
 
+The carrier also supports an optional transient `HandledBranchContext`: either
+an owned timing lease or an explicit unavailable reason. Trace replacement keeps
+this ownership intact; batch trace-parent selection does not select a timing
+origin. The frozen V1 `encode()` rejects timing-bearing contexts rather than
+silently discarding them. `without_handled_branch()` is only for an explicitly
+diagnosed unsupported boundary; it is not permission to inherit a new origin
+on the receiving side.
+
+`HandledBranchTracker` is a backend-neutral implementation of host-owned timing
+state, created once per graph only when explicitly enabled. It supports bounded origin/lease/branch
+records, idempotent required-row completion, once-only branch success, and cleanup
+after the last live lease without age-based expiry. Native ownership APIs return
+opaque owner/lease identities; clocks and Rust objects never become transport
+payloads. Acquisition and release must be balanced separately from the native
+callback context's own retain/release lifetime.
+
+The default bounds are 16,384 accounting records and 8 MiB of record/key/row data.
+Map and allocator overhead is additionally record-count-bounded, not included in
+that byte counter or claimed as process RSS. On capacity loss, further new branch
+admission for that origin is sealed while already admitted branches can finish.
+Typed errors and `HandledBranchDiagnostics` expose rejected work; there is no
+overflow queue, eviction of a live branch, or unbounded completed-history cache.
+
+Enable the runtime measurement with
+`TelemetrySettings::with_handled_branch_latency(HandledBranchLimits::default())`.
+It remains off in every profile unless opted in, and metric disablement/exclusions
+still take precedence. The histogram is in seconds, per fully handled
+query-output envelope and sink, with `query_id` and `phase=steady`. Queue
+acceptance, administrative forwarding, progress confirmation and acknowledgement
+are not completion. The host starts at framework source publication/admission,
+not a persisted event timestamp or a source's polling wait.
+
+Native timing uses separately negotiated telemetry V3 frames and host callbacks.
+V1/V2/base tables and event/persisted codecs stay unchanged. Imported carriers
+acquire host leases; reply buffers retain them until the receiving host has
+imported them or released the buffer. Never substitute native clocks. Capability
+gaps and missing/ambiguous origins are exposed in diagnostic snapshots, not
+fabricated histogram observations. Reconstructed output, bootstrap and
+scheduled-only work without an original live timing owner remain untimed.
+
 The `tracing-context` feature supplies `ExecutionScope` for poll-safe restoration
 and explicit worker capture. A scope owns local dispatch/component bindings;
 only its portable execution context belongs on a work-item queue. The optional

@@ -49,6 +49,7 @@ struct BatcherItem {
     // Sequence IDs can repeat on replay; this identifies the dequeued input.
     input_id: u64,
     processing: drasi_lib::observability::ReactionInput,
+    ordinal: usize,
 }
 
 pub(crate) struct AdaptiveRunnerParams {
@@ -135,15 +136,15 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
             // See `batch_checkpoint_candidates` for the `completed` / `seen`
             // at-least-once rationale.
             let mut meta = Vec::with_capacity(batch.len());
-            let mut batches_by_key: HashMap<BatchKey, (Vec<ProtoQueryResultItem>, Vec<drasi_lib::observability::ReactionInput>)> = HashMap::new();
+            let mut batches_by_key: HashMap<BatchKey, (Vec<ProtoQueryResultItem>, Vec<(drasi_lib::observability::ReactionInput, usize)>)> = HashMap::new();
             let change_count = batch.len();
             let mut contexts = HashMap::new();
-            for BatcherItem { key, item, is_terminal, execution_context, input_id, processing } in batch {
+            for BatcherItem { key, item, is_terminal, execution_context, input_id, processing, ordinal } in batch {
                 contexts.entry(input_id).or_insert(execution_context);
                 meta.push((key.query_id.clone(), item.sequence, is_terminal));
                 let (items, inputs) = batches_by_key.entry(key).or_default();
                 items.push(item);
-                inputs.push(processing);
+                inputs.push((processing, ordinal));
             }
             let (completed, seen) = batch_checkpoint_candidates(meta);
 
@@ -213,8 +214,8 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                 .await;
 
                 if delivered {
-                    for input in inputs {
-                        input.handled(1);
+                    for (input, ordinal) in inputs {
+                        input.handled_rows(&[ordinal]);
                     }
                     successful_sends += 1;
                     if successful_sends.is_multiple_of(100) {
@@ -345,8 +346,9 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
 
             // Build all items first so the last one can be flagged terminal; the
             // checkpoint only advances once a result's terminal item is acked.
-            let mut built_items: Vec<(BatchKey, ProtoQueryResultItem)> = Vec::new();
-            for diff in &query_result.results {
+            let mut built_items: Vec<(BatchKey, ProtoQueryResultItem, usize)> = Vec::new();
+            for (ordinal, diff) in query_result.results.iter()
+                .filter(|diff| !matches!(diff, drasi_lib::channels::ResultDiff::Noop)).enumerate() {
                 if matches!(diff, drasi_lib::channels::ResultDiff::Noop) {
                     debug!("[{reaction_name}] Ignoring noop result");
                     continue;
@@ -358,18 +360,18 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                 };
                 let effective_metadata = merge_metadata(&base_metadata, &built.request_metadata);
                 let key = BatchKey::new(query_id.clone(), effective_metadata);
-                built_items.push((key, built.item));
+                built_items.push((key, built.item, ordinal));
             }
 
             let last_idx = built_items.len().saturating_sub(1);
             let input_rows = query_result.results.iter()
                 .filter(|diff| !matches!(diff, drasi_lib::channels::ResultDiff::Noop)).count();
-            let processing = telemetry.reaction_input(&query_id, input_rows);
-            for (i, (key, item)) in built_items.into_iter().enumerate() {
+            let processing = telemetry.reaction_input_context(&query_id, input_rows, &execution_context);
+            for (i, (key, item, ordinal)) in built_items.into_iter().enumerate() {
                 let is_terminal = i == last_idx;
                 if batch_tx.send(BatcherItem {
                     key, item, is_terminal, execution_context: execution_context.clone(), input_id,
-                    processing: processing.clone(),
+                    processing: processing.clone(), ordinal,
                 }).await.is_err() {
                     let msg = "failed to send item to adaptive batcher".to_string();
                     error!("[{reaction_name}] {msg}");

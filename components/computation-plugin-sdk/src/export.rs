@@ -402,6 +402,9 @@ impl ExportedPlugin {
     pub fn telemetry_v2(&self) -> *const abi::telemetry::PluginTelemetryV2 {
         &PLUGIN_TELEMETRY_V2
     }
+    pub fn telemetry_v3(&self) -> *const abi::telemetry::PluginTelemetryV3 {
+        &PLUGIN_TELEMETRY_V3
+    }
     pub fn output_snapshots(&self) -> *const abi::output_snapshots::PluginOutputSnapshotsV1 {
         &PLUGIN_OUTPUT_SNAPSHOTS
     }
@@ -1856,6 +1859,45 @@ unsafe extern "C" fn begin(
     unsafe { begin_operation(state, code, input, transaction, out, None) }
 }
 
+static PLUGIN_TELEMETRY_V3: abi::telemetry::PluginTelemetryV3 = abi::telemetry::PluginTelemetryV3 {
+    header: Header::new::<abi::telemetry::PluginTelemetryV3>(),
+    version: abi::telemetry::VERSION_V3,
+    capabilities: abi::telemetry::CONTEXT | abi::telemetry::HANDLED_TIMING,
+    reserved: 0,
+    begin: Some(begin_timing),
+};
+
+unsafe extern "C" fn begin_timing(
+    state: *mut c_void,
+    code: u32,
+    input: BorrowedBytes,
+    transaction: *const abi::Transaction,
+    host: *const abi::telemetry::HostTimingV3,
+    out: *mut abi::OperationHandle,
+) -> Status {
+    transport::status_boundary(|| {
+        let client =
+            unsafe { crate::timing_transport::Client::new(host) }.map_err(Failure::from)?;
+        let request = crate::timing_transport::decode_request(
+            unsafe { transport::borrowed_bytes(input, abi::MAX_MESSAGE_BYTES)? },
+            client.as_ref(),
+        )
+        .map_err(Failure::from)?;
+        crate::telemetry::ExecutionScope::capture()
+            .with_timing_transport(Some(client))
+            .in_scope(|| unsafe {
+                transport::take_status(begin_operation(
+                    state,
+                    code,
+                    BorrowedBytes::new(&request.payload),
+                    transaction,
+                    out,
+                    Some(request.contexts),
+                ))
+            })
+    })
+}
+
 unsafe extern "C" fn begin_context(
     state: *mut c_void,
     code: u32,
@@ -1926,6 +1968,9 @@ unsafe fn begin_operation(
                 instance
                     .execution_scope
                     .with_context(contexts.operation.clone())
+                    .with_timing_transport(
+                        crate::telemetry::ExecutionScope::current_timing_transport(),
+                    )
             })
             .or_else(|| Some(instance.execution_scope.with_context(Default::default())));
         if code != STOP && instance.damaged.is_damaged() {

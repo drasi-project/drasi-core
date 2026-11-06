@@ -34,6 +34,7 @@ enum ReplyPayload {
 pub(super) struct NativeReply {
     payload: ReplyPayload,
     contexts: Option<Vec<ExecutionContext>>,
+    timing_unavailable: bool,
 }
 
 impl std::fmt::Debug for NativeReply {
@@ -47,18 +48,45 @@ impl std::fmt::Debug for NativeReply {
 }
 
 impl NativeReply {
-    fn decode(bytes: ReceivedBytes, contextual: bool) -> std::result::Result<Self, Failure> {
+    fn decode(
+        bytes: ReceivedBytes,
+        contextual: bool,
+        timing: Option<&super::timing::HostBridge>,
+        timing_gap: bool,
+    ) -> std::result::Result<Self, Failure> {
         if contextual {
-            let decoded = telemetry_transport::decode_reply(&bytes)
-                .map_err(|error| Failure::protocol(error.to_string()))?;
+            let decoded = match timing {
+                Some(timing) => {
+                    drasi_computation_plugin_sdk::timing_transport::decode_reply(&bytes, timing)
+                }
+                None => telemetry_transport::decode_reply(&bytes),
+            }
+            .map_err(|error| Failure::protocol(error.to_string()))?;
+            let outputs = decoded
+                .outputs
+                .into_iter()
+                .map(|context| {
+                    if (timing_gap || timing.is_some()) && context.handled_branch().is_none() {
+                        context.with_handled_branch(
+                            drasi_lib::observability::HandledBranchContext::Unavailable(
+                                drasi_lib::observability::HandledBranchUnavailable::Unsupported,
+                            ),
+                        )
+                    } else {
+                        context
+                    }
+                })
+                .collect();
             Ok(Self {
                 payload: ReplyPayload::Contextual(decoded.payload),
-                contexts: Some(decoded.outputs),
+                contexts: Some(outputs),
+                timing_unavailable: false,
             })
         } else {
             Ok(Self {
                 payload: ReplyPayload::Base(bytes),
                 contexts: None,
+                timing_unavailable: timing_gap,
             })
         }
     }
@@ -80,7 +108,15 @@ impl NativeReply {
                 .get(index)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("native output context index out of range")),
-            None => Ok(ExecutionContext::default()),
+            None => Ok(if self.timing_unavailable {
+                ExecutionContext::default().with_handled_branch(
+                    drasi_lib::observability::HandledBranchContext::Unavailable(
+                        drasi_lib::observability::HandledBranchUnavailable::Unsupported,
+                    ),
+                )
+            } else {
+                ExecutionContext::default()
+            }),
         }
     }
 }
@@ -98,15 +134,19 @@ impl Deref for NativeReply {
 pub(super) struct NativeOperation {
     operation: OperationFuture,
     contextual: bool,
+    timing: Option<Arc<super::timing::HostBridge>>,
+    timing_gap: bool,
 }
 
 impl Future for NativeOperation {
     type Output = std::result::Result<NativeReply, Failure>;
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let contextual = self.contextual;
-        Pin::new(&mut self.operation)
-            .poll(cx)
-            .map(|result| result.and_then(|bytes| NativeReply::decode(bytes, contextual)))
+        let timing = self.timing.clone();
+        let gap = self.timing_gap;
+        Pin::new(&mut self.operation).poll(cx).map(|result| {
+            result.and_then(|bytes| NativeReply::decode(bytes, contextual, timing.as_deref(), gap))
+        })
     }
 }
 
@@ -184,6 +224,10 @@ pub(super) struct RemoteComponent {
     stopping: AtomicBool,
     telemetry: Option<abi::telemetry::PluginTelemetryV1>,
     context_enabled: bool,
+    timing: std::sync::OnceLock<Option<abi::telemetry::PluginTelemetryV3>>,
+    timing_gap_reported: AtomicBool,
+    timing_resolver: Mutex<Option<Arc<super::timing::HostBridge>>>,
+    has_timing_resolver: AtomicBool,
 }
 unsafe impl Send for RemoteComponent {}
 unsafe impl Sync for RemoteComponent {}
@@ -214,6 +258,10 @@ impl RemoteComponent {
             stopping: AtomicBool::new(false),
             telemetry,
             context_enabled,
+            timing: Default::default(),
+            timing_gap_reported: AtomicBool::new(false),
+            timing_resolver: Mutex::new(None),
+            has_timing_resolver: AtomicBool::new(false),
         })
     }
     fn table(&self) -> &abi::ComponentVTable {
@@ -269,6 +317,7 @@ impl RemoteComponent {
             transaction,
             self.table().begin.expect("validated"),
             self.telemetry.and_then(|extension| extension.begin),
+            true,
         )
     }
 
@@ -291,9 +340,11 @@ impl RemoteComponent {
             extension.begin.expect("validated"),
             self.telemetry
                 .and_then(|extension| extension.begin_consumer),
+            false,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn begin_with(
         &self,
         code: u32,
@@ -302,12 +353,78 @@ impl RemoteComponent {
         transaction: Option<&abi::Transaction>,
         base: abi::telemetry::Begin,
         extension: Option<abi::telemetry::Begin>,
+        timing_allowed: bool,
     ) -> anyhow::Result<NativeOperation> {
         anyhow::ensure!(
             input.len() <= abi::MAX_MESSAGE_BYTES,
             "native operation input exceeds size limit"
         );
         let current = ExecutionContext::current();
+        let has_timing = current.handled_branch().is_some()
+            || contexts
+                .iter()
+                .any(|context| context.handled_branch().is_some());
+        let timing_extension = self.timing.get().copied().flatten();
+        let fresh_timing = if timing_allowed && has_timing && timing_extension.is_some() {
+            super::timing::HostBridge::new(
+                std::iter::once(current.clone()).chain(contexts.iter().cloned()),
+            )
+        } else {
+            None
+        };
+        let timing = if has_timing || self.has_timing_resolver.load(Ordering::Acquire) {
+            let mut resolver = self
+                .timing_resolver
+                .lock()
+                .map_err(|_| anyhow::anyhow!("native timing resolver poisoned"))?;
+            if let Some(fresh) = fresh_timing {
+                *resolver = Some(fresh);
+                self.has_timing_resolver.store(true, Ordering::Release);
+            }
+            if timing_allowed {
+                resolver.clone()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let (Some(timing), Some(extension)) = (&timing, timing_extension) {
+            let encoded = drasi_computation_plugin_sdk::timing_transport::encode_request(
+                &current, contexts, input,
+            )?;
+            let table = timing.table();
+            let mut operation = abi::OperationHandle::null();
+            unsafe {
+                take_status(extension.begin.expect("validated")(
+                    self.raw.state,
+                    code,
+                    abi::BorrowedBytes::new(&encoded),
+                    transaction.map_or(std::ptr::null(), |value| value),
+                    &table,
+                    &mut operation,
+                ))
+                .map_err(operation_failure)?;
+            }
+            return Ok(NativeOperation {
+                operation: unsafe { OperationFuture::new(operation) }.map_err(operation_failure)?,
+                contextual: true,
+                timing: Some(timing.clone()),
+                timing_gap: false,
+            });
+        }
+        if has_timing && !self.timing_gap_reported.swap(true, Ordering::AcqRel) {
+            log::warn!("Native component lacks a valid timing transport for this operation; propagation coverage is unavailable (terminal host handling remains observable)");
+        }
+        let current = current.without_handled_branch();
+        let stripped = has_timing.then(|| {
+            contexts
+                .iter()
+                .cloned()
+                .map(ExecutionContext::without_handled_branch)
+                .collect::<Vec<_>>()
+        });
+        let contexts = stripped.as_deref().unwrap_or(contexts);
         let requested = self.context_enabled
             || !current.is_empty()
             || contexts.iter().any(|context| !context.is_empty());
@@ -336,6 +453,8 @@ impl RemoteComponent {
             Ok(NativeOperation {
                 operation: OperationFuture::new(operation).map_err(operation_failure)?,
                 contextual: requested,
+                timing: None,
+                timing_gap: has_timing,
             })
         }
     }
@@ -606,6 +725,16 @@ mod consumer_position_tests {
 }
 
 impl NativeComponentProxy {
+    pub(super) fn with_timing_extension(
+        self,
+        extension: Option<abi::telemetry::PluginTelemetryV3>,
+    ) -> Self {
+        self.inner
+            .timing
+            .set(extension)
+            .expect("timing extension is configured once");
+        self
+    }
     #[allow(clippy::too_many_arguments)]
     pub(super) unsafe fn new(
         raw: abi::ComponentHandle,
@@ -1002,6 +1131,14 @@ impl ComputationComponent for NativeComponentProxy {
         if let Some(progress) = &self.bindings.consumer_progress {
             progress.binding.stopped()?;
         }
+        self.inner
+            .timing_resolver
+            .lock()
+            .map_err(|_| anyhow::anyhow!("native timing resolver poisoned"))?
+            .take();
+        self.inner
+            .has_timing_resolver
+            .store(false, Ordering::Release);
         self.inner.stopping.store(false, Ordering::Release);
         Ok(())
     }

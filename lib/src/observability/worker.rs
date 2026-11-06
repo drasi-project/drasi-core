@@ -41,6 +41,24 @@ impl WorkerTelemetry {
 
     /// Begin actual effect work, separately from trace/checkpoint scope.
     pub fn reaction_work(&self) -> ReactionWork {
+        if self.owner.telemetry().handled_branch_tracker().is_none() {
+            return ReactionWork::new(self.owner.clone(), ObservedOperation::Reaction);
+        }
+        self.reaction_work_context(&ExecutionContext::current())
+    }
+
+    pub fn reaction_work_context(&self, context: &ExecutionContext) -> ReactionWork {
+        let mut work = ReactionWork::new(self.owner.clone(), ObservedOperation::Reaction);
+        work.timing = self.owner.handled_branch(context);
+        work.query = context
+            .handled_output()
+            .map(|output| output.query_id.clone());
+        work
+    }
+
+    /// Preserve local work counters for enqueue/forwarding adapters without
+    /// presenting their successful acceptance as source-to-handled completion.
+    pub fn reaction_acceptance_work(&self) -> ReactionWork {
         ReactionWork::new(self.owner.clone(), ObservedOperation::Reaction)
     }
 
@@ -51,6 +69,29 @@ impl WorkerTelemetry {
 
     /// Keep with the existing buffered items when one input spans several batches.
     pub fn reaction_input(&self, query: &str, rows: usize) -> ReactionInput {
+        self.reaction_input_inner(query, rows, None)
+    }
+
+    /// Original per-envelope provenance must accompany split/batched rows.
+    pub fn reaction_input_context(
+        &self,
+        query: &str,
+        rows: usize,
+        context: &ExecutionContext,
+    ) -> ReactionInput {
+        let timing = context
+            .handled_output()
+            .filter(|output| output.query_id.as_ref() == query && output.required_rows == rows)
+            .and_then(|_| self.owner.handled_branch(context));
+        self.reaction_input_inner(query, rows, timing)
+    }
+
+    fn reaction_input_inner(
+        &self,
+        query: &str,
+        rows: usize,
+        timing: Option<super::handled_branch::HandledBranchObservation>,
+    ) -> ReactionInput {
         let subscription = self.owner.reaction_subscription(query);
         if rows > 0 && subscription.is_none() && self.owner.configured() {
             log::warn!("No configured reaction metric subscription for query '{query}'");
@@ -59,6 +100,7 @@ impl WorkerTelemetry {
             Arc::new(InputProgress {
                 subscription,
                 remaining: AtomicUsize::new(rows),
+                timing,
             })
         }))
     }
@@ -173,6 +215,8 @@ pub struct ReactionWork {
     operation: ObservedOperation,
     started: Option<Instant>,
     finished: bool,
+    timing: Option<super::handled_branch::HandledBranchObservation>,
+    query: Option<Arc<str>>,
 }
 
 impl ReactionWork {
@@ -183,6 +227,8 @@ impl ReactionWork {
             operation,
             started,
             finished: false,
+            timing: None,
+            query: None,
         }
     }
 
@@ -192,6 +238,11 @@ impl ReactionWork {
             subscription.handled(rows, inputs);
         } else if self.owner.configured() {
             log::warn!("No configured reaction metric subscription for query '{query}'");
+        }
+        if inputs == 1 && self.query.as_deref() == Some(query) {
+            if let Some(timing) = &self.timing {
+                timing.finish(None);
+            }
         }
     }
 
@@ -216,6 +267,7 @@ impl Drop for ReactionWork {
 struct InputProgress {
     subscription: Arc<super::ReactionSubscriptionMetrics>,
     remaining: AtomicUsize,
+    timing: Option<super::handled_branch::HandledBranchObservation>,
 }
 
 /// Transient completion accounting, bounded by the worker's existing queue/batch.
@@ -223,6 +275,28 @@ struct InputProgress {
 pub struct ReactionInput(Option<Arc<InputProgress>>);
 
 impl ReactionInput {
+    /// Complete the original envelope after positively handling every required
+    /// row. Does not change existing counters; report those through ReactionWork.
+    pub fn completed(&self) {
+        if let Some(timing) = self.0.as_ref().and_then(|input| input.timing.as_ref()) {
+            timing.finish(None);
+        }
+    }
+
+    /// Report stable ordinals in the original non-Noop row set. Existing work
+    /// counters retain their attempt semantics; latency completion is idempotent.
+    pub fn handled_rows(&self, ordinals: &[usize]) {
+        self.handled(ordinals.len());
+        self.handled_timing_rows(ordinals);
+    }
+
+    /// For adapters whose existing work-counter unit differs from original rows.
+    pub fn handled_timing_rows(&self, ordinals: &[usize]) {
+        if let Some(timing) = self.0.as_ref().and_then(|input| input.timing.as_ref()) {
+            timing.finish(Some(ordinals));
+        }
+    }
+
     pub fn handled(&self, rows: usize) {
         let Some(input) = &self.0 else {
             return;

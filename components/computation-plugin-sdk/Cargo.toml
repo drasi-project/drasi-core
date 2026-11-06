@@ -46,6 +46,18 @@ crate-type = ["cdylib"]
 test = false
 
 [[example]]
+name = "handled_branch_fixture"
+path = "tests/fixtures/handled_branch_fixture.rs"
+crate-type = ["cdylib"]
+test = false
+
+[[example]]
+name = "handled_branch_v2_fixture"
+path = "tests/fixtures/handled_branch_v2_fixture.rs"
+crate-type = ["cdylib"]
+test = false
+
+[[example]]
 name = "execution_context_fixture"
 path = "tests/fixtures/execution_context_fixture.rs"
 crate-type = ["cdylib"]

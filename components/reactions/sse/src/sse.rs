@@ -296,12 +296,12 @@ impl Reaction for SseReaction {
                 }
                 let observation = telemetry.reaction(&query_result_context, change_count)
                     .map_err(|e| log::warn!("Failed to observe SSE broadcast: {e}")).ok();
-                let processing = telemetry.reaction_input(&query_result.query_id, change_count);
+                let processing = telemetry.reaction_input_context(&query_result.query_id, change_count, &query_result_context);
                 let mut work = telemetry.reaction_work();
                 let broadcast = async {
                 let mut render_failed = false;
                 let timestamp = chrono::Utc::now().timestamp_millis();
-                for event in renderer.render(&query_result, timestamp, |message| {
+                for (event, ordinal) in renderer.render_with_completion(&query_result, timestamp, |message| {
                     render_failed = true;
                     error!("[{reaction_id}] {message}");
                 }) {
@@ -320,6 +320,10 @@ impl Reaction for SseReaction {
                     match broadcaster.send(event.payload) {
                         Ok(count) => {
                             processing.handled(1);
+                            match ordinal {
+                                Some(ordinal) => processing.handled_timing_rows(&[ordinal]),
+                                None => processing.completed(),
+                            }
                             debug!(
                             "[{reaction_id}] Broadcast to {count} SSE listeners on path {}",
                             event.path

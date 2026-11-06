@@ -334,7 +334,9 @@ impl Reaction for DashboardReaction {
                                 .map_err(|e| log::warn!("Failed to observe dashboard update: {e}"))
                                 .ok()
                         };
-                        let mut work = (change_count > 0).then(|| telemetry.reaction_work());
+                        let mut work = (change_count > 0).then(|| {
+                            telemetry.reaction_work_context(&query_result.execution_context)
+                        });
                         let update = snapshot_store.apply_and_broadcast(payload, &websocket_hub);
                         let outcome = match observation {
                             Some(observation) => observation.run(update).await,

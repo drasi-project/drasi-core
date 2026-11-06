@@ -87,6 +87,8 @@ for profile in core-types shared-contracts default no-default-features extra-cap
             targets=(--lib --test integration_test --test native_computation_pipeline --test native_network_loopback --test native_network_wire --test bootstrap_provider_ffi_test --test lifecycle_observations --test initialization_failure --test native_admission)
             sources+=(components/host-sdk/tests/native_metrics_telemetry.rs components/host-sdk/tests/native_telemetry.rs components/host-sdk/tests/native_execution_context.rs components/host-sdk/tests/logging_policy.rs)
             targets+=(--test native_metrics_telemetry --test native_telemetry --test native_execution_context --test logging_policy)
+            sources+=(components/host-sdk/tests/native_handled_branch_latency.rs)
+            targets+=(--test native_handled_branch_latency)
             features+=(--features otel-context)
             test_arguments+=(--test-threads=1)
             ;;

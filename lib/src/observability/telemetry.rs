@@ -132,6 +132,10 @@ impl TelemetryOptions {
             .map_err(|error| {
                 TelemetryError::Invalid(format!("invalid trace directives: {error}"))
             })?;
+        let handled_branch = policy
+            .handled_branch_limits()
+            .map(HandledBranchTracker::new)
+            .transpose()?;
         Ok(GraphTelemetry {
             policy,
             scope,
@@ -141,6 +145,7 @@ impl TelemetryOptions {
             link_limits,
             native_spans: self.native_spans.clone(),
             plugin_limits,
+            handled_branch,
             owners: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
@@ -156,6 +161,7 @@ pub struct GraphTelemetry {
     link_limits: TraceLinkLimits,
     native_spans: Option<super::NativeSpanCollector>,
     plugin_limits: TelemetryLimits,
+    handled_branch: Option<Arc<HandledBranchTracker>>,
     owners: Arc<
         Mutex<
             BTreeMap<drasi_computation_contracts::ComponentId, Arc<super::ComponentObservations>>,
@@ -174,12 +180,24 @@ impl Default for GraphTelemetry {
             link_limits: TraceLinkLimits::default(),
             native_spans: None,
             plugin_limits: TelemetryLimits::default(),
+            handled_branch: None,
             owners: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 }
 
 impl GraphTelemetry {
+    pub fn handled_branch_diagnostics(&self) -> Result<Option<HandledBranchDiagnostics>> {
+        self.handled_branch
+            .as_ref()
+            .map(|tracker| tracker.diagnostics())
+            .transpose()
+    }
+
+    pub(crate) fn handled_branch_tracker(&self) -> Option<&Arc<HandledBranchTracker>> {
+        self.handled_branch.as_ref()
+    }
+
     pub(crate) fn resource_binding(
         &self,
         instance: &str,

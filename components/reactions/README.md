@@ -764,6 +764,30 @@ handling success. `ReactionBase` checkpoint APIs report confirmed writes
 separately. The framework's new checkpoint-lag gauge is not derived from the
 legacy adapter's acceptance-based metrics snapshot.
 
+Handled-branch latency is a separate, default-off runtime measurement. Custom
+whole-envelope effect loops SHOULD use
+`telemetry.reaction_work_context(&input.execution_context)` and report
+`work.handled(query_id, rows, 1)` only after all required non-Noop rows succeed.
+Split/batched loops MUST create
+`reaction_input_context(query_id, original_non_noop_rows, &context)` before
+handling, retain its clones, and call `handled_rows(&original_row_ordinals)`.
+These ordinals are stable across retries; filtered/dropped rows MUST NOT renumber
+later rows or reduce the original required-row set. Successful completion records
+once before checkpointing; existing work counters keep their attempt semantics.
+
+Whole-envelope adapters whose counter unit differs from original rows can call
+`input.completed()` after positively completing the entire envelope, without
+changing their existing counters. SSE rendering exposes completion ordinals
+separately from unchanged wire payloads. A local enqueue/forwarding adapter MUST
+use `reaction_acceptance_work()` instead of claiming latency completion.
+Application-channel forwarding is not application-consumer handling, and an
+administrative query-results outlet is not downstream reaction completion.
+
+Timing never enters `QueryResult`, persisted checkpoints or legacy FFI payloads.
+Opaque acceptance-only dynamic reactions remain untimed. Keep tracing and
+sampling independent; missing/unsupported provenance is diagnosed rather than
+replaced with a new or wall-clock start.
+
 > 🔴 **MUST** — Use `tokio::select!` with `biased;` and the shutdown
 > receiver. Without it your reaction will not stop promptly when the
 > runtime calls `stop()`, and you will time out and be force-aborted.

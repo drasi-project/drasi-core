@@ -117,8 +117,8 @@ build-test-plugins: build-native-plugins build-native-telemetry-fixtures
 test-host-sdk: build-test-plugins
 	@echo "=== Running host-sdk integration tests ==="
 	cargo test -p drasi-host-sdk --lib --test integration_test --test native_computation_pipeline --test native_network_loopback --test native_network_wire --test native_sqlite_components -- --test-threads=1
-	cargo test -p drasi-host-sdk --features otel-context --test native_execution_context --test native_telemetry --test logging_policy --locked -- --test-threads=1
-	cargo test -p drasi-host-sdk --no-default-features --test native_metrics_telemetry --locked -- --test-threads=1
+	cargo test -p drasi-host-sdk --features otel-context --test native_execution_context --test native_telemetry --test native_handled_branch_latency --test logging_policy --locked -- --test-threads=1
+	cargo test -p drasi-host-sdk --no-default-features --test native_metrics_telemetry --test native_handled_branch_latency --locked -- --test-threads=1
 	@echo "=== host-sdk integration tests passed ==="
 
 build-native-plugins: check-native-dependencies build-native-standard-plugins build-native-network-plugins build-native-mysql-plugins build-native-mssql-plugins build-native-postgres-plugins build-native-sqlite-plugins
@@ -136,11 +136,16 @@ test-native-context: build-native-context-fixtures
 	cargo test -p drasi-host-sdk --features otel-context --test native_execution_context --locked -- --test-threads=1
 
 build-native-telemetry-fixtures: build-native-context-fixtures
-	cargo build -p drasi-computation-plugin-sdk --example telemetry_fixture --no-default-features --locked
+	cargo build -p drasi-computation-plugin-sdk --example telemetry_fixture --example handled_branch_fixture --example handled_branch_v2_fixture --no-default-features --locked
 
 test-native-telemetry: build-native-telemetry-fixtures
-	cargo test -p drasi-host-sdk --features otel-context --test native_telemetry --test native_execution_context --test logging_policy --locked -- --test-threads=1
-	cargo test -p drasi-host-sdk --no-default-features --test native_metrics_telemetry --locked -- --test-threads=1
+	cargo test -p drasi-host-sdk --features otel-context --test native_telemetry --test native_execution_context --test native_handled_branch_latency --test logging_policy --locked -- --test-threads=1
+	cargo test -p drasi-host-sdk --no-default-features --test native_metrics_telemetry --test native_handled_branch_latency --locked -- --test-threads=1
+
+.PHONY: test-handled-branch-ownership
+test-handled-branch-ownership:
+	cargo build --manifest-path lib/tests/handled-branch-ownership/Cargo.toml -p handled-branch-ownership-fixture --locked
+	cargo test --manifest-path lib/tests/handled-branch-ownership/Cargo.toml -p handled-branch-ownership --locked
 
 observability-demo:
 	bash lib/examples/observability/demo.sh

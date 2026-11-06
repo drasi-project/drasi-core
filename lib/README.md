@@ -954,10 +954,52 @@ is not an additional owner of propagated processing errors. Checkpoint write
 failures are observed separately as storage errors. Idle service loops do not
 create work samples.
 
-Native metric callbacks, native completed-span/log collection, exporters, and
-handled-branch latency remain unimplemented: `require_native_metrics()` fails.
-Opaque native/legacy workers do not gain internal metrics from host wrappers.
-`drasi.pipeline.end_to_end.duration` remains reserved and absent.
+Native metric callbacks and completed-span/log collection use the separately
+negotiated shared telemetry family. `require_native_metrics()` checks the actual
+plugin capability at construction. Exporters remain host-owned; none is installed
+automatically. Opaque native/legacy workers do not gain internal metrics merely
+from host wrappers.
+
+### Opt-in handled-branch latency
+
+Add `.with_handled_branch_latency(HandledBranchLimits::default())` to
+`TelemetrySettings` and supply the existing host-owned metric registration context.
+This explicitly enables `drasi.pipeline.end_to_end.duration`; every profile still
+leaves it off by default, and metric exclusions/disablement take precedence.
+Tracing, OTel and sampling are independent.
+
+One sample is the elapsed monotonic time from a fresh envelope's framework source
+publication/admission entry to successful handling of one complete query-output
+envelope at one sink. Source polling and upstream event age are excluded; graph
+queueing, query processing/commit, batching and effect work are included. Each
+fan-out sink and each distinct query output completes independently. `phase` is
+`steady`; bootstrap, scheduled-only and reconstructed replay without a valid
+original timing owner produce no sample. Metric labels never contain timing
+tokens, generations, event/trace IDs or row ordinals.
+
+Failed, dropped, partially handled and acceptance-only branches do not record a
+success. A live retry keeps the original start; successful completion records
+once before later checkpoint/acknowledgement work. Split worker batches retain
+stable original non-Noop row ordinals. Query-results outlets and ordinary
+application-channel forwarding are not terminal handling. Graph forwarding sinks
+must override `observes_handled_branch_latency()` to return false; this does not
+change their existing delivery contract, counters or trace topology.
+
+Tracking has finite per-graph origin/lease/branch and byte budgets, with no
+age-based expiry or eviction of admitted work. Default limits are 16,384
+accounting records and 8 MiB of record/key/row data; allocator/map overhead is
+additionally count-bounded, not included in that byte count. Capacity loss omits
+new timing, not business data, and seals new branch admission for that origin
+without discarding its admitted branches. Final live ownership releases timing
+and retry receipts; completed QoS history retains no timing owner.
+
+`GraphTelemetry::handled_branch_diagnostics()` exposes current charges,
+completion/rejection counts and coverage gaps without traces or an exporter.
+The histogram describes successful tracked branches, not upstream latency,
+all-branches completion, durable exactly-once totals, or an unbiased distribution
+when coverage is lost. Native propagation requires the V3 capability; older
+plugins remain supported with an explicit timing propagation gap. A terminal
+native handled callback can still be timed at the host boundary.
 
 Use `TelemetrySettings::new(profile).with_metrics(false)` for tracing-only
 policy, or `.with_tracing(false)` for metrics-only policy. Metric exclusions are

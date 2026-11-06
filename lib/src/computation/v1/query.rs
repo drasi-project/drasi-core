@@ -1879,7 +1879,9 @@ impl Transformer for ContinuousQueryTransformer {
     }
 
     async fn delivery_completed(&mut self, outputs: &[OutputEnvelope]) -> anyhow::Result<()> {
-        self.confirm_delivery(outputs).await
+        let result = self.confirm_delivery(outputs).await;
+        self.processing_context = self.processing_context.clone().without_handled_branch();
+        result
     }
 
     async fn transform(&mut self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {

@@ -92,6 +92,10 @@ async fn publish_batch_observed(
             .ok()
     };
     let mut work = (change_count > 0).then(|| telemetry.reaction_batch_work());
+    let timing_inputs = contexts
+        .iter()
+        .map(|(context, query, rows)| telemetry.reaction_input_context(query, *rows, context))
+        .collect::<Vec<_>>();
     let publish = publisher.publish_batch_with_retry(events, 3);
     let outcome = match observation {
         Some(observation) => observation.run(publish).await,
@@ -108,6 +112,9 @@ async fn publish_batch_observed(
     };
     if let Some(work) = &mut work {
         if outcome.is_ok() {
+            for input in timing_inputs {
+                input.completed();
+            }
             for (_, query, rows) in contexts {
                 if *rows > 0 {
                     work.handled(query, *rows, 1);
@@ -534,7 +541,7 @@ impl Reaction for PlatformReaction {
                                 telemetry.reaction(&execution_context, change_count)
                                     .map_err(|e| log::warn!("Failed to observe platform publication: {e}")).ok()
                             };
-                            let mut work = (change_count > 0).then(|| telemetry.reaction_work());
+                            let mut work = (change_count > 0).then(|| telemetry.reaction_work_context(&execution_context));
                             let publish = publisher.publish_with_retry(cloud_event, 3);
                             let outcome = match observation {
                                 Some(observation) => observation.run(publish).await,
