@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "status": "interrupted-unvalidated-partial",
+  "base": "25bda3bb2ef6eebef60dd6babdf69138466babae",
+  "baseSubject": "Fix router candidate binding and checkpoint seeding races",
+  "baseReconstruction": {
+    "remoteBase": "43e7d25034bc8fababf3021b3c6e17d476d42e4a",
+    "cumulativePatch": "patches/series/43e7d25034bc8fababf3021b3c6e17d476d42e4a--25bda3bb2ef6eebef60dd6babdf69138466babae.patch"
+  },
+  "patch": "25bda3bb--interrupted-router-follow-up.patch",
+  "sha256": "9bafeaf9dcdb88c6977284d06135f3040c98f4d69d4a20433c74f1c4eba14ba6",
+  "bytes": 17204,
+  "recovery": {
+    "source": "All seven edit operations recorded after the final router review in the archived development transcript",
+    "preEditStatus": "clean",
+    "editOperations": 7,
+    "changedFiles": [
+      "components/reactions/workgraph-router/src/candidate.rs",
+      "components/reactions/workgraph-router/src/tests.rs",
+      "components/reactions/workgraph-router/src/reaction.rs",
+      "lib/src/reactions/manager.rs"
+    ],
+    "postEditStatusAvailable": false,
+    "completedCommitAvailable": false,
+    "validationAvailable": false,
+    "handoffCountDiscrepancy": "A prior handoff called this a nine-dirty-file follow-up. The direct record shows a clean status immediately before seven edit operations touching four paths, followed by agent failure. No post-edit status snapshot exists to substantiate nine dirty files."
+  },
+  "intendedChanges": [
+    "Fail closed before binding an empty legacy candidate fingerprint when reservation or routing state records prior work.",
+    "Version the canonical candidate fingerprint and include normalized outcome plus other decision-relevant context.",
+    "Route a fresh-start OutboxGap through the configured recovery policy instead of unconditionally advancing to the latest sequence."
+  ],
+  "applicationVerification": {
+    "status": "passed",
+    "verifiedAt": "2026-09-13T01:56:58.914244+00:00",
+    "source": "Fresh GitHub repository archive for remoteBase, fetched through the GitHub API",
+    "command": "git apply --check <patch> && git apply <patch>",
+    "preimage": "The router base was reconstructed by applying the 25bda3bb cumulative series patch to the fresh remote-base archive before applying this patch."
+  },
+  "limitations": [
+    "The interrupted edit did not add the requested fresh-gap tests.",
+    "No formatting, build, clippy, or test result followed these edits.",
+    "The permanent-invalid-candidate poison-row blocker is not addressed.",
+    "This patch is evidence for later issue-specific extraction, not a completed fix."
+  ]
+}

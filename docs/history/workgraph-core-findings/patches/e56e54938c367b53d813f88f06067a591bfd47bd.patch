@@ -1,0 +1,72 @@
+diff --git a/components/reactions/github-project-item-refresh/README.md b/components/reactions/github-project-item-refresh/README.md
+index ea6b0d9b85513fbc63fe0cbbdcd86266abc717b9..75f8197209bc0737cde1bf76890f3928d0c1a41c 100644
+--- a/components/reactions/github-project-item-refresh/README.md
++++ b/components/reactions/github-project-item-refresh/README.md
+@@ -33,11 +33,11 @@ stateStore:
+   path: "${STATE_STORE_PATH:-./data/github-project-refresh.redb}"
+ 
+ reactions:
+-  - id: gh-project-item-refresh
++  - id: refresh-github-project-items
+     kind: github-project-item-refresh
+     queries:
+-      - project-item-invalidations
+-    autoStart: true
++      - refresh-github-project-item
++    autoStart: false
+     githubToken: "${GITHUB_TOKEN}"
+     graphqlUrl: https://api.github.com/graphql
+     graphqlHeaders:
+diff --git a/components/reactions/github-project-item-refresh/src/tests.rs b/components/reactions/github-project-item-refresh/src/tests.rs
+index ec1522e1ae66733bf3683674938f898259d65925..b2e35caa933b614adacc9cf243ae3f2ecf64d775 100644
+--- a/components/reactions/github-project-item-refresh/src/tests.rs
++++ b/components/reactions/github-project-item-refresh/src/tests.rs
+@@ -663,10 +663,10 @@ fn generated_descriptor_schema_has_exact_flat_config_contract() {
+ async fn exact_flat_server_yaml_maps_to_descriptor_config() {
+     let yaml = r#"
+ kind: github-project-item-refresh
+-id: gh-project-item-refresh
+-autoStart: true
++id: refresh-github-project-items
++autoStart: false
+ queries:
+-  - project-item-invalidations
++  - refresh-github-project-item
+ githubToken: "${GITHUB_TOKEN_TEST:-test-token}"
+ graphqlUrl: https://api.github.com/graphql
+ graphqlHeaders:
+@@ -694,9 +694,9 @@ recoveryPolicy: strict
+     let auto_start = entry.remove("autoStart").expect("server autoStart");
+     let queries = entry.remove("queries").expect("server queries");
+     assert_eq!(kind, json!("github-project-item-refresh"));
+-    assert_eq!(id, json!("gh-project-item-refresh"));
+-    assert_eq!(auto_start, json!(true));
+-    assert_eq!(queries, json!(["project-item-invalidations"]));
++    assert_eq!(id, json!("refresh-github-project-items"));
++    assert_eq!(auto_start, json!(false));
++    assert_eq!(queries, json!(["refresh-github-project-item"]));
+     assert!(
+         !entry.contains_key("config"),
+         "server plugin config must remain flat"
+@@ -707,16 +707,16 @@ recoveryPolicy: strict
+         .expect("flat fields conform to generated descriptor DTO");
+     let reaction = GitHubProjectItemRefreshDescriptor
+         .create_reaction(
+-            "gh-project-item-refresh",
+-            vec!["project-item-invalidations".to_string()],
++            "refresh-github-project-items",
++            vec!["refresh-github-project-item".to_string()],
+             &plugin_config,
+-            true,
++            false,
+         )
+         .await
+         .expect("descriptor constructs reaction from flat server fields");
+     assert_eq!(reaction.type_name(), "github-project-item-refresh");
+-    assert_eq!(reaction.query_ids(), vec!["project-item-invalidations"]);
+-    assert!(reaction.auto_start());
++    assert_eq!(reaction.query_ids(), vec!["refresh-github-project-item"]);
++    assert!(!reaction.auto_start());
+ }
+ 
+ #[tokio::test]

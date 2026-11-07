@@ -1,0 +1,395 @@
+diff --git a/components/reactions/workgraph-router/src/candidate.rs b/components/reactions/workgraph-router/src/candidate.rs
+index 80bd8f7683b8f7b687944ca4ef165cc084a6eb75..37f24d9a69edfff7e6d86e22b9252b4d0bb657e6 100644
+--- a/components/reactions/workgraph-router/src/candidate.rs
++++ b/components/reactions/workgraph-router/src/candidate.rs
+@@ -15,6 +15,8 @@
+ use serde::{Deserialize, Serialize};
+ use uuid::Uuid;
+ 
++const CANDIDATE_FINGERPRINT_CONTRACT: &str = "workgraph-routing-candidate/v1";
++
+ #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+ #[serde(deny_unknown_fields, rename_all = "camelCase")]
+ pub struct RoutingCandidate {
+@@ -70,50 +72,53 @@ impl RoutingCandidate {
+         observed_authors.dedup();
+ 
+         let canonical = serde_json::json!({
+-            "event": {
+-                "id": self.event_id,
+-                "type": self.event_type,
+-                "executionId": self.execution_id,
+-                "requiredEventType": self.required_event_type,
+-            },
+-            "subject": {
+-                "repo": self.subject_repo,
+-                "issueNumber": self.subject_issue_number,
+-            },
+-            "project": {
+-                "id": self.project_id,
+-                "itemId": self.project_item_id,
+-            },
+-            "route": {
+-                "id": self.route_id,
+-                "expectedEventId": self.route_expected_event_id,
+-                "expectedEventType": self.route_expected_event_type,
+-                "expectedSubjectRepo": self.route_expected_subject_repo,
+-                "expectedSubjectIssueNumber": self.route_expected_subject_issue_number,
+-                "contentVersion": self.route_content_version,
+-                "contentProfile": self.route_content_profile,
+-            },
+-            "responsibility": {
+-                "id": self.responsibility_id,
+-                "type": self.responsibility_type,
+-                "actor": self.responsibility_actor,
+-            },
+-            "provenance": {
+-                "commentId": self.comment_id,
+-                "commentAuthor": self.comment_author,
+-                "commentProvenanceEventId": self.comment_provenance_event_id,
+-                "commentProvenanceEventType": self.comment_provenance_event_type,
+-                "routingAuthor": self.routing_author,
+-                "launcherAuthor": self.launcher_author,
+-                "agentAuthor": self.agent_author,
+-                "routerAuthor": self.router_author,
+-                "observedAuthors": observed_authors,
++            "contract": CANDIDATE_FINGERPRINT_CONTRACT,
++            "candidate": {
++                "event": {
++                    "id": self.event_id,
++                    "type": self.event_type,
++                    "executionId": self.execution_id,
++                    "requiredEventType": self.required_event_type,
++                    "outcome": self.outcome_key().to_ascii_lowercase(),
++                },
++                "subject": {
++                    "repo": self.subject_repo,
++                    "issueNumber": self.subject_issue_number,
++                    "projectId": self.project_id,
++                    "projectItemId": self.project_item_id,
++                },
++                "route": {
++                    "id": self.route_id,
++                    "expectedEventId": self.route_expected_event_id,
++                    "expectedEventType": self.route_expected_event_type,
++                    "expectedSubjectRepo": self.route_expected_subject_repo,
++                    "expectedSubjectIssueNumber": self.route_expected_subject_issue_number,
++                    "contentVersion": self.route_content_version,
++                    "contentProfile": self.route_content_profile,
++                },
++                "responsibility": {
++                    "id": self.responsibility_id,
++                    "type": self.responsibility_type,
++                    "actor": self.responsibility_actor,
++                    "submitterActor": self.submitter_actor,
++                },
++                "provenance": {
++                    "commentId": self.comment_id,
++                    "commentAuthor": self.comment_author,
++                    "commentEdited": self.comment_edited,
++                    "commentProvenanceEventId": self.comment_provenance_event_id,
++                    "commentProvenanceEventType": self.comment_provenance_event_type,
++                    "routingAuthor": self.routing_author,
++                    "launcherAuthor": self.launcher_author,
++                    "agentAuthor": self.agent_author,
++                    "routerAuthor": self.router_author,
++                    "observedAuthors": observed_authors,
++                },
++                "content": {
++                    "version": self.content_version,
++                    "profile": self.content_profile,
++                }
+             },
+-            "submitter": self.submitter_actor,
+-            "content": {
+-                "version": self.content_version,
+-                "profile": self.content_profile,
+-            }
+         });
+ 
+         let canonical_json = serde_json::to_string(&canonical)
+diff --git a/components/reactions/workgraph-router/src/tests.rs b/components/reactions/workgraph-router/src/tests.rs
+index 6e7a9b1aa23bd27a79a3ce15f7dd0469be5460c8..ee70054eafb139f34218323f683d4f9c45a42fd9 100644
+--- a/components/reactions/workgraph-router/src/tests.rs
++++ b/components/reactions/workgraph-router/src/tests.rs
+@@ -212,6 +212,22 @@ fn candidate_fingerprint_is_deterministic_and_collision_resistant_for_key_fields
+         different.candidate_fingerprint(),
+         "fingerprint must change when immutable candidate context changes"
+     );
++
++    let mut canonicalized_same = sample_candidate();
++    canonicalized_same.outcome = "  PaSsEd  ".to_string();
++    assert_eq!(
++        a.candidate_fingerprint(),
++        canonicalized_same.candidate_fingerprint(),
++        "fingerprint should canonicalize outcome before hashing"
++    );
++
++    let mut failed = sample_candidate();
++    failed.outcome = "failed".to_string();
++    assert_ne!(
++        a.candidate_fingerprint(),
++        failed.candidate_fingerprint(),
++        "passed and failed outcomes must never collide"
++    );
+ }
+ 
+ #[tokio::test]
+diff --git a/components/reactions/workgraph-router/src/reaction.rs b/components/reactions/workgraph-router/src/reaction.rs
+index 24f94a4cc3c2de6275ae5e66377d91c61d39d3d1..5cf0aa0e87cc7fcc884ac5d11df9ed268b4823bb 100644
+--- a/components/reactions/workgraph-router/src/reaction.rs
++++ b/components/reactions/workgraph-router/src/reaction.rs
+@@ -57,6 +57,12 @@ struct ReservationCandidateMismatchError {
+     message: String,
+ }
+ 
++#[derive(Debug, thiserror::Error)]
++#[error("{message}")]
++struct LegacyReservationMigrationError {
++    message: String,
++}
++
+ #[derive(Debug, Clone)]
+ struct OwnedReservation {
+     record: ReservationRecord,
+@@ -72,6 +78,55 @@ fn fingerprint_is_unset(value: &str) -> bool {
+     value.trim().is_empty()
+ }
+ 
++fn routing_state_has_recorded_work(state: &RoutingStateRecord) -> bool {
++    state.decision.is_some()
++        || state.selected_transition.is_some()
++        || state.progress.decision_comment_written
++        || state.progress.responsibility_written
++        || state.progress.project_status_updated
++        || state.ambiguous
++        || state.failed
++        || state.failure_fencing_epoch.is_some()
++        || state.last_error.is_some()
++}
++
++fn ensure_legacy_fingerprint_bind_is_pristine(
++    reservation: &ReservationRecord,
++    state: &RoutingStateRecord,
++    strict_recovery: bool,
++) -> anyhow::Result<()> {
++    let reservation_has_usage_markers = reservation.decision_id.is_some() || reservation.completed;
++    let state_has_usage_markers = routing_state_has_recorded_work(state);
++    if !reservation_has_usage_markers && !state_has_usage_markers {
++        return Ok(());
++    }
++
++    let resolution_hint = if strict_recovery {
++        "strictRecovery=true: startup is blocked until manual migration/resolution completes"
++    } else {
++        "manual migration/resolution is required before this reservation can be resumed safely"
++    };
++    Err(LegacyReservationMigrationError {
++        message: format!(
++            "reservation '{}' has empty legacy candidateFingerprint but persisted state is not pristine \
++             (reservationDecisionId={}, reservationCompleted={}, hasDecision={}, hasTransition={}, \
++             hasProgress={}, failed={}, ambiguous={}, hasFailureEpoch={}, hasLastError={}); {}",
++            reservation.reservation_key,
++            reservation.decision_id.is_some(),
++            reservation.completed,
++            state.decision.is_some(),
++            state.selected_transition.is_some(),
++            state.progress != SideEffectProgress::default(),
++            state.failed,
++            state.ambiguous,
++            state.failure_fencing_epoch.is_some(),
++            state.last_error.is_some(),
++            resolution_hint
++        ),
++    }
++    .into())
++}
++
+ fn candidate_mismatch_error(
+     reservation_key: &str,
+     candidate: &RoutingCandidate,
+@@ -1051,6 +1106,16 @@ async fn reserve_or_resume(
+             ));
+         }
+ 
++        if fingerprint_is_unset(&persisted.record.candidate_fingerprint)
++            || fingerprint_is_unset(&state.candidate_fingerprint)
++        {
++            ensure_legacy_fingerprint_bind_is_pristine(
++                &persisted.record,
++                &state,
++                config.strict_recovery,
++            )?;
++        }
++
+         if persisted.record.owner_instance_id.as_deref() == Some(runner_instance_id) {
+             let mut owned = OwnedReservation {
+                 record: persisted.record.clone(),
+@@ -1980,7 +2045,7 @@ mod tests {
+     }
+ 
+     #[tokio::test]
+-    async fn legacy_records_are_bound_to_candidate_fingerprint_before_resume() {
++    async fn legacy_pristine_records_are_bound_to_candidate_fingerprint_before_resume() {
+         let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+         let config = sample_config();
+         let candidate = sample_candidate();
+@@ -2050,6 +2115,101 @@ mod tests {
+         );
+     }
+ 
++    #[tokio::test]
++    async fn legacy_unbound_partial_reservation_collision_requires_manual_resolution() {
++        let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++        let config = sample_config();
++        let candidate_a = sample_candidate();
++        let mut candidate_b = sample_candidate();
++        candidate_b.project_item_id = "PVTI_item_other".to_string();
++        candidate_b.comment_id = 2026;
++        candidate_b.event_id = "event-other".to_string();
++        let reaction_a = make_reaction("router-legacy-partial-a", &config);
++        let reaction_b = make_reaction("router-legacy-partial-b", &config);
++        let reservation_key = candidate_a.reservation_key();
++
++        let reservation = ReservationRecord {
++            reservation_key: reservation_key.clone(),
++            execution_id: candidate_a.execution_id.clone(),
++            required_event_type: candidate_a.required_event_type.clone(),
++            candidate_fingerprint: String::new(),
++            owner_instance_id: Some(reaction_a.runner_instance_id.clone()),
++            fencing_epoch: 4,
++            lease_expires_at_unix_secs: chrono::Utc::now().timestamp() + 300,
++            policy_id: config.policy_id.clone(),
++            policy_type: config.policy_type.clone(),
++            policy_version: config.policy_version.clone(),
++            decision_id: Some("legacy-decision".to_string()),
++            created_at: chrono::Utc::now().to_rfc3339(),
++            completed: false,
++        };
++        crate::state::save_reservation(store.clone(), "router-legacy-partial", &reservation)
++            .await
++            .expect("seed legacy reservation");
++
++        let mut state = RoutingStateRecord::new(&candidate_a, &reservation);
++        state.candidate_fingerprint = String::new();
++        state.selected_transition = Some((
++            "AwaitingRouting".to_string(),
++            "NeedsMoreInformation".to_string(),
++        ));
++        state.progress = SideEffectProgress {
++            decision_comment_written: true,
++            responsibility_written: false,
++            project_status_updated: false,
++        };
++        state.mark_error_with_epoch("legacy partial failure", true, reservation.fencing_epoch);
++        save_routing_state(store.clone(), "router-legacy-partial", &state)
++            .await
++            .expect("seed legacy state");
++
++        let err = reserve_or_resume(
++            store.clone(),
++            "router-legacy-partial",
++            &config,
++            &candidate_b,
++            &reaction_b.runner_instance_id,
++        )
++        .await
++        .expect_err("legacy partial reservation must require manual migration");
++        let message = err.to_string();
++        assert!(
++            message.contains("manual migration/resolution"),
++            "unexpected migration error: {message}"
++        );
++        assert!(
++            message.contains("strictRecovery=true"),
++            "strict recovery hint should be present: {message}"
++        );
++
++        let persisted_reservation =
++            crate::state::load_reservation(store.clone(), "router-legacy-partial", &reservation_key)
++                .await
++                .expect("reload reservation")
++                .expect("reservation exists");
++        assert!(
++            persisted_reservation.candidate_fingerprint.is_empty(),
++            "legacy reservation fingerprint must remain unbound on migration error"
++        );
++        assert_eq!(
++            persisted_reservation.decision_id.as_deref(),
++            Some("legacy-decision")
++        );
++
++        let persisted_state =
++            crate::state::load_routing_state(store, "router-legacy-partial", &reservation_key)
++                .await
++                .expect("reload state")
++                .expect("state exists");
++        assert!(
++            persisted_state.candidate_fingerprint.is_empty(),
++            "legacy state fingerprint must remain unbound on migration error"
++        );
++        assert!(persisted_state.progress.decision_comment_written);
++        assert!(persisted_state.failed);
++        assert!(persisted_state.ambiguous);
++    }
++
+     #[tokio::test]
+     async fn expired_dead_owner_reservation_is_reclaimed_with_epoch_increment() {
+         let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+diff --git a/lib/src/reactions/manager.rs b/lib/src/reactions/manager.rs
+index f07b64a17b438f1bfb812346fc1480ca112f5c7e..52c6a4bdfc8ba11c3ba6830a440da040c3d6ccbe 100644
+--- a/lib/src/reactions/manager.rs
++++ b/lib/src/reactions/manager.rs
+@@ -546,6 +546,7 @@ impl ReactionManager {
+                             query_id,
+                             &reaction,
+                             &query,
++                            policy,
+                             &state_store,
+                             &mut bootstrap_queries,
+                             &per_query_metrics,
+@@ -655,6 +656,7 @@ impl ReactionManager {
+         query_id: &str,
+         reaction: &Arc<dyn Reaction>,
+         query: &Arc<dyn Query>,
++        policy: ReactionRecoveryPolicy,
+         state_store: &Option<Arc<dyn StateStoreProvider>>,
+         bootstrap_queries: &mut Vec<(String, Arc<dyn Query>)>,
+         metrics: &Arc<ReactionMetrics>,
+@@ -757,7 +759,18 @@ impl ReactionManager {
+                         "[{reaction_id}] Fresh start for query '{query_id}' — outbox gap, latest_seq={}",
+                         gap.latest_sequence
+                     );
+-                    gap.latest_sequence
++                    return self
++                        .apply_recovery_policy(
++                            reaction_id,
++                            query_id,
++                            reaction,
++                            query,
++                            policy,
++                            state_store,
++                            bootstrap_queries,
++                            metrics,
++                        )
++                        .await;
+                 }
+                 Err(FetchError::NotRunning { .. } | FetchError::TimedOut) => {
+                     info!(
+@@ -1713,7 +1726,7 @@ mod tests {
+     use crate::channels::QuerySubscriptionResponse;
+     use crate::component_graph::ComponentStatusHandle;
+     use crate::config::schema::QueryConfig;
+-    use crate::queries::output_state::{OutboxResponse, SnapshotResponse};
++    use crate::queries::output_state::{OutboxGap, OutboxResponse, SnapshotResponse};
+     use crate::sources::tests::TestMockSource;
+     use async_trait::async_trait;
+     use drasi_core::models::{Element, ElementMetadata, ElementPropertyMap, ElementReference};
+@@ -2484,6 +2497,7 @@ mod tests {
+                 "q1",
+                 &reaction,
+                 &query,
++                ReactionRecoveryPolicy::Strict,
+                 &state_store,
+                 &mut bootstrap_queries,
+                 &metrics,
