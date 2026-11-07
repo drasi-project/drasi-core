@@ -86,7 +86,7 @@ async fn empty_instance_stays_live_without_implicit_components() -> anyhow::Resu
     core.start().await?;
     let first = core.create_source("orders", true, source).await?;
     tokio::time::timeout(Duration::from_secs(10), first.wait_started()).await??;
-    core.remove_source(first.id().as_str(), false).await?;
+    core.remove_source_by_id(first.id(), false).await?;
     assert!(control.desired_snapshot().nodes.is_empty());
     assert!(control.observed().components.is_empty());
     assert!(first.observed().is_err());
@@ -102,7 +102,7 @@ async fn empty_instance_stays_live_without_implicit_components() -> anyhow::Resu
         core.snapshot_configuration().await?.sources[0].id,
         replacement.id().as_str()
     );
-    core.remove_source(replacement.id().as_str(), false).await?;
+    core.remove_source_by_id(replacement.id(), false).await?;
     assert!(control.desired_snapshot().nodes.is_empty());
     core.shutdown().await?;
     Ok(())
@@ -288,14 +288,14 @@ async fn owned_native_admission_resolves_ordinary_named_inputs_without_a_backgro
             .wait_created()
             .await?;
         assert_eq!(
-            core.get_query_config(query.id().as_str()).await?.inputs[0]
+            core.get_query_config_by_id(query.id()).await?.inputs[0]
                 .component
                 .as_id(),
             Some(&id)
         );
         core.rename_component(id.as_str(), "renamed-native").await?;
         assert_eq!(
-            core.get_query_config(query.id().as_str()).await?.inputs[0]
+            core.get_query_config_by_id(query.id()).await?.inputs[0]
                 .component
                 .as_id(),
             Some(&id)
@@ -319,7 +319,7 @@ async fn default_creation_owns_uuid_and_rejects_all_external_admission_paths() -
     created.wait_created().await?;
     assert_eq!(core.component_by_name("orders")?.id(), created.id());
     assert_eq!(
-        core.get_source_info(created.id().as_str()).await?.name,
+        core.get_source_info_by_id(created.id()).await?.name,
         "orders"
     );
     let external_id = ComponentId::generate();
@@ -371,7 +371,7 @@ async fn default_creation_owns_uuid_and_rejects_all_external_admission_paths() -
         .await?;
     assert!(invalid.wait_created().await.is_err());
     let id = created.id().clone();
-    core.remove_source(id.as_str(), false).await?;
+    core.remove_source_by_id(&id, false).await?;
     assert!(created.observed().is_err());
     assert!(external(
         &core.add_source("orders", source(id)?).await.unwrap_err()
@@ -403,7 +403,7 @@ async fn opt_in_preserves_external_ids_and_conflicts_keep_existing_metadata() ->
         assert_eq!(conflict.name, name("orders"));
     }
     let old = core.computation_component(id.as_str())?;
-    core.remove_source(id.as_str(), false).await?;
+    core.remove_source_by_id(&id, false).await?;
     core.add_source("orders", source(id.clone())?).await?;
     assert!(old.observed().is_err());
     assert_eq!(core.component_by_name("orders")?.id(), &id);
@@ -497,10 +497,7 @@ async fn reaction_factory_waits_for_names_and_keeps_each_uuid_binding() -> anyho
             .await?;
         first.wait_created().await?;
         assert_eq!(
-            core.get_reaction_info(reaction.id().as_str())
-                .await?
-                .queries[0]
-                .as_id(),
+            core.get_reaction_info_by_id(reaction.id()).await?.queries[0].as_id(),
             Some(first.id())
         );
         core.rename_component(first.id().as_str(), "renamed-view")
@@ -535,7 +532,7 @@ async fn reaction_factory_waits_for_names_and_keeps_each_uuid_binding() -> anyho
         core.rename_component(reaction.id().as_str(), "renamed-consumer")
             .await?;
         assert_eq!(
-            core.get_reaction_info(reaction.id().as_str()).await?.name,
+            core.get_reaction_info_by_id(reaction.id()).await?.name,
             "renamed-consumer"
         );
         core.shutdown().await?;
@@ -571,14 +568,14 @@ async fn named_query_inputs_wait_then_bind_once_across_rename_and_name_reuse() -
     let query_id = query.id().clone();
     let query = core.computation_component(query_id.as_str())?;
     tokio::time::timeout(Duration::from_secs(10), query.wait_created()).await??;
-    let bound = core.get_query_config(query_id.as_str()).await?;
+    let bound = core.get_query_config_by_id(&query_id).await?;
     assert_eq!(bound.inputs[0].component.as_id(), Some(upstream.id()));
     let before = core.computation_control()?.desired_snapshot();
     core.rename_component(upstream.id().as_str(), "purchases")
         .await?;
     let replacement = core.create_source("orders", true, source).await?;
     assert_ne!(replacement.id(), upstream.id());
-    let after = core.get_query_config(query_id.as_str()).await?;
+    let after = core.get_query_config_by_id(&query_id).await?;
     assert_eq!(after.inputs[0].component.as_id(), Some(upstream.id()));
     assert_eq!(
         before
@@ -596,7 +593,7 @@ async fn named_query_inputs_wait_then_bind_once_across_rename_and_name_reuse() -
     core.rename_component(query_id.as_str(), "renamed-view")
         .await?;
     assert_eq!(
-        core.get_query_config(query_id.as_str()).await?.name,
+        core.get_query_config_by_id(&query_id).await?.name,
         "renamed-view"
     );
     assert_eq!(core.component_by_name("renamed-view")?.id(), &query_id);
@@ -715,7 +712,7 @@ async fn ordinary_processing_continues_under_the_same_uuid_after_rename() -> any
         reaction.wait_started().await?;
         let output = output.lock().unwrap().take().unwrap();
         let mut results = output.take_receiver().await.unwrap();
-        let mut subscription = core.subscribe_query_results(query.id().as_str()).await?;
+        let mut subscription = core.subscribe_query_results_by_id(query.id()).await?;
         let input = input.lock().unwrap().take().unwrap();
         input
             .send_node_insert(
@@ -746,23 +743,20 @@ async fn ordinary_processing_continues_under_the_same_uuid_after_rename() -> any
             .await?;
         subscription.stream.next().await.unwrap()?;
         assert_eq!(results.recv().await.unwrap().query_id, query.id().as_str());
-        assert_eq!(core.get_query_results(query.id().as_str()).await?.len(), 2);
+        assert_eq!(core.get_query_results_by_id(query.id()).await?.len(), 2);
         assert_eq!(
             core.component_by_name("renamed-view")?.generation(),
             generation
         );
         assert_eq!(
-            core.get_reaction_info(reaction.id().as_str())
-                .await?
-                .queries[0]
-                .as_id(),
+            core.get_reaction_info_by_id(reaction.id()).await?.queries[0].as_id(),
             Some(query.id())
         );
         drop(subscription);
         core.stop().await?;
         core.start().await?;
         assert_eq!(core.component_by_name("renamed-view")?.id(), query.id());
-        assert_eq!(core.get_query_results(query.id().as_str()).await?.len(), 2);
+        assert_eq!(core.get_query_results_by_id(query.id()).await?.len(), 2);
         core.shutdown().await?;
         Ok::<_, anyhow::Error>(())
     })

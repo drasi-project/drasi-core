@@ -35,8 +35,57 @@
 //! assert!(error.downcast_ref::<std::io::Error>().is_some());
 //! ```
 
-use crate::error::DrasiError;
+use crate::{
+    computation::v1::{ComponentId, ComponentName},
+    error::DrasiError,
+    lib_core::DrasiLib,
+};
 use anyhow::Result as AnyhowResult;
+
+impl DrasiLib {
+    pub(crate) fn resolve_component_name(
+        &self,
+        name: &str,
+        component_type: &'static str,
+    ) -> crate::error::Result<ComponentId> {
+        self.resolve_component_name_inner(name, Some(component_type))
+    }
+
+    pub(crate) fn resolve_any_component_name(
+        &self,
+        name: &str,
+    ) -> crate::error::Result<ComponentId> {
+        self.resolve_component_name_inner(name, None)
+    }
+
+    fn resolve_component_name_inner(
+        &self,
+        name: &str,
+        component_type: Option<&'static str>,
+    ) -> crate::error::Result<ComponentId> {
+        self.state_guard.require_initialized()?;
+        let name = ComponentName::try_new(name).map_err(anyhow::Error::from)?;
+        let publication = self.computation_control()?.registry_snapshot();
+        let node = publication
+            .desired
+            .component_by_name(&name)
+            .filter(|node| {
+                component_type.is_none_or(|component_type| {
+                    crate::computation::runtime::Runtime::public_component_kind(
+                        &publication.desired,
+                        node,
+                    ) == Some(component_type)
+                })
+            })
+            .ok_or_else(|| {
+                DrasiError::component_not_found(
+                    component_type.unwrap_or("component"),
+                    name.as_str(),
+                )
+            })?;
+        Ok(node.descriptor.id().clone())
+    }
+}
 
 // ============================================================================
 // Error mapping functions
@@ -192,7 +241,7 @@ mod tests {
         use crate::context::workers::WorkerCleanupError;
 
         let cause = GraphError::Component {
-            component: ComponentId::try_new("input").unwrap(),
+            component: ComponentId::generate(),
             operation: "stop",
             source: anyhow::Error::new(WorkerCleanupError::TimedOut {
                 timeout: std::time::Duration::from_secs(5),

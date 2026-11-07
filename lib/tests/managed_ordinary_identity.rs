@@ -464,7 +464,7 @@ async fn pending_records_and_bindings_commit_before_construction_and_restore_fro
     )
     .await??;
     assert_eq!(
-        core.get_query_config(query_id.as_str()).await?.inputs[0]
+        core.get_query_config_by_id(&query_id).await?.inputs[0]
             .component
             .as_id(),
         Some(&source_id)
@@ -498,14 +498,14 @@ async fn pending_records_and_bindings_commit_before_construction_and_restore_fro
         query_generation
     );
     assert_eq!(
-        core.get_query_config(query_id.as_str()).await?.name,
+        core.get_query_config_by_id(&query_id).await?.name,
         "view-renamed"
     );
     core.create_managed_ordinary_component(renamed.revision, "reuse-name", source("orders"))
         .await?;
     settle(&core).await?;
     assert_eq!(
-        core.get_query_config(query_id.as_str()).await?.inputs[0]
+        core.get_query_config_by_id(&query_id).await?.inputs[0]
             .component
             .as_id(),
         Some(&source_id)
@@ -520,7 +520,7 @@ async fn pending_records_and_bindings_commit_before_construction_and_restore_fro
         &reaction_id
     );
     assert_eq!(
-        fresh.get_query_config(query_id.as_str()).await?.inputs[0]
+        fresh.get_query_config_by_id(&query_id).await?.inputs[0]
             .component
             .as_id(),
         Some(&source_id)
@@ -620,7 +620,7 @@ async fn actual_loaded_records_bind_names_durably_before_open_constructs_them() 
     assert!(load(&file.0)?.current.revision > 0);
     assert_eq!(core.component_by_name("orders")?.id(), &source_id);
     assert_eq!(
-        core.get_query_config(query_id.as_str()).await?.inputs[0]
+        core.get_query_config_by_id(&query_id).await?.inputs[0]
             .component
             .as_id(),
         Some(&source_id)
@@ -831,7 +831,7 @@ async fn ordinary_record_replacement_rebinds_resources_and_preserves_uuid() -> a
     assert_eq!(resolver.sources.load(Ordering::SeqCst), 2);
     assert_eq!(resolver.reactions.load(Ordering::SeqCst), 2);
     assert_eq!(
-        core.get_query_config(query_id.as_str()).await?.inputs[0]
+        core.get_query_config_by_id(&query_id).await?.inputs[0]
             .component
             .as_id(),
         Some(old_source.id())

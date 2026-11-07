@@ -223,9 +223,9 @@ update, deletion, aggregation update or no-op; it is not just a JSON row.
 For a current view rather than the change stream:
 
 ```rust,ignore
-let query_id = drasi.component_by_name("order-names")?.id().to_string();
-let rows = drasi.get_query_results(&query_id).await?;
-let metrics = drasi.get_query_output_metrics(&query_id).await?;
+let query_id = drasi.component_by_name("order-names")?.id().clone();
+let rows = drasi.get_query_results_by_id(&query_id).await?;
+let metrics = drasi.get_query_output_metrics_by_id(&query_id).await?;
 ```
 
 The [application reaction guide](../../components/reactions/application/README.md)

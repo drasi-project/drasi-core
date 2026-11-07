@@ -327,9 +327,7 @@ mod tests {
         let source = add(&core, "owned", false).await;
         source.start().await.unwrap();
         source.wait_started().await.unwrap();
-        core.remove_source(source.id().as_str(), true)
-            .await
-            .unwrap();
+        core.remove_source_by_id(source.id(), true).await.unwrap();
         assert_eq!(
             trace.events(),
             ["create", "bind", "initialize", "start", "stop", "delete", "dispose"]
@@ -345,10 +343,7 @@ mod tests {
         source.start().await.unwrap();
         source.wait_started().await.unwrap();
         trace.fail_delete.store(true, Ordering::Release);
-        assert!(core
-            .remove_source(source.id().as_str(), true)
-            .await
-            .is_err());
+        assert!(core.remove_source_by_id(source.id(), true).await.is_err());
         assert!(source.observed().is_ok());
         assert!(!trace.events().contains(&"dispose"));
         assert!(source.start().await.is_err());

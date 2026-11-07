@@ -535,9 +535,7 @@ async fn default_builder_supports_empty_add_remove_readd_without_placeholder() {
         .await
         .expect("empty controller must accept and activate its first addition")
         .unwrap();
-    core.remove_source(first.id().as_str(), false)
-        .await
-        .unwrap();
+    core.remove_source_by_id(first.id(), false).await.unwrap();
     assert!(control.desired_snapshot().nodes.is_empty());
     assert!(control.observed().components.is_empty());
     assert!(first.observed().is_err());
@@ -555,7 +553,7 @@ async fn default_builder_supports_empty_add_remove_readd_without_placeholder() {
         .expect("controller must stay available after its last component is removed")
         .unwrap();
     assert_eq!(
-        core.get_source_status(replacement.id().as_str())
+        core.get_source_status_by_id(replacement.id())
             .await
             .unwrap(),
         ComponentStatus::Running
@@ -565,7 +563,7 @@ async fn default_builder_supports_empty_add_remove_readd_without_placeholder() {
         first.observed().is_err(),
         "retired generation must not revive"
     );
-    core.remove_source(replacement.id().as_str(), false)
+    core.remove_source_by_id(replacement.id(), false)
         .await
         .unwrap();
     assert!(control.desired_snapshot().nodes.is_empty());

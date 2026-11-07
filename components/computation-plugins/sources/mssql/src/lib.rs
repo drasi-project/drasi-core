@@ -4,7 +4,7 @@
 mod source;
 use anyhow::{Context, Result};
 use drasi_computation_contracts::{
-    ComponentId, ComponentRole, GraphChangeCodec, ImplementationIdentity, StreamId,
+    ComponentRole, GraphChangeCodec, ImplementationIdentity, StreamId,
 };
 use drasi_computation_plugin_sdk::{
     Capabilities, Component, ConfigSchema, ConfigType, ControlSender, CreateRequest,
@@ -52,10 +52,7 @@ impl Factory for MsSqlSourceFactory {
             role: ComponentRole::Source,
             configuration_version: 1,
             configuration,
-            ports: MsSqlSource::describe(ComponentId::try_new("mssql").expect("id"))
-                .expect("descriptor")
-                .ports()
-                .to_vec(),
+            ports: MsSqlSource::ports().expect("constant port descriptor"),
             completion: None,
             capabilities: Capabilities::default(),
         }
@@ -103,10 +100,30 @@ drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 mod tests {
     use super::*;
     #[test]
-    fn real_factory_exports_consumer_progress_without_constructor_io() -> Result<()> {
+    fn factory_metadata_constructs_without_database_io() -> Result<()> {
         drasi_computation_plugin_sdk::ExportedPlugin::new(plugin()?)?;
+        #[cfg(feature = "dynamic-plugin")]
+        assert!(!drasi_computation_plugin_metadata().is_null());
+        let metadata = MsSqlSourceFactory.metadata();
+        assert_eq!(metadata.role, ComponentRole::Source);
+        assert_eq!(metadata.completion, None);
+        assert_eq!(metadata.ports, MsSqlSource::ports()?);
+        assert_eq!(metadata.ports.len(), 1);
+        assert_eq!(metadata.ports[0].id().as_str(), "out");
+        assert_eq!(
+            metadata.ports[0].direction(),
+            drasi_computation_contracts::PortDirection::Output
+        );
+        assert_eq!(
+            metadata.ports[0].schema(),
+            GraphChangeCodec::schema().descriptor()
+        );
+        let id = drasi_computation_contracts::ComponentId::generate();
+        let descriptor = MsSqlSource::describe(id.clone())?;
+        assert_eq!(descriptor.id(), &id);
+        assert_eq!(descriptor.ports(), metadata.ports.as_slice());
         assert!(MsSqlSourceFactory.supports_consumer_progress());
-        assert!(MsSqlSourceFactory.metadata().configuration.fields["settings"].secret);
+        assert!(metadata.configuration.fields["settings"].secret);
         Ok(())
     }
 }

@@ -16,13 +16,16 @@
 //!
 //! This module provides all reaction-related operations including adding, removing,
 //! starting, and stopping reactions.
+//! String selectors are exact current reaction names, including UUID-shaped names.
+//! Use the paired `_by_id` methods for explicit [`crate::config::ComponentId`]
+//! selection.
 
 use futures::stream::Stream;
 use std::collections::HashMap;
 
 use crate::channels::{ComponentEvent, ComponentStatus};
 use crate::component_ops::map_component_error;
-use crate::config::ReactionRuntime;
+use crate::config::{ComponentId, ReactionRuntime};
 use crate::error::Result;
 use crate::lib_core::DrasiLib;
 use crate::reactions::Reaction;
@@ -251,14 +254,20 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn remove_reaction(&self, id: &str, cleanup: bool) -> Result<()> {
+    pub async fn remove_reaction(&self, name: &str, cleanup: bool) -> Result<()> {
+        let id = self.resolve_component_name(name, "reaction")?;
+        self.remove_reaction_by_id(&id, cleanup).await
+    }
+
+    /// Remove the reaction with the supplied immutable UUID.
+    pub async fn remove_reaction_by_id(&self, id: &ComponentId, cleanup: bool) -> Result<()> {
         self.state_guard.require_initialized()?;
         map_component_error(
             self.computation_runtime
-                .remove_component(id, "reaction", cleanup)
+                .remove_component(id.as_str(), "reaction", cleanup)
                 .await,
             "reaction",
-            id,
+            id.as_str(),
             "remove",
         )
     }
@@ -271,16 +280,26 @@ impl DrasiLib {
     /// Unsupported plans are rejected before the configuration is accepted.
     pub async fn update_reaction(
         &self,
-        id: &str,
+        name: &str,
+        definition: crate::management::OrdinaryComponentRecord,
+    ) -> Result<()> {
+        let id = self.resolve_component_name(name, "reaction")?;
+        self.update_reaction_by_id(&id, definition).await
+    }
+
+    /// Update the reaction with the supplied immutable UUID.
+    pub async fn update_reaction_by_id(
+        &self,
+        id: &ComponentId,
         definition: crate::management::OrdinaryComponentRecord,
     ) -> Result<()> {
         self.state_guard.require_initialized()?;
         map_component_error(
             self.computation_runtime
-                .update_ordinary_definition(id, "reaction", definition)
+                .update_ordinary_definition(id.as_str(), "reaction", definition)
                 .await,
             "reaction",
-            id,
+            id.as_str(),
             "update",
         )
     }
@@ -298,14 +317,20 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn start_reaction(&self, id: &str) -> Result<()> {
+    pub async fn start_reaction(&self, name: &str) -> Result<()> {
+        let id = self.resolve_component_name(name, "reaction")?;
+        self.start_reaction_by_id(&id).await
+    }
+
+    /// Start the reaction with the supplied immutable UUID.
+    pub async fn start_reaction_by_id(&self, id: &ComponentId) -> Result<()> {
         self.state_guard.require_initialized()?;
         map_component_error(
             self.computation_runtime
-                .start_component(id, "reaction")
+                .start_component(id.as_str(), "reaction")
                 .await,
             "reaction",
-            id,
+            id.as_str(),
             "start",
         )
     }
@@ -320,14 +345,20 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn stop_reaction(&self, id: &str) -> Result<()> {
+    pub async fn stop_reaction(&self, name: &str) -> Result<()> {
+        let id = self.resolve_component_name(name, "reaction")?;
+        self.stop_reaction_by_id(&id).await
+    }
+
+    /// Stop the reaction with the supplied immutable UUID.
+    pub async fn stop_reaction_by_id(&self, id: &ComponentId) -> Result<()> {
         self.state_guard.require_initialized()?;
         map_component_error(
             self.computation_runtime
-                .stop_component(id, "reaction")
+                .stop_component(id.as_str(), "reaction")
                 .await,
             "reaction",
-            id,
+            id.as_str(),
             "stop",
         )
     }
@@ -362,8 +393,14 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_reaction_info(&self, id: &str) -> Result<ReactionRuntime> {
-        self.inspection.get_reaction_info(id).await
+    pub async fn get_reaction_info(&self, name: &str) -> Result<ReactionRuntime> {
+        let id = self.resolve_component_name(name, "reaction")?;
+        self.get_reaction_info_by_id(&id).await
+    }
+
+    /// Get detailed reaction information by immutable UUID.
+    pub async fn get_reaction_info_by_id(&self, id: &ComponentId) -> Result<ReactionRuntime> {
+        self.inspection.get_reaction_info(id.as_str()).await
     }
 
     /// Get the current status of a specific reaction
@@ -377,8 +414,14 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_reaction_status(&self, id: &str) -> Result<ComponentStatus> {
-        self.inspection.get_reaction_status(id).await
+    pub async fn get_reaction_status(&self, name: &str) -> Result<ComponentStatus> {
+        let id = self.resolve_component_name(name, "reaction")?;
+        self.get_reaction_status_by_id(&id).await
+    }
+
+    /// Get reaction status by immutable UUID.
+    pub async fn get_reaction_status_by_id(&self, id: &ComponentId) -> Result<ComponentStatus> {
+        self.inspection.get_reaction_status(id.as_str()).await
     }
 
     /// Get lifecycle events for a specific reaction as an async stream.
@@ -400,9 +443,18 @@ impl DrasiLib {
     /// ```
     pub async fn get_reaction_events(
         &self,
-        id: &str,
+        name: &str,
     ) -> Result<impl Stream<Item = ComponentEvent>> {
-        self.inspection.get_reaction_events(id).await
+        let id = self.resolve_component_name(name, "reaction")?;
+        self.get_reaction_events_by_id(&id).await
+    }
+
+    /// Get reaction lifecycle events by immutable UUID.
+    pub async fn get_reaction_events_by_id(
+        &self,
+        id: &ComponentId,
+    ) -> Result<impl Stream<Item = ComponentEvent>> {
+        self.inspection.get_reaction_events(id.as_str()).await
     }
 
     /// Get all lifecycle events across all reactions as an async stream.
@@ -470,12 +522,24 @@ impl DrasiLib {
     /// ```
     pub async fn subscribe_reaction_logs(
         &self,
-        id: &str,
+        name: &str,
     ) -> Result<(
         Vec<crate::observability::LogMessage>,
         tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
     )> {
-        self.inspection.subscribe_reaction_logs(id).await
+        let id = self.resolve_component_name(name, "reaction")?;
+        self.subscribe_reaction_logs_by_id(&id).await
+    }
+
+    /// Subscribe to reaction logs by immutable UUID.
+    pub async fn subscribe_reaction_logs_by_id(
+        &self,
+        id: &ComponentId,
+    ) -> Result<(
+        Vec<crate::observability::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
+    )> {
+        self.inspection.subscribe_reaction_logs(id.as_str()).await
     }
 
     /// Subscribe to live events for a reaction.
@@ -485,12 +549,24 @@ impl DrasiLib {
     /// Error, Stopped.
     pub async fn subscribe_reaction_events(
         &self,
-        id: &str,
+        name: &str,
     ) -> Result<(
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
-        self.inspection.subscribe_reaction_events(id).await
+        let id = self.resolve_component_name(name, "reaction")?;
+        self.subscribe_reaction_events_by_id(&id).await
+    }
+
+    /// Subscribe to reaction lifecycle events by immutable UUID.
+    pub async fn subscribe_reaction_events_by_id(
+        &self,
+        id: &ComponentId,
+    ) -> Result<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        self.inspection.subscribe_reaction_events(id.as_str()).await
     }
 }
 

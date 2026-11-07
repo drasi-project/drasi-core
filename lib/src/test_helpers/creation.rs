@@ -208,7 +208,7 @@ impl CoreFixtures for DrasiLib {
         fixture: SourceFixture<S>,
     ) -> crate::Result<()> {
         let id = fixture_identity(self, reference)?;
-        self.remove_source(id.as_str(), false).await?;
+        self.remove_source_by_id(&id, false).await?;
         self.add_source_fixture(fixture).await
     }
 
@@ -256,7 +256,7 @@ impl CoreFixtures for DrasiLib {
         fixture: ReactionFixture<R>,
     ) -> crate::Result<()> {
         let id = fixture_identity(self, reference)?;
-        self.remove_reaction(id.as_str(), false).await?;
+        self.remove_reaction_by_id(&id, false).await?;
         self.add_reaction_fixture(fixture).await
     }
 }

@@ -458,6 +458,13 @@ RETURN t.id, t.title, t.assignee
 
 ## Runtime Management
 
+String component selectors in the ordinary `DrasiLib` facade are exact current
+names. This includes names whose text looks like a UUID; no string method parses,
+falls back to, or guesses an identity. The name is resolved once when the
+operation is admitted, so a later rename or reuse of that name does not retarget
+the operation. Use the paired `*_by_id(&ComponentId)` method for explicit
+identity-based access.
+
 ### Lifecycle
 
 ```rust
@@ -491,6 +498,10 @@ core.start_query("my-query").await?;
 core.stop_query("my-query").await?;
 core.start_reaction("my-reaction").await?;
 core.stop_reaction("my-reaction").await?;
+
+// Explicit identity access uses a typed ComponentId, not a UUID string selector.
+let source_id = core.component_by_name("my-source")?.id().clone();
+core.start_source_by_id(&source_id).await?;
 ```
 
 `stop_query()` also cleans up queries in `Error`, including failures during
@@ -532,6 +543,10 @@ let info = core.get_reaction_info("my-reaction").await?;   // -> ReactionRuntime
 
 // Get current query result set as a JSON snapshot
 let results: Vec<serde_json::Value> = core.get_query_results("my-query").await?;
+
+// Use the typed identity variant when a ComponentId is already available
+let query_id = core.component_by_name("my-query")?.id().clone();
+let results = core.get_query_results_by_id(&query_id).await?;
 
 // Get query configuration
 let config: QueryConfig = core.get_query_config("my-query").await?;

@@ -243,7 +243,7 @@ async fn historical_opaque_bindings_cannot_adopt_a_replacement_object() -> anyho
             .await?;
         old.wait_created().await?;
         core.snapshot_desired_configuration("old-object").await?;
-        core.remove_source(old.id().as_str(), false).await?;
+        core.remove_source_by_id(old.id(), false).await?;
         let replacement = if external {
             core.add_source("replacement", application_source(old.id().clone())?)
                 .await?;
@@ -743,8 +743,8 @@ async fn process_local_update_rejection_preserves_identity_and_existing_query_in
         .await?;
     tokio::time::timeout(Duration::from_secs(5), query.wait_created()).await??;
     let rejected = core
-        .update_source(
-            original.id().as_str(),
+        .update_source_by_id(
+            original.id(),
             OrdinaryComponentRecord {
                 id: original.id().clone(),
                 name: ComponentName::try_new("data")?,
@@ -770,7 +770,7 @@ async fn process_local_update_rejection_preserves_identity_and_existing_query_in
     )
     .await??;
     assert_eq!(
-        core.get_query_config(query.id().as_str()).await?.inputs[0]
+        core.get_query_config_by_id(query.id()).await?.inputs[0]
             .component
             .as_id(),
         Some(original.id())
@@ -849,7 +849,7 @@ async fn removing_one_native_query_preserves_a_shared_outlet_for_its_peer() -> a
     right.wait_created().await?;
     let assigned = receipt.creation.unwrap().components;
     assert!(assigned.iter().any(|entry| &entry.id == left.id()));
-    core.remove_query(left.id().as_str())
+    core.remove_query_by_id(left.id())
         .await
         .context("removing left query")?;
     assert!(left.observed().is_err());
@@ -857,7 +857,7 @@ async fn removing_one_native_query_preserves_a_shared_outlet_for_its_peer() -> a
         .wait_created()
         .await?;
     assert_eq!(core.component_by_name("right")?.id(), right.id());
-    core.remove_query(right.id().as_str())
+    core.remove_query_by_id(right.id())
         .await
         .context("removing right query")?;
     assert!(core

@@ -16,13 +16,16 @@
 //!
 //! This module provides all source-related operations including adding, removing,
 //! starting, and stopping sources.
+//! String selectors are exact current source names, including UUID-shaped names.
+//! Use the paired `_by_id` methods for explicit [`crate::config::ComponentId`]
+//! selection.
 
 use futures::stream::Stream;
 use std::collections::HashMap;
 
 use crate::channels::{ComponentEvent, ComponentStatus};
 use crate::component_ops::map_component_error;
-use crate::config::SourceRuntime;
+use crate::config::{ComponentId, SourceRuntime};
 use crate::error::Result;
 use crate::lib_core::DrasiLib;
 use crate::schema::{GraphSchema, SourceSchema};
@@ -222,14 +225,20 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn remove_source(&self, id: &str, cleanup: bool) -> Result<()> {
+    pub async fn remove_source(&self, name: &str, cleanup: bool) -> Result<()> {
+        let id = self.resolve_component_name(name, "source")?;
+        self.remove_source_by_id(&id, cleanup).await
+    }
+
+    /// Remove the source with the supplied immutable UUID.
+    pub async fn remove_source_by_id(&self, id: &ComponentId, cleanup: bool) -> Result<()> {
         self.state_guard.require_initialized()?;
         map_component_error(
             self.computation_runtime
-                .remove_component(id, "source", cleanup)
+                .remove_component(id.as_str(), "source", cleanup)
                 .await,
             "source",
-            id,
+            id.as_str(),
             "remove",
         )
     }
@@ -243,16 +252,26 @@ impl DrasiLib {
     /// Use `rename_component` for a metadata-only name change.
     pub async fn update_source(
         &self,
-        id: &str,
+        name: &str,
+        definition: crate::management::OrdinaryComponentRecord,
+    ) -> Result<()> {
+        let id = self.resolve_component_name(name, "source")?;
+        self.update_source_by_id(&id, definition).await
+    }
+
+    /// Update the source with the supplied immutable UUID.
+    pub async fn update_source_by_id(
+        &self,
+        id: &ComponentId,
         definition: crate::management::OrdinaryComponentRecord,
     ) -> Result<()> {
         self.state_guard.require_initialized()?;
         map_component_error(
             self.computation_runtime
-                .update_ordinary_definition(id, "source", definition)
+                .update_ordinary_definition(id.as_str(), "source", definition)
                 .await,
             "source",
-            id,
+            id.as_str(),
             "update",
         )
     }
@@ -267,12 +286,24 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn start_source(&self, id: &str) -> Result<()> {
+    pub async fn start_source(&self, name: &str) -> Result<()> {
+        let id = self.resolve_component_name(name, "source")?;
+        self.start_source_by_id(&id).await
+    }
+
+    /// Start the source with the supplied immutable UUID.
+    ///
+    /// Use a `ComponentId` obtained from an admission handle or
+    /// [`Self::component_by_name`]; UUID text passed to [`Self::start_source`]
+    /// is always interpreted as a source name.
+    pub async fn start_source_by_id(&self, id: &ComponentId) -> Result<()> {
         self.state_guard.require_initialized()?;
         map_component_error(
-            self.computation_runtime.start_component(id, "source").await,
+            self.computation_runtime
+                .start_component(id.as_str(), "source")
+                .await,
             "source",
-            id,
+            id.as_str(),
             "start",
         )
     }
@@ -287,12 +318,20 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn stop_source(&self, id: &str) -> Result<()> {
+    pub async fn stop_source(&self, name: &str) -> Result<()> {
+        let id = self.resolve_component_name(name, "source")?;
+        self.stop_source_by_id(&id).await
+    }
+
+    /// Stop the source with the supplied immutable UUID.
+    pub async fn stop_source_by_id(&self, id: &ComponentId) -> Result<()> {
         self.state_guard.require_initialized()?;
         map_component_error(
-            self.computation_runtime.stop_component(id, "source").await,
+            self.computation_runtime
+                .stop_component(id.as_str(), "source")
+                .await,
             "source",
-            id,
+            id.as_str(),
             "stop",
         )
     }
@@ -326,8 +365,14 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_source_info(&self, id: &str) -> Result<SourceRuntime> {
-        self.inspection.get_source_info(id).await
+    pub async fn get_source_info(&self, name: &str) -> Result<SourceRuntime> {
+        let id = self.resolve_component_name(name, "source")?;
+        self.get_source_info_by_id(&id).await
+    }
+
+    /// Get detailed source information by immutable UUID.
+    pub async fn get_source_info_by_id(&self, id: &ComponentId) -> Result<SourceRuntime> {
+        self.inspection.get_source_info(id.as_str()).await
     }
 
     /// Get the current status of a specific source
@@ -341,13 +386,25 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_source_status(&self, id: &str) -> Result<ComponentStatus> {
-        self.inspection.get_source_status(id).await
+    pub async fn get_source_status(&self, name: &str) -> Result<ComponentStatus> {
+        let id = self.resolve_component_name(name, "source")?;
+        self.get_source_status_by_id(&id).await
+    }
+
+    /// Get source status by immutable UUID.
+    pub async fn get_source_status_by_id(&self, id: &ComponentId) -> Result<ComponentStatus> {
+        self.inspection.get_source_status(id.as_str()).await
     }
 
     /// Get best-effort schema information for a specific source.
-    pub async fn get_source_schema(&self, id: &str) -> Result<Option<SourceSchema>> {
-        self.inspection.get_source_schema(id).await
+    pub async fn get_source_schema(&self, name: &str) -> Result<Option<SourceSchema>> {
+        let id = self.resolve_component_name(name, "source")?;
+        self.get_source_schema_by_id(&id).await
+    }
+
+    /// Get best-effort source schema information by immutable UUID.
+    pub async fn get_source_schema_by_id(&self, id: &ComponentId) -> Result<Option<SourceSchema>> {
+        self.inspection.get_source_schema(id.as_str()).await
     }
 
     /// Get the merged graph schema across all registered sources and queries.
@@ -372,8 +429,20 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_source_events(&self, id: &str) -> Result<impl Stream<Item = ComponentEvent>> {
-        self.inspection.get_source_events(id).await
+    pub async fn get_source_events(
+        &self,
+        name: &str,
+    ) -> Result<impl Stream<Item = ComponentEvent>> {
+        let id = self.resolve_component_name(name, "source")?;
+        self.get_source_events_by_id(&id).await
+    }
+
+    /// Get source lifecycle events by immutable UUID.
+    pub async fn get_source_events_by_id(
+        &self,
+        id: &ComponentId,
+    ) -> Result<impl Stream<Item = ComponentEvent>> {
+        self.inspection.get_source_events(id.as_str()).await
     }
 
     /// Get all lifecycle events across all sources as an async stream.
@@ -421,12 +490,24 @@ impl DrasiLib {
     /// ```
     pub async fn subscribe_source_logs(
         &self,
-        id: &str,
+        name: &str,
     ) -> Result<(
         Vec<crate::observability::LogMessage>,
         tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
     )> {
-        self.inspection.subscribe_source_logs(id).await
+        let id = self.resolve_component_name(name, "source")?;
+        self.subscribe_source_logs_by_id(&id).await
+    }
+
+    /// Subscribe to source logs by immutable UUID.
+    pub async fn subscribe_source_logs_by_id(
+        &self,
+        id: &ComponentId,
+    ) -> Result<(
+        Vec<crate::observability::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
+    )> {
+        self.inspection.subscribe_source_logs(id.as_str()).await
     }
 
     /// Subscribe to live events for a source.
@@ -456,12 +537,24 @@ impl DrasiLib {
     /// ```
     pub async fn subscribe_source_events(
         &self,
-        id: &str,
+        name: &str,
     ) -> Result<(
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
-        self.inspection.subscribe_source_events(id).await
+        let id = self.resolve_component_name(name, "source")?;
+        self.subscribe_source_events_by_id(&id).await
+    }
+
+    /// Subscribe to source lifecycle events by immutable UUID.
+    pub async fn subscribe_source_events_by_id(
+        &self,
+        id: &ComponentId,
+    ) -> Result<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        self.inspection.subscribe_source_events(id.as_str()).await
     }
 }
 
@@ -636,11 +729,9 @@ mod tests {
             sources.iter().any(|(id, _)| id == handle.id().as_str()),
             "Added source should appear in list"
         );
+        assert_eq!(core.get_source_info("src-1").await.unwrap().name, "src-1");
         assert_eq!(
-            core.get_source_info(handle.id().as_str())
-                .await
-                .unwrap()
-                .name,
+            core.get_source_info_by_id(handle.id()).await.unwrap().name,
             "src-1"
         );
         core.shutdown().await.unwrap();
@@ -680,7 +771,7 @@ mod tests {
             .iter()
             .any(|(id, _)| id == &source_id));
 
-        core.remove_source(&source_id, false).await.unwrap();
+        core.remove_source("rm-src", false).await.unwrap();
         assert!(
             !core
                 .list_sources()
@@ -697,15 +788,21 @@ mod tests {
     #[tokio::test]
     async fn remove_source_nonexistent_returns_error() {
         let core = build_and_start().await;
-        let missing = crate::config::ComponentId::generate();
         let err = core
-            .remove_source(missing.as_str(), false)
+            .remove_source("missing-source", false)
             .await
             .unwrap_err();
+        assert!(
+            matches!(err, DrasiError::ComponentNotFound { .. }),
+            "Removing a missing source name should fail lookup, got: {err:?}"
+        );
+
+        let missing = crate::config::ComponentId::generate();
+        let err = core.remove_source_by_id(&missing, false).await.unwrap_err();
 
         assert!(
             matches!(err.classification(), DrasiError::OperationFailed { .. }),
-            "Removing nonexistent source should fail, got: {err:?}"
+            "Removing a missing source UUID should preserve the identity operation failure, got: {err:?}"
         );
         core.shutdown().await.unwrap();
     }
@@ -747,11 +844,15 @@ mod tests {
 
         let source = core.add_source_fixture_with_handle(source).await.unwrap();
 
-        let status = core.get_source_status(source.id().as_str()).await.unwrap();
+        let status = core.get_source_status("status-src").await.unwrap();
         assert_eq!(
             status,
             ComponentStatus::Added,
             "Newly added non-autostart source should be Added"
+        );
+        assert_eq!(
+            core.get_source_status_by_id(source.id()).await.unwrap(),
+            ComponentStatus::Added
         );
         core.shutdown().await.unwrap();
     }
@@ -759,10 +860,7 @@ mod tests {
     #[tokio::test]
     async fn get_source_status_nonexistent_returns_error() {
         let core = build_and_start().await;
-        let err = core
-            .get_source_status(crate::config::ComponentId::generate().as_str())
-            .await
-            .unwrap_err();
+        let err = core.get_source_status("missing-source").await.unwrap_err();
 
         assert!(
             matches!(err, DrasiError::ComponentNotFound { .. }),
@@ -787,11 +885,11 @@ mod tests {
         let source_id = source.id().as_str();
 
         // Initially in Added state
-        let status = core.get_source_status(source_id).await.unwrap();
+        let status = core.get_source_status("lifecycle-src").await.unwrap();
         assert_eq!(status, ComponentStatus::Added);
 
         // Start
-        core.start_source(source_id).await.unwrap();
+        core.start_source("lifecycle-src").await.unwrap();
         wait_for_component_status(
             &mut event_rx,
             source_id,
@@ -800,11 +898,11 @@ mod tests {
         )
         .await;
 
-        let status = core.get_source_status(source_id).await.unwrap();
+        let status = core.get_source_status("lifecycle-src").await.unwrap();
         assert_eq!(status, ComponentStatus::Running);
 
         // Stop
-        core.stop_source(source_id).await.unwrap();
+        core.stop_source("lifecycle-src").await.unwrap();
         wait_for_component_status(
             &mut event_rx,
             source_id,
@@ -813,7 +911,7 @@ mod tests {
         )
         .await;
 
-        let status = core.get_source_status(source_id).await.unwrap();
+        let status = core.get_source_status("lifecycle-src").await.unwrap();
         assert_eq!(status, ComponentStatus::Stopped);
         core.shutdown().await.unwrap();
     }
@@ -830,7 +928,7 @@ mod tests {
         let source = core.add_source_fixture_with_handle(source).await.unwrap();
         source.wait_created().await.unwrap();
 
-        let info = core.get_source_info(source.id().as_str()).await.unwrap();
+        let info = core.get_source_info("info-src").await.unwrap();
         assert_eq!(info.id, source.id().as_str());
         assert_eq!(info.name, "info-src");
         assert_eq!(info.source_type, "mock");
@@ -851,7 +949,7 @@ mod tests {
         source.wait_created().await.unwrap();
 
         let schema = core
-            .get_source_schema(source.id().as_str())
+            .get_source_schema("schema-src")
             .await
             .unwrap()
             .expect("schema-aware source should expose schema");

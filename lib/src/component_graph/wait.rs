@@ -134,7 +134,7 @@ mod tests {
         );
         tokio::pin!(waiter);
         assert!(futures::poll!(&mut waiter).is_pending());
-        core.start_source(source.id().as_str()).await.unwrap();
+        core.start_source_by_id(source.id()).await.unwrap();
         assert_eq!(waiter.await.unwrap(), ComponentStatus::Running);
         core.shutdown().await.unwrap();
     }

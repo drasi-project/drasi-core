@@ -81,9 +81,7 @@ async fn async_source_is_owned_before_await_and_preserves_returned_metadata() ->
     assert_eq!(node.metadata["factoryNote"], "preserved");
     assert_eq!(node.metadata["pluginId"], "test/source");
     assert_eq!(
-        core.get_source_info(handle.id().as_str())
-            .await?
-            .source_type,
+        core.get_source_info_by_id(handle.id()).await?.source_type,
         "application"
     );
     assert_eq!(
@@ -234,7 +232,7 @@ async fn async_failures_reserve_identity_and_returned_bad_objects_are_cleaned_up
     );
     assert_eq!(core.component_by_name("bad")?.id(), handle.id());
     assert!(core.computation_component(foreign.as_str()).is_err());
-    core.remove_source(handle.id().as_str(), false).await?;
+    core.remove_source_by_id(handle.id(), false).await?;
     assert_eq!(disposed.load(Ordering::SeqCst), 1);
     let error = core
         .create_source_async("bad", Some(handle.id().clone()), false, |id| async move {
@@ -319,7 +317,7 @@ async fn cancelled_source_request_keeps_accepted_query_dependency_resolution() -
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             changes.borrow_and_update();
-            if core.get_query_config(query.id().as_str()).await?.inputs[0]
+            if core.get_query_config_by_id(query.id()).await?.inputs[0]
                 .component
                 .as_id()
                 == Some(source.id())
@@ -341,7 +339,7 @@ async fn cancelled_source_request_keeps_accepted_query_dependency_resolution() -
     )
     .await??;
     assert_eq!(
-        core.get_query_config(query.id().as_str()).await?.inputs[0]
+        core.get_query_config_by_id(query.id()).await?.inputs[0]
             .component
             .as_id(),
         Some(source.id())
@@ -507,10 +505,7 @@ async fn async_reaction_rejects_wrong_kinds_and_substituted_input_ids() -> anyho
     let error = bad_inputs.wait_created().await.unwrap_err();
     assert!(format!("{error:#}").contains("substituted its UUID input bindings"));
     assert_eq!(
-        core.get_reaction_info(bad_inputs.id().as_str())
-            .await?
-            .queries[0]
-            .as_id(),
+        core.get_reaction_info_by_id(bad_inputs.id()).await?.queries[0].as_id(),
         Some(query.id())
     );
     core.shutdown().await?;
@@ -583,7 +578,7 @@ async fn async_reaction_binds_names_before_constructor_and_never_retargets() -> 
     assert_ne!(replacement.id(), query.id());
     assert_eq!(ids.lock().unwrap().as_slice(), &[query.id().clone()]);
     assert_eq!(
-        core.get_reaction_info(handle.id().as_str()).await?.queries[0].as_id(),
+        core.get_reaction_info_by_id(handle.id()).await?.queries[0].as_id(),
         Some(query.id())
     );
     assert_eq!(
@@ -719,8 +714,8 @@ async fn async_reaction_recreation_requires_removal_and_a_new_identity() -> anyh
     old.wait_created().await?;
     old.rename(name("kept-name")).await?;
     assert!(
-        core.update_reaction(
-            old.id().as_str(),
+        core.update_reaction_by_id(
+            old.id(),
             drasi_lib::management::OrdinaryComponentRecord {
                 id: old.id().clone(),
                 name: name("kept-name"),
@@ -736,7 +731,7 @@ async fn async_reaction_recreation_requires_removal_and_a_new_identity() -> anyh
         .is_err(),
         "creation callbacks do not provide managed update capability"
     );
-    core.remove_reaction(old.id().as_str(), false).await?;
+    core.remove_reaction_by_id(old.id(), false).await?;
     let called = Arc::new(AtomicBool::new(false));
     let captured = called.clone();
     let replacement = tokio::time::timeout(
@@ -803,8 +798,8 @@ async fn async_reaction_recreation_requires_removal_and_a_new_identity() -> anyh
     assert!(!core.allow_external_component_ids());
     let missing = ComponentId::generate();
     assert!(core
-        .update_reaction(
-            missing.as_str(),
+        .update_reaction_by_id(
+            &missing,
             drasi_lib::management::OrdinaryComponentRecord {
                 id: missing.clone(),
                 name: name("missing"),
@@ -858,7 +853,7 @@ async fn recreated_async_member_owns_construction_and_later_stop_supersedes_acti
         .await?;
     core.start().await?;
     old.wait_started().await?;
-    core.remove_reaction(old.id().as_str(), false).await?;
+    core.remove_reaction_by_id(old.id(), false).await?;
     let entered = Arc::new(Notify::new());
     let signal = entered.clone();
     let (release, wait) = oneshot::channel();
@@ -898,7 +893,7 @@ async fn recreated_async_member_owns_construction_and_later_stop_supersedes_acti
     let _ = update.await;
     release.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(5), current.wait_started()).await??;
-    core.remove_reaction(current.id().as_str(), false).await?;
+    core.remove_reaction_by_id(current.id(), false).await?;
     let pending = core
         .create_reaction_async(
             "consumer",
@@ -1070,7 +1065,7 @@ async fn scoped_pipeline_authorizes_only_helpers_of_fresh_owned_components() -> 
         .await?;
     extra.wait_created().await?;
     let mut update = core
-        .get_query_config(owner.as_str())
+        .get_query_config_by_id(&owner)
         .await?
         .into_authoring()?;
     update.query = "MATCH (n) RETURN n AS updated".into();
@@ -1079,7 +1074,7 @@ async fn scoped_pipeline_authorizes_only_helpers_of_fresh_owned_components() -> 
         .push(drasi_lib::QueryInputConfig::by_id(extra.id().clone()));
     let accepted_before = core.desired_configuration()?;
     assert!(
-        core.update_query(owner.as_str(), update).await.is_err(),
+        core.update_query_by_id(&owner, update).await.is_err(),
         "creation-only factories cannot authorize an implicit query rebuild"
     );
     assert_eq!(core.desired_configuration()?, accepted_before);
@@ -1098,7 +1093,7 @@ async fn scoped_pipeline_authorizes_only_helpers_of_fresh_owned_components() -> 
         .components
         .iter()
         .any(|node| node.descriptor.id() == &added_helper));
-    core.remove_query(owner.as_str()).await?;
+    core.remove_query_by_id(&owner).await?;
     assert!(core.computation_component(owner.as_str()).is_err());
     let refused = core
         .create_components(move |ids| {

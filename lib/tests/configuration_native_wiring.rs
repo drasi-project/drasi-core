@@ -278,7 +278,7 @@ async fn managed_native_wiring() -> anyhow::Result<()> {
         .query_configuration()?;
     assert_eq!(stored_query.inputs[0].component.as_id(), Some(source.id()));
     assert_eq!(
-        core.get_query_config(query.id().as_str()).await?.inputs[0]
+        core.get_query_config_by_id(query.id()).await?.inputs[0]
             .component
             .as_id(),
         Some(source.id())

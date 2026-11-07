@@ -498,10 +498,7 @@ mod manager_tests {
         assert!(format!("{error:#}").contains("does not support"));
 
         // Verify update
-        let retrieved = manager
-            .get_query_config(handle.id().as_str())
-            .await
-            .unwrap();
+        let retrieved = manager.0.get_query_config_by_id(handle.id()).await.unwrap();
         assert_ne!(retrieved.query, config.query);
         assert_eq!(manager.0.desired_configuration().unwrap(), before);
         assert_eq!(

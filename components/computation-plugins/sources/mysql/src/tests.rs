@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
+use drasi_computation_contracts::{ComponentId, PortDirection};
 use drasi_computation_plugin_sdk::ExportedPlugin;
 use serde_json::json;
 
@@ -47,14 +48,71 @@ fn positional_factories_are_explicit_and_do_not_claim_coordinated_loading() -> R
 }
 
 #[test]
-fn native_mysql_modes_share_the_standard_schema_with_distinct_implementations_and_progress_contracts(
-) -> Result<()> {
+fn factory_metadata_constructs_without_database_io() -> Result<()> {
     ExportedPlugin::new(plugin()?)?;
+    #[cfg(feature = "dynamic-plugin")]
+    assert!(!drasi_computation_plugin_metadata().is_null());
+    for (name, metadata, output) in [
+        (
+            MYSQL_CHANGES,
+            MySqlChangesFactory.metadata(),
+            MySqlOutput::Changes,
+        ),
+        (
+            MYSQL_UNTRACKED_TRANSACTIONS,
+            MySqlUntrackedTransactionsFactory.metadata(),
+            MySqlOutput::Transactions,
+        ),
+        (
+            MYSQL_TRANSACTIONS,
+            MySqlTransactionsFactory.metadata(),
+            MySqlOutput::Transactions,
+        ),
+        (
+            MYSQL_SHARED_TRANSACTIONS,
+            MySqlSharedTransactionsFactory.metadata(),
+            MySqlOutput::Transactions,
+        ),
+        (
+            MYSQL_SHARED_CHANGES,
+            MySqlSharedChangesFactory.metadata(),
+            MySqlOutput::Changes,
+        ),
+        (
+            MYSQL_POSITIONAL_CHANGES,
+            MySqlPositionalChangesFactory.metadata(),
+            MySqlOutput::Changes,
+        ),
+        (
+            MYSQL_SHARED_POSITIONAL_CHANGES,
+            MySqlSharedPositionalChangesFactory.metadata(),
+            MySqlOutput::Changes,
+        ),
+    ] {
+        assert_eq!(
+            metadata.implementation,
+            ImplementationIdentity::try_new(name, "1")?
+        );
+        assert_eq!(metadata.role, ComponentRole::Source);
+        assert_eq!(metadata.completion, None);
+        assert_eq!(metadata.ports, MySqlSource::ports(output)?);
+        assert_eq!(metadata.ports.len(), 1);
+        assert_eq!(metadata.ports[0].id().as_str(), "out");
+        assert_eq!(metadata.ports[0].direction(), PortDirection::Output);
+        assert_eq!(
+            metadata.ports[0].schema(),
+            GraphChangeCodec::schema().descriptor()
+        );
+        assert!(metadata.configuration.fields["settings"].secret);
+        let id = ComponentId::generate();
+        let descriptor = MySqlSource::describe(id.clone(), output)?;
+        assert_eq!(descriptor.id(), &id);
+        assert_eq!(descriptor.ports(), metadata.ports.as_slice());
+    }
     let changes = MySqlChangesFactory.metadata();
     let rows = MySqlSharedChangesFactory.metadata();
     let transactions = MySqlTransactionsFactory.metadata();
     let shared = MySqlSharedTransactionsFactory.metadata();
-    assert!(changes.configuration.fields["settings"].secret);
     assert_eq!(changes.ports, rows.ports);
     assert_eq!(transactions.ports, shared.ports);
     // Both modes publish standard graph data; the mode is the implementation, not a schema.

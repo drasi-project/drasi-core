@@ -70,6 +70,30 @@
 //! }
 //! ```
 //!
+//! ### Selecting ordinary components
+//!
+//! Ordinary source, query and reaction methods that take `&str` select the
+//! exact current component name. A name whose text looks like a UUID is still a
+//! name; these methods never parse or fall back to an identity. The name is
+//! resolved once before the operation awaits, so a later rename or reuse of the
+//! old name cannot retarget that operation.
+//!
+//! Use the paired `_by_id` method when you already hold a [`config::ComponentId`]:
+//!
+//! ```no_run
+//! # use drasi_lib::{config::ComponentId, DrasiLib};
+//! # async fn example(
+//! #     core: &DrasiLib,
+//! #     query_id: &ComponentId,
+//! # ) -> Result<(), Box<dyn std::error::Error>> {
+//! core.start_source("my-source").await?;
+//! let rows = core.get_query_results("my-query").await?;
+//! let same_rows = core.get_query_results_by_id(query_id).await?;
+//! assert_eq!(rows, same_rows);
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! Use [`QueryConfigurationSnapshot`] for saved settings and
 //! [`computation::v1::QueryResultSnapshot`] for result rows. Logging and event
 //! history use [`observability`]. Retired query helpers and old import aliases

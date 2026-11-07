@@ -101,15 +101,32 @@ impl PostgresTransactionSource {
         Ok(source)
     }
 
+    pub(crate) fn row_ports() -> Result<Vec<PortDescriptor>> {
+        Ok(vec![PortDescriptor::new(
+            PortId::try_new("out")?,
+            PortDirection::Output,
+            GraphChangeCodec::schema().descriptor().clone(),
+            PipeRequirements::default(),
+        )])
+    }
+
     pub fn describe_rows(id: ComponentId) -> Result<ComponentDescriptor> {
+        Ok(ComponentDescriptor::try_new(id, Self::row_ports()?)?)
+    }
+
+    pub(crate) fn transaction_ports() -> Result<Vec<PortDescriptor>> {
+        Ok(vec![PortDescriptor::new(
+            PortId::try_new("out")?,
+            PortDirection::Output,
+            SourceTransactionCodec::schema().descriptor().clone(),
+            PipeRequirements::default(),
+        )])
+    }
+
+    pub fn describe(id: ComponentId) -> Result<ComponentDescriptor> {
         Ok(ComponentDescriptor::try_new(
             id,
-            vec![PortDescriptor::new(
-                PortId::try_new("out")?,
-                PortDirection::Output,
-                GraphChangeCodec::schema().descriptor().clone(),
-                PipeRequirements::default(),
-            )],
+            Self::transaction_ports()?,
         )?)
     }
 
@@ -162,18 +179,6 @@ impl PostgresTransactionSource {
             transport_sequence: Arc::new(AtomicU64::new(0)),
             rows: None,
         })
-    }
-
-    pub fn describe(id: ComponentId) -> Result<ComponentDescriptor> {
-        Ok(ComponentDescriptor::try_new(
-            id,
-            vec![PortDescriptor::new(
-                PortId::try_new("out")?,
-                PortDirection::Output,
-                SourceTransactionCodec::schema().descriptor().clone(),
-                PipeRequirements::default(),
-            )],
-        )?)
     }
 
     async fn prepare(&self, snapshot: Arc<SourceProgressSnapshot>) -> Result<Worker> {

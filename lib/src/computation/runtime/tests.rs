@@ -331,42 +331,37 @@ async fn graph_registry_is_authoritative_for_owned_components() {
         vec![(reaction_id.to_string(), ComponentStatus::Added)]
     );
     assert_eq!(
-        core.get_source_info(source_id.as_str())
+        core.get_source_info_by_id(&source_id)
             .await
             .unwrap()
             .source_type,
         "controlled"
     );
     assert_eq!(
-        core.get_query_info(query_id.as_str()).await.unwrap().status,
+        core.get_query_info_by_id(&query_id).await.unwrap().status,
         ComponentStatus::Added
     );
     assert_eq!(
-        core.get_reaction_info(reaction_id.as_str())
+        core.get_reaction_info_by_id(&reaction_id)
             .await
             .unwrap()
             .queries,
         vec![crate::config::ComponentReference::by_id(query_id.clone())]
     );
-    assert!(core.get_source_info(query_id.as_str()).await.is_err());
+    assert!(core.get_source_info_by_id(&query_id).await.is_err());
     assert_eq!(
-        core.get_query_config(query_id.as_str())
-            .await
-            .unwrap()
-            .inputs[0]
+        core.get_query_config_by_id(&query_id).await.unwrap().inputs[0]
             .component
             .as_id(),
         Some(&source_id)
     );
     assert_eq!(core.get_current_config().await.unwrap().queries.len(), 1);
-    core.get_query_output_metrics(query_id.as_str())
+    core.get_query_output_metrics_by_id(&query_id)
         .await
         .unwrap();
-    core.subscribe_source_logs(source_id.as_str())
-        .await
-        .unwrap();
-    core.subscribe_query_logs(query_id.as_str()).await.unwrap();
-    core.subscribe_reaction_logs(reaction_id.as_str())
+    core.subscribe_source_logs_by_id(&source_id).await.unwrap();
+    core.subscribe_query_logs_by_id(&query_id).await.unwrap();
+    core.subscribe_reaction_logs_by_id(&reaction_id)
         .await
         .unwrap();
     let snapshot = core.snapshot_configuration().await.unwrap();
@@ -380,26 +375,23 @@ async fn graph_registry_is_authoritative_for_owned_components() {
         .edges
         .iter()
         .any(|edge| edge.from == source_id.as_str() && edge.to == query_id.as_str()));
-    core.start_source(source_id.as_str()).await.unwrap();
-    core.start_query(query_id.as_str()).await.unwrap();
-    core.start_reaction(reaction_id.as_str()).await.unwrap();
+    core.start_source_by_id(&source_id).await.unwrap();
+    core.start_query_by_id(&query_id).await.unwrap();
+    core.start_reaction_by_id(&reaction_id).await.unwrap();
     assert_eq!(source_control.starts.load(Ordering::Acquire), 1);
     assert_eq!(reaction_control.starts.load(Ordering::Acquire), 1);
     assert_eq!(
-        core.get_query_config(query_id.as_str())
-            .await
-            .unwrap()
-            .inputs[0]
+        core.get_query_config_by_id(&query_id).await.unwrap().inputs[0]
             .component
             .as_id(),
         Some(&source_id)
     );
-    assert!(core.remove_source(source_id.as_str(), false).await.is_err());
-    core.remove_reaction(reaction_id.as_str(), false)
+    assert!(core.remove_source_by_id(&source_id, false).await.is_err());
+    core.remove_reaction_by_id(&reaction_id, false)
         .await
         .unwrap();
-    core.remove_query(query_id.as_str()).await.unwrap();
-    core.remove_source(source_id.as_str(), false).await.unwrap();
+    core.remove_query_by_id(&query_id).await.unwrap();
+    core.remove_source_by_id(&source_id, false).await.unwrap();
     core.shutdown().await.unwrap();
 }
 
@@ -1524,7 +1516,9 @@ async fn source_and_reaction_report_shared_provider_identity_with_generation_sco
     let old_observer = reaction_control.resource_observers.lock().unwrap()[0].clone();
     let (replacement, replacement_control, _) = ControlledReaction::fixture("reaction", &["query"]);
     let provider = shared.clone();
-    core.remove_reaction(reaction.id().as_str(), false).await.unwrap();
+    core.remove_reaction_by_id(reaction.id(), false)
+        .await
+        .unwrap();
     let replacement = core.create_reaction_async(
         "reaction",
         None,
@@ -2085,12 +2079,10 @@ async fn rejected_ordinary_object_is_cleaned_without_granting_readmission_author
     let handle = core.add_source_fixture_with_handle(fresh).await.unwrap();
     assert_ne!(handle.id(), &id);
     handle.wait_created().await.unwrap();
-    core.start_source(handle.id().as_str()).await.unwrap();
+    core.start_source_by_id(handle.id()).await.unwrap();
     handle.wait_started().await.unwrap();
     assert_eq!(fresh_control.initializations.load(Ordering::Acquire), 1);
-    core.remove_source(handle.id().as_str(), true)
-        .await
-        .unwrap();
+    core.remove_source_by_id(handle.id(), true).await.unwrap();
     assert_eq!(fresh_control.deprovisions.load(Ordering::Acquire), 1);
     core.shutdown().await.unwrap();
 }
@@ -2621,7 +2613,7 @@ async fn instance_root_identity_is_rejected_by_native_admission_with_cleanup_own
         "{error:#}"
     );
     assert_eq!(source_control.initializations.load(Ordering::Acquire), 0);
-    assert!(core.get_source_status(id.as_str()).await.is_err());
+    assert!(core.get_source_status_by_id(&id).await.is_err());
     assert!(core
         .computation_control()
         .unwrap()
@@ -3859,7 +3851,7 @@ async fn duplicate_reaction_inputs_reject_before_construction_and_do_not_reserve
     let (good, _, _) = ControlledReaction::fixture("reaction", &["query"]);
     let replacement = core.add_reaction_fixture_with_handle(good).await.unwrap();
     replacement.wait_created().await.unwrap();
-    core.remove_reaction(replacement.id().as_str(), false)
+    core.remove_reaction_by_id(replacement.id(), false)
         .await
         .unwrap();
     core.shutdown().await.unwrap();

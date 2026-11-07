@@ -47,7 +47,7 @@ impl Runtime {
             == ComponentSemanticKind::Query
     }
 
-    pub(super) fn public_component_kind(
+    pub(crate) fn public_component_kind(
         snapshot: &GraphSnapshot,
         node: &NodeSnapshot,
     ) -> Option<&'static str> {
