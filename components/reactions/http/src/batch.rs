@@ -28,7 +28,7 @@ use reqwest::{
 };
 
 use crate::output::BatchEnvelope;
-use crate::process::{send_with_retry, DeliveryOutcome};
+use crate::process::{send_with_retry, DeliveryOptions, DeliveryOutcome};
 
 /// POST a coalesced batch to `{base_url}{batch_endpoint}` as a single
 /// [`BatchEnvelope`] (`{ "batch": [ … ] }`).
@@ -69,7 +69,7 @@ pub(crate) async fn send_coalesced_batch(
         headers,
         body,
         reaction_name,
-        "batch HTTP request",
+        DeliveryOptions::new("batch HTTP request", None),
     )
     .await?;
 
