@@ -69,6 +69,16 @@ pub(super) fn bounded_identifier(value: &str) -> Result<(), PipeError> {
 
 pub use drasi_computation_contracts::{AdmissionReceipt, ProducerSession, ProducerStatus};
 
+struct WakeIfFenced<'a>(&'a QosChannel);
+
+impl Drop for WakeIfFenced<'_> {
+    fn drop(&mut self) {
+        if self.0.check().is_err() {
+            self.0.changed.notify_waiters();
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Receipt {
@@ -272,8 +282,8 @@ impl QosChannel {
         Ok(())
     }
 
-    /// Registration is idempotent by producer name while that session is active.
-    /// Retired names can be registered again, but the persisted epoch never repeats.
+    /// Registration is idempotent by producer UUID while that session is active.
+    /// Retired UUIDs can be registered again, but the persisted epoch never repeats.
     pub async fn register_producer(
         &self,
         producer: ComponentId,
@@ -306,6 +316,7 @@ impl QosChannel {
             },
         );
         let session = admission.session(&producer)?;
+        let _wake = WakeIfFenced(self);
         self.persist(&metadata, None).await?;
         state.metadata = metadata;
         Ok(session)
@@ -331,7 +342,7 @@ impl QosChannel {
     }
 
     /// Retiring never drops pending subscriber obligations. Previously returned
-    /// tokens stay invalid even if the producer name is subsequently reused.
+    /// tokens stay invalid even if the producer UUID is subsequently reused.
     pub async fn retire_producer(&self, session: &ProducerSession) -> Result<(), PipeError> {
         let mut state = self.state.lock().await;
         self.check()?;
@@ -349,6 +360,7 @@ impl QosChannel {
             return Err(AdmissionRejection::PendingObligations.into());
         }
         admission.producers.remove(&session.producer);
+        let _wake = WakeOnDrop(&self.changed);
         self.persist(&metadata, None).await?;
         state.metadata = metadata;
         Ok(())
@@ -411,10 +423,39 @@ impl QosChannel {
         input: &ChangeEnvelope,
         validate: impl FnOnce(&ChangeEnvelope) -> anyhow::Result<()> + Send,
     ) -> Result<AdmissionReceipt, PipeError> {
-        let mut state = self
+        let state = self
             .state
             .try_lock()
             .map_err(|_| AdmissionRejection::Busy)?;
+        self.admit_locked(state, session, sequence, input, validate)
+            .await
+    }
+
+    pub(super) async fn lock_admission(
+        &self,
+    ) -> Result<tokio::sync::MutexGuard<'_, State>, PipeError> {
+        let lock = self.state.lock();
+        tokio::pin!(lock);
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            self.check()?;
+            tokio::select! {
+                state = &mut lock => return Ok(state),
+                result = self.wait_changed(changed) => result?,
+            }
+        }
+    }
+
+    pub(super) async fn admit_locked(
+        &self,
+        mut state: tokio::sync::MutexGuard<'_, State>,
+        session: &ProducerSession,
+        sequence: u64,
+        input: &ChangeEnvelope,
+        validate: impl FnOnce(&ChangeEnvelope) -> anyhow::Result<()> + Send,
+    ) -> Result<AdmissionReceipt, PipeError> {
         self.check()?;
         let storage = self
             .storage()?
@@ -527,11 +568,13 @@ impl QosChannel {
 mod tests {
     use super::*;
 
+    const SOURCE_ID: &str = "266efb09-3a8b-449d-96c8-0c30a25b9e8e";
+
     fn options(producers: usize, receipts: usize) -> AdmissionOptions {
         AdmissionOptions {
             construction_scope: "scope".into(),
             graph_id: "graph".into(),
-            component_id: ComponentId::try_new("source").unwrap(),
+            component_id: ComponentId::try_new(SOURCE_ID).unwrap(),
             failure_scope: FailureMode::ProcessRestart,
             max_producers: NonZeroUsize::new(producers).unwrap(),
             receipts_per_producer: NonZeroUsize::new(receipts).unwrap(),
@@ -564,7 +607,7 @@ mod tests {
         let identity = GraphProducerIdentity::new(
             "scope".into(),
             "graph".into(),
-            ComponentId::try_new("source").unwrap(),
+            ComponentId::try_new(SOURCE_ID).unwrap(),
             definition.stream.clone(),
             true,
         )
@@ -574,7 +617,7 @@ mod tests {
                 let head = u64::MAX / 1024;
                 let last_position = u64::MAX - (1023 - index) * 16;
                 (
-                    ComponentId::try_new(format!("{index:0256}")).unwrap(),
+                    ComponentId::from_uuid(uuid::Uuid::from_u128(u128::from(index) + 1)),
                     Producer {
                         epoch: index + 1,
                         head,

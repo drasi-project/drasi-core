@@ -472,12 +472,12 @@ Configure it before the channel's first event:
 channel.enable_admission(AdmissionOptions {
     construction_scope: "my-instance".into(),
     graph_id: "my-graph".into(),
-    component_id: ComponentId::try_new("source")?,
+    component_id: source_id.clone(), // The source's accepted UUID, not its name.
     failure_scope: FailureMode::ProcessRestart,
     max_producers: NonZeroUsize::new(64).unwrap(),
     receipts_per_producer: NonZeroUsize::new(128).unwrap(),
 }).await?;
-let session = channel.register_producer(ComponentId::try_new("client-a")?).await?;
+let session = channel.register_producer(client_id.clone()).await?;
 let receipt = channel.admit(&session, 1, &input).await?;
 ```
 
@@ -486,8 +486,15 @@ guaranteeing the chosen failure scope. Acceptance uses the existing atomic
 transaction and journal, not a second WAL. The receipt confirms durable
 acceptance for that scope, **not** downstream processing or an external effect.
 
-Registering an active name returns the same saved session. Each client submits
-consecutive sequence numbers starting at one. Retrying a retained number with
+Both `source_id` and `client_id` are `ComponentId` UUIDs, independent of display
+names. Retain the producer UUID across reconnects; do not generate a new UUID on
+each retry or derive one from an editable name. The source UUID must match the
+accepted graph component. Preconstructed source objects added to a DrasiLib
+require `with_allow_external_component_ids(true)`; factory-created sources use
+the identity supplied by the owning instance.
+
+Registering an active producer UUID returns the same saved session. Each client
+submits consecutive sequence numbers starting at one. Retrying a retained number with
 the identical encoded input returns the original receipt without writing again.
 A changed payload, including changed input identity/metadata/context, is a
 conflict; adapters must normalize client input deterministically. The journal
@@ -502,8 +509,8 @@ storage work, await shutdown and reconstruct before trusting a lookup. This
 also applies to lost registration or retirement responses.
 
 Limits are at most 1,024 active producers, 1,024 receipts per producer and
-16,384 receipts in total. Admission names/scopes are at most 256 bytes, and
-serialized channel metadata is capped at 4 MiB. Journal capacity and codec
+16,384 receipts in total. Admission scope, graph and stream identifiers are at most
+256 bytes, and serialized channel metadata is capped at 4 MiB. Journal capacity and codec
 message limits separately bound retained input. Receipts can outlive handled
 payload eviction, but numbers outside the configured receipt window remain
 expired forever within that session. There is no time-based expiry or background
@@ -538,6 +545,26 @@ return `Busy`; admission can also return `Busy` while a subscriber commits its
 progress. Clients retry with the same session, sequence and unchanged input.
 Only one graph admission owner can bind a channel, even through different handles.
 No admission worker is spawned.
+
+Rust callers that need event-driven backpressure can instead use
+`SourceAdmission::admit_wait(&session, sequence, &input).await`. This waits for
+space in the same bounded mailbox and for the journal mutex, and retries a full
+journal only after a channel notification. Capacity observation and notification
+registration cover the rejection/acknowledgement race. The graph task does not
+wait for subscriber capacity while holding a request; it remains available for
+other producer operations. The existing `admit` remains fail-fast.
+
+`admit_wait` keeps the same session, sequence and encoded input on every attempt.
+Exact duplicates still return the saved receipt even when the journal is full;
+changed payloads, expired sessions/receipts, validation failures and uncertain
+commits are returned, never retried. Waiting is tied to the original activation:
+stop, replacement or channel closure cannot silently submit to a new activation.
+The caller supplies any deadline, for example
+`tokio::time::timeout(deadline, admission.admit_wait(&session, sequence, &input)).await??`.
+Cancellation while waiting for mailbox space, the journal mutex or capacity does
+not admit input or consume a sequence. Once storage execution begins, dropping
+the caller can lose an acceptance response; retain the original input and resolve
+its receipt as for `admit`. This Rust API does not change plugin/network protocols.
 
 After successful host/graph startup, await
 `SourceAdmission::wait_active(&self) -> Result<(), PipeError>` before the first
