@@ -332,7 +332,7 @@ async fn real_mailbox_after_start() {
     );
     fixture
         .core
-        .stop_source(SOURCE_ID)
+        .stop_source_by_id(&id(SOURCE_ID))
         .await
         .expect("stop native source");
     assert!(!fixture.admission.is_active().expect("revoked"));
@@ -346,7 +346,7 @@ async fn real_mailbox_after_start() {
     ));
     fixture
         .core
-        .start_source(SOURCE_ID)
+        .start_source_by_id(&id(SOURCE_ID))
         .await
         .expect("restart native source");
     fixture
