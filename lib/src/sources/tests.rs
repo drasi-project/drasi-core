@@ -44,6 +44,15 @@ pub struct TestMockSource {
 }
 
 impl TestMockSource {
+    pub(crate) fn fixture(
+        name: impl Into<String>,
+        auto_start: bool,
+    ) -> crate::test_helpers::creation::SourceFixture<Self> {
+        crate::test_helpers::creation::SourceFixture::new(name, auto_start, move |id| {
+            Self::with_auto_start(id.to_string(), auto_start)
+        })
+    }
+
     pub fn new(id: String) -> Result<Self> {
         let status_handle = crate::component_graph::ComponentStatusHandle::new(&id);
         Ok(Self {
@@ -169,14 +178,16 @@ impl Source for TestMockSource {
         self
     }
 
-    async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
+    async fn bind_runtime_context(&self, context: crate::context::SourceRuntimeContext) {
         self.status_handle.wire(context.update_tx.clone()).await;
     }
 }
 
 /// Helper to create a TestMockSource instance
-pub fn create_test_mock_source(id: String) -> TestMockSource {
-    TestMockSource::new(id).unwrap()
+pub(crate) fn create_test_mock_source(
+    name: String,
+) -> crate::test_helpers::creation::SourceFixture<TestMockSource> {
+    TestMockSource::fixture(name, true)
 }
 
 /// A test mock source that provides a bootstrap channel for testing the bootstrap gate.
@@ -277,17 +288,19 @@ impl Source for TestBootstrapMockSource {
         self
     }
 
-    async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
+    async fn bind_runtime_context(&self, context: crate::context::SourceRuntimeContext) {
         self.status_handle.wire(context.update_tx.clone()).await;
     }
 }
 
 /// Helper to create a TestBootstrapMockSource instance
 pub fn create_test_bootstrap_mock_source(
-    id: String,
+    name: String,
     bootstrap_rx: BootstrapEventReceiver,
-) -> TestBootstrapMockSource {
-    TestBootstrapMockSource::new(id, bootstrap_rx).unwrap()
+) -> crate::test_helpers::creation::SourceFixture<TestBootstrapMockSource> {
+    crate::test_helpers::creation::SourceFixture::new(name, true, move |id| {
+        TestBootstrapMockSource::new(id.to_string(), bootstrap_rx)
+    })
 }
 
 /// A test source that uses SourceBase for logging integration tests.
@@ -299,6 +312,12 @@ pub struct LoggingTestSource {
 }
 
 impl LoggingTestSource {
+    fn fixture(name: impl Into<String>) -> crate::test_helpers::creation::SourceFixture<Self> {
+        crate::test_helpers::creation::SourceFixture::new(name, true, |id| {
+            Self::new(id.to_string())
+        })
+    }
+
     pub fn new(id: impl Into<String>) -> Result<Self> {
         let params = crate::sources::SourceBaseParams::new(id);
         let base = crate::sources::SourceBase::new(params)?;
@@ -359,8 +378,8 @@ impl Source for LoggingTestSource {
         self
     }
 
-    async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: crate::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 }
 
@@ -373,9 +392,10 @@ mod contract_tests {
         use crate::config::SourceSubscriptionSettings;
         use drasi_core::models::{ElementMetadata, ElementReference};
 
-        let source = create_test_mock_source("sequenced".into());
+        let id = crate::config::ComponentId::generate().to_string();
+        let source = TestMockSource::new(id.clone()).unwrap();
         let settings = |query: &str, resume_sequence| SourceSubscriptionSettings {
-            source_id: "sequenced".into(),
+            source_id: id.clone(),
             query_id: query.into(),
             enable_bootstrap: false,
             nodes: Default::default(),
@@ -411,7 +431,7 @@ mod contract_tests {
             let one = first.recv().await.unwrap();
             let two = second.recv().await.unwrap();
             assert_eq!(one.sequence, expected);
-            assert_eq!(one.source_id, "sequenced");
+            assert_eq!(one.source_id, id);
             assert_eq!(one.event, SourceEvent::Change(change.clone()));
             assert!(Arc::ptr_eq(&one, &two));
         }
@@ -479,7 +499,8 @@ mod contract_tests {
 
     #[test]
     fn test_source_supports_replay_default_true() {
-        let source = create_test_mock_source("test-replay".to_string());
+        let source =
+            TestMockSource::new(crate::config::ComponentId::generate().to_string()).unwrap();
         assert!(source.supports_replay());
     }
 
@@ -560,19 +581,11 @@ mod manager_tests {
         )
     }
 
-    /// Create a test manager that also returns the shared graph for event subscription.
-    async fn create_test_manager_with_graph() -> (
-        Arc<SourceManager>,
-        crate::component_graph::ComponentGraphView,
-    ) {
-        create_test_manager().await
-    }
-
     /// Helper: register a source in the graph, then provision it in the manager.
     async fn add_source(
         manager: &SourceManager,
         _graph: &crate::component_graph::ComponentGraphView,
-        source: impl Source + 'static,
+        source: crate::test_helpers::creation::SourceFixture<impl Source + 'static>,
     ) -> anyhow::Result<()> {
         manager.add(source).await
     }
@@ -748,7 +761,7 @@ mod manager_tests {
     #[tokio::test]
     async fn test_stop_all_cleans_failed_source() {
         let (manager, graph) = create_test_manager().await;
-        let source = LoggingTestSource::new("failed-source").unwrap();
+        let source = LoggingTestSource::fixture("failed-source");
         add_source(&manager, &graph, source).await.unwrap();
         manager.start_source("failed-source".into()).await.unwrap();
         let runtime = manager.get_source_instance("failed-source").await.unwrap();
@@ -796,8 +809,10 @@ mod manager_tests {
     #[tokio::test]
     async fn test_stop_failed_source_with_already_stopped_runtime() {
         let (manager, graph) = create_test_manager().await;
-        let mut source = LoggingTestSource::new("failed-start").unwrap();
-        source.fail_start = true;
+        let source = LoggingTestSource::fixture("failed-start").map(|mut source| {
+            source.fail_start = true;
+            source
+        });
         add_source(&manager, &graph, source).await.unwrap();
         assert!(manager.start_source("failed-start".into()).await.is_err());
         crate::component_graph::wait_for_status(
@@ -972,13 +987,11 @@ mod manager_tests {
         let mut event_rx = graph.subscribe().unwrap();
 
         // Add source with auto_start=true
-        let source1 =
-            TestMockSource::with_auto_start("auto-start-source".to_string(), true).unwrap();
+        let source1 = TestMockSource::fixture("auto-start-source", true);
         add_source(&manager, &graph, source1).await.unwrap();
 
         // Add source with auto_start=false
-        let source2 =
-            TestMockSource::with_auto_start("no-auto-start-source".to_string(), false).unwrap();
+        let source2 = TestMockSource::fixture("no-auto-start-source", false);
         add_source(&manager, &graph, source2).await.unwrap();
 
         // Start all sources
@@ -1060,7 +1073,7 @@ mod manager_tests {
         let mut event_rx = graph.subscribe().unwrap();
 
         // Add source with auto_start=false
-        let source = TestMockSource::with_auto_start("manual-source".to_string(), false).unwrap();
+        let source = TestMockSource::fixture("manual-source", false);
         add_source(&manager, &graph, source).await.unwrap();
 
         // start_all should not start it
@@ -1150,7 +1163,7 @@ mod manager_tests {
         let source_id_clone = source_id.clone();
 
         // Create a LoggingTestSource that uses SourceBase
-        let source = LoggingTestSource::new(&source_id).unwrap();
+        let source = LoggingTestSource::fixture(source_id.clone());
         add_source(&manager, &graph, source).await.unwrap();
 
         // Subscribe to logs before emitting
@@ -1199,7 +1212,7 @@ mod manager_tests {
         let source_id_clone = source_id.clone();
 
         // Create a LoggingTestSource
-        let source = LoggingTestSource::new(&source_id).unwrap();
+        let source = LoggingTestSource::fixture(source_id.clone());
         add_source(&manager, &graph, source).await.unwrap();
 
         // Emit logs at all levels within a component span (must include instance_id)
@@ -1252,7 +1265,7 @@ mod manager_tests {
         let source_id_clone = source_id.clone();
 
         // Create and add source
-        let source = LoggingTestSource::new(&source_id).unwrap();
+        let source = LoggingTestSource::fixture(source_id.clone());
         add_source(&manager, &graph, source).await.unwrap();
 
         // Emit some logs within a component span (must include instance_id)
@@ -1309,7 +1322,7 @@ mod manager_tests {
         let source_id = unique_id("log-routing-source");
         let source_id_clone = source_id.clone();
 
-        let source = LoggingTestSource::new(&source_id).unwrap();
+        let source = LoggingTestSource::fixture(source_id.clone());
         add_source(&manager, &graph, source).await.unwrap();
 
         let (_history, mut receiver) = manager.subscribe_logs(&source_id).await.unwrap();
@@ -1365,7 +1378,7 @@ mod manager_tests {
         let source_id = unique_id("cleanup-events-source");
 
         // Add a source
-        let source = LoggingTestSource::new(&source_id).unwrap();
+        let source = LoggingTestSource::fixture(source_id.clone());
         add_source(&manager, &graph, source).await.unwrap();
 
         manager.start_source(source_id.clone()).await.unwrap();
@@ -1396,7 +1409,7 @@ mod manager_tests {
         let source_id_clone = source_id.clone();
 
         // Add a source
-        let source = LoggingTestSource::new(&source_id).unwrap();
+        let source = LoggingTestSource::fixture(source_id.clone());
         add_source(&manager, &graph, source).await.unwrap();
 
         // Generate some logs using tracing within a component span (must include instance_id)
@@ -1452,24 +1465,26 @@ mod manager_tests {
     }
 
     impl DeprovisionTestSource {
-        fn new(id: &str) -> (Self, Arc<std::sync::atomic::AtomicBool>) {
+        fn new(
+            name: &str,
+        ) -> (
+            crate::test_helpers::creation::SourceFixture<Self>,
+            Arc<std::sync::atomic::AtomicBool>,
+        ) {
             let deprovision_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let called = deprovision_called.clone();
             (
-                Self {
-                    id: id.to_string(),
-                    status_handle: crate::component_graph::ComponentStatusHandle::new(id),
-                    deprovision_called: deprovision_called.clone(),
-                },
+                crate::test_helpers::creation::SourceFixture::new(name, false, move |id| {
+                    Ok(Self {
+                        id: id.to_string(),
+                        status_handle: crate::component_graph::ComponentStatusHandle::new(
+                            id.as_str(),
+                        ),
+                        deprovision_called: called,
+                    })
+                }),
                 deprovision_called,
             )
-        }
-
-        fn new_simple(id: &str) -> Self {
-            Self {
-                id: id.to_string(),
-                status_handle: crate::component_graph::ComponentStatusHandle::new(id),
-                deprovision_called: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            }
         }
     }
 
@@ -1520,13 +1535,13 @@ mod manager_tests {
             self
         }
 
-        async fn deprovision(&self) -> Result<()> {
+        async fn delete_owned_resources(&self) -> Result<()> {
             self.deprovision_called
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
 
-        async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
+        async fn bind_runtime_context(&self, context: crate::context::SourceRuntimeContext) {
             self.status_handle.wire(context.update_tx.clone()).await;
         }
     }
@@ -1573,86 +1588,89 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_update_source_replaces_stopped_source() {
-        let (manager, graph) = create_test_manager().await;
-
-        let source = DeprovisionTestSource::new_simple("reconfig-stopped-source");
-        add_source(&manager, &graph, source).await.unwrap();
-
-        // Update while stopped by providing a new instance
-        let new_source = DeprovisionTestSource::new_simple("reconfig-stopped-source");
-        manager
-            .update_source("reconfig-stopped-source".to_string(), new_source)
+        use crate::test_helpers::updates;
+        let (core, trace) = updates::core().await;
+        let old = updates::add(&core, "reconfig-stopped-source", false).await;
+        core.source_manager()
+            .update_source(
+                old.id().to_string(),
+                updates::definition(old.id().clone(), "reconfig-stopped-source", false, 1),
+            )
             .await
             .unwrap();
-
-        // Source should still be stopped
-        let status = manager
-            .get_source_status("reconfig-stopped-source".to_string())
-            .await
-            .unwrap();
-        assert_eq!(status, ComponentStatus::Stopped);
+        updates::settle(&core).await;
+        let current = core.computation_component(old.id().as_str()).unwrap();
+        assert_eq!(current.id(), old.id());
+        assert_ne!(current.generation(), old.generation());
+        assert_eq!(
+            current.observed().unwrap().lifecycle,
+            crate::computation::v1::ComponentLifecycle::Stopped
+        );
+        assert_eq!(
+            trace.events(),
+            ["create", "bind", "initialize", "dispose", "create", "bind", "initialize"]
+        );
+        core.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_update_source_stops_and_restarts_running_source() {
-        let (manager, graph) = create_test_manager().await;
-
-        // Subscribe to graph events BEFORE adding components
-        let mut event_rx = graph.subscribe().unwrap();
-
-        let source = DeprovisionTestSource::new_simple("reconfig-running-source");
-        add_source(&manager, &graph, source).await.unwrap();
-
-        // Start the source first
-        manager
-            .start_source("reconfig-running-source".to_string())
+        use crate::test_helpers::updates;
+        let (core, trace) = updates::core().await;
+        let old = updates::add(&core, "reconfig-running-source", false).await;
+        old.start().await.unwrap();
+        old.wait_started().await.unwrap();
+        core.source_manager()
+            .update_source(
+                old.id().to_string(),
+                updates::definition(old.id().clone(), "reconfig-running-source", false, 1),
+            )
             .await
             .unwrap();
-        // Wait for source to reach Running
-        wait_for_component_status(
-            &mut event_rx,
-            "reconfig-running-source",
-            ComponentStatus::Running,
-            std::time::Duration::from_secs(5),
-        )
-        .await;
-        let status = manager
-            .get_source_status("reconfig-running-source".to_string())
-            .await
-            .unwrap();
-        assert_eq!(status, ComponentStatus::Running);
-
-        // Update while running
-        let new_source = DeprovisionTestSource::new_simple("reconfig-running-source");
-        manager
-            .update_source("reconfig-running-source".to_string(), new_source)
-            .await
-            .unwrap();
-
-        // Wait for source to reach Running again after update
-        wait_for_component_status(
-            &mut event_rx,
-            "reconfig-running-source",
-            ComponentStatus::Running,
-            std::time::Duration::from_secs(5),
-        )
-        .await;
-        let status = manager
-            .get_source_status("reconfig-running-source".to_string())
-            .await
-            .unwrap();
-        assert_eq!(status, ComponentStatus::Running);
+        updates::settle(&core).await;
+        let current = core.computation_component(old.id().as_str()).unwrap();
+        let started = current.wait_started().await;
+        assert!(
+            started.is_ok(),
+            "{started:?}; state={:?}; hooks={:?}; management={:?}",
+            current.observed(),
+            trace.events(),
+            core.management_status().await
+        );
+        assert_eq!(
+            core.source_manager()
+                .get_source_status(old.id().to_string())
+                .await
+                .unwrap(),
+            ComponentStatus::Running
+        );
+        assert_eq!(
+            trace.events(),
+            [
+                "create",
+                "bind",
+                "initialize",
+                "start",
+                "stop",
+                "dispose",
+                "create",
+                "bind",
+                "initialize",
+                "start"
+            ]
+        );
+        assert!(old.start().await.is_err());
+        core.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_update_source_preserves_log_history() {
+        use crate::test_helpers::updates;
         use tracing::Instrument;
-
-        let (manager, graph) = create_test_manager().await;
-
-        let source_id = unique_id("reconfig-logs-source");
-        let source = DeprovisionTestSource::new_simple(&source_id);
-        add_source(&manager, &graph, source).await.unwrap();
+        let (core, _) = updates::core().await;
+        let source = updates::add(&core, "reconfig-logs-source", false).await;
+        let source_id = source.id().to_string();
+        let manager = core.source_manager();
 
         // Generate some logs
         let span = tracing::info_span!(
@@ -1685,10 +1703,11 @@ mod manager_tests {
         let (logs_before, _) = manager.subscribe_logs(&source_id).await.unwrap();
         assert!(!logs_before.is_empty(), "Expected logs before update");
 
-        // Update with a new instance
-        let new_source = DeprovisionTestSource::new_simple(&source_id);
         manager
-            .update_source(source_id.clone(), new_source)
+            .update_source(
+                source_id.clone(),
+                updates::definition(source.id().clone(), "reconfig-logs-source", false, 1),
+            )
             .await
             .unwrap();
 
@@ -1698,59 +1717,67 @@ mod manager_tests {
             !logs_after.is_empty(),
             "Expected logs to be preserved after update"
         );
+        core.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_update_source_emits_reconfiguring_event() {
-        let (manager, graph) = create_test_manager_with_graph().await;
-
-        // Subscribe to graph events BEFORE adding source
-        let mut event_rx = graph.subscribe().unwrap();
-
-        let source = DeprovisionTestSource::new_simple("reconfig-event-source");
-        add_source(&manager, &graph, source).await.unwrap();
-
-        // Update
-        let new_source = DeprovisionTestSource::new_simple("reconfig-event-source");
-        manager
-            .update_source("reconfig-event-source".to_string(), new_source)
+        use crate::test_helpers::updates;
+        let (core, _) = updates::core().await;
+        let source = updates::add(&core, "reconfig-event-source", false).await;
+        source.start().await.unwrap();
+        source.wait_started().await.unwrap();
+        let mut event_rx = core.component_graph().subscribe().unwrap();
+        core.source_manager()
+            .update_source(
+                source.id().to_string(),
+                updates::definition(source.id().clone(), "reconfig-event-source", false, 1),
+            )
             .await
             .unwrap();
 
         // Wait for Reconfiguring event via the broadcast channel
         wait_for_component_status(
             &mut event_rx,
-            "reconfig-event-source",
+            source.id().as_str(),
             ComponentStatus::Reconfiguring,
             std::time::Duration::from_secs(5),
         )
         .await;
+        core.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_update_source_rejects_mismatched_id() {
-        let (manager, graph) = create_test_manager().await;
-
-        let source = DeprovisionTestSource::new_simple("original-source");
-        add_source(&manager, &graph, source).await.unwrap();
-
-        // Try to update with a different ID
-        let new_source = DeprovisionTestSource::new_simple("different-id");
-        let result = manager
-            .update_source("original-source".to_string(), new_source)
+        use crate::test_helpers::updates;
+        let (core, trace) = updates::core().await;
+        let source = updates::add(&core, "original-source", false).await;
+        let before = trace.events();
+        let result = core
+            .source_manager()
+            .update_source(
+                source.id().to_string(),
+                updates::definition(
+                    crate::config::ComponentId::generate(),
+                    "original-source",
+                    false,
+                    1,
+                ),
+            )
             .await;
         assert!(result.is_err(), "Expected error for mismatched IDs");
-        assert!(result.unwrap_err().to_string().contains("does not match"));
+        assert!(result.unwrap_err().to_string().contains("UUID"));
+        assert_eq!(trace.events(), before);
+        core.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_update_nonexistent_source() {
         let (manager, _graph) = create_test_manager().await;
-
-        let new_source = DeprovisionTestSource::new_simple("nonexistent");
-        let result = manager
-            .update_source("nonexistent".to_string(), new_source)
-            .await;
+        let id = crate::config::ComponentId::generate();
+        let definition =
+            crate::test_helpers::updates::definition(id.clone(), "nonexistent", false, 1);
+        let result = manager.update_source(id.to_string(), definition).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }

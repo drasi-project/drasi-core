@@ -281,7 +281,8 @@ impl ComputationTopologySource {
                         })
                     }).collect();
                     elements.insert(key.clone(), self.node(&key, "ComputationComponent", serde_json::json!({
-                        "id": node.descriptor.id().as_str(), "role": format!("{:?}", node.role),
+                        "id": node.descriptor.id().as_str(), "name": node.name.as_str(),
+                        "role": format!("{:?}", node.role),
                         "kind": format!("{:?}", component.kind),
                         "construction": construction,
                         "implementation": implementation.map(|identity| identity.name.as_ref()),
@@ -516,14 +517,8 @@ impl ComputationTopologySource {
             );
         }
         for edge in view.desired.edges.iter() {
-            let from = format!(
-                "component:{}",
-                encode(edge.definition.from.component.as_str())
-            );
-            let to = format!(
-                "component:{}",
-                encode(edge.definition.to.component.as_str())
-            );
+            let from = GraphEntityId::Component(edge.definition.from.component.clone()).key();
+            let to = GraphEntityId::Component(edge.definition.to.component.clone()).key();
             let key = format!(
                 "flow:{from}:{}:{to}:{}",
                 encode(edge.definition.from.port.as_str()),
@@ -539,8 +534,8 @@ impl ComputationTopologySource {
         }
         for relationship in view.desired.unbound_relationships.iter() {
             let edge = &relationship.definition;
-            let from = format!("component:{}", encode(edge.from.component.as_str()));
-            let to = format!("component:{}", encode(edge.to.component.as_str()));
+            let from = GraphEntityId::Component(edge.from.component.clone()).key();
+            let to = GraphEntityId::Component(edge.to.component.clone()).key();
             let key = format!(
                 "unbound:{from}:{}:{to}:{}",
                 encode(edge.from.port.as_str()),

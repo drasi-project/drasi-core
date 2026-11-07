@@ -23,6 +23,18 @@ The runtime remains responsible for graph membership, actual storage ownership,
 query processing and recovery. Native plugins use explicit host capabilities,
 not concrete runtime objects.
 
+`ComponentId` is a validated UUID, serialized as canonical UUID text.
+`ComponentName` is separate, case-sensitive graph-owned metadata; renaming does
+not change the UUID or existing connections. Authoring `ComponentReference`
+strings select names, even when the string looks like a UUID; `{"id":"UUID"}`
+selects an existing identity explicitly. Plugin IDs, implementation versions,
+graph/instance IDs and business-record namespaces remain their own identifiers.
+
+JSON `EnvelopeCodec` and MessagePack `BinaryEnvelopeCodec` use format **2**.
+Both reject previous formats, including envelopes without component annotations.
+Use fresh persisted state and matching native libraries; there is no name-to-ID
+conversion or migration reader.
+
 Published envelopes have a maximum ancestry depth of 1,024
 (`MAX_LINEAGE_DEPTH`). JSON and binary decoding, encoding and binary size
 measurement enforce the same bound. `ChangeEnvelope::try_derive` checks it before

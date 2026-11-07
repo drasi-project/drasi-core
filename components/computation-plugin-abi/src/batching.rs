@@ -33,7 +33,7 @@ mod tests {
         let pointer = size_of::<usize>();
         assert_eq!(size_of::<PluginBatchingV1>(), 24 + 2 * pointer);
         assert_eq!(size_of::<crate::ComponentVTable>(), 16 + 5 * pointer);
-        assert_eq!(crate::ABI_VERSION, "1.0.0");
-        assert_eq!(crate::WIRE_VERSION, 1);
+        assert_eq!(crate::ABI_VERSION, "2.0.0");
+        assert_eq!(crate::WIRE_VERSION, 2);
     }
 }

@@ -601,6 +601,10 @@ pub(crate) struct StartupCancellation {
 }
 
 impl StartupCancellation {
+    pub(crate) fn is_cancelled(&self) -> bool {
+        *self.changes.borrow() != self.epoch
+    }
+
     pub(crate) async fn cancelled(&mut self) {
         let _ = self.changes.wait_for(|epoch| *epoch != self.epoch).await;
     }
@@ -614,7 +618,11 @@ impl StartupCancellation {
 }
 
 pub(crate) async fn build_instance(
-    build: impl std::future::Future<Output = Result<crate::DrasiLib>>,
+    build: impl FnOnce(
+        Vec<Arc<PendingComponents>>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<crate::DrasiLib>> + Send>,
+    >,
     batches: Vec<ComponentBatch>,
 ) -> Result<crate::DrasiLib> {
     let mut ids = std::collections::BTreeSet::new();
@@ -626,27 +634,33 @@ pub(crate) async fn build_instance(
             (!ids.insert(id.clone()))
                 .then(|| DrasiError::already_exists("component", id.to_string()))
         });
-    let built = if let Some(error) = invalid {
-        Err(error)
-    } else {
-        build.await
-    };
-    let core = match built {
-        Ok(core) => core,
-        Err(error) => return Err(dispose_rejected(batches, None, error).await),
-    };
-    let mut batches = batches.into_iter();
-    while let Some(batch) = batches.next() {
-        let accepted = core.add_components(batch).await.and_then(|report| {
-            report
-                .ensure_committed()
-                .map_err(|error| DrasiError::Internal((*error).into()))
-        });
-        if let Err(error) = accepted {
-            return Err(dispose_rejected(batches.collect(), Some(core), error).await);
+    if let Some(error) = invalid {
+        return Err(dispose_rejected(batches, None, error).await);
+    }
+    let pending: Vec<_> = batches
+        .into_iter()
+        .map(|batch| PendingComponents::new(batch, None))
+        .collect();
+    match build(pending.clone()).await {
+        Ok(core) => Ok(core),
+        Err(error) => {
+            let owner = RejectedComputations {
+                core: Mutex::new(None),
+                batches: pending,
+                cleanup: tokio::sync::Mutex::new(()),
+            };
+            match owner.shutdown().await {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(DrasiError::Internal(anyhow::Error::new(
+                    ComputationCleanupError {
+                        cause: error,
+                        cleanup_error: Some(cleanup),
+                        owner,
+                    },
+                ))),
+            }
         }
     }
-    Ok(core)
 }
 
 async fn dispose_rejected(
@@ -757,6 +771,13 @@ impl InstanceGraph {
         pending.push(batch.clone());
         batch
     }
+
+    pub(crate) fn retain_pending(&self, batch: Arc<PendingComponents>) {
+        self.pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(batch);
+    }
     pub(crate) async fn shutdown(&self) -> anyhow::Result<()> {
         self.request_shutdown();
         self.join_startup().await?;
@@ -797,12 +818,58 @@ impl Drop for InstanceGraph {
 pub(crate) struct PendingComponents {
     value: tokio::sync::Mutex<Option<ComponentBatch>>,
     resources: Option<Arc<RejectedResources>>,
-    control: Option<GraphControl>,
+    control: Mutex<Option<GraphControl>>,
     done: AtomicBool,
     cleanup_started: AtomicBool,
 }
 
 impl PendingComponents {
+    pub(crate) fn attach_control(&self, control: GraphControl) {
+        *self
+            .control
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(control);
+    }
+
+    pub(crate) async fn lock(&self) -> Result<tokio::sync::MutexGuard<'_, Option<ComponentBatch>>> {
+        let value = self.value.lock().await;
+        if self.cleanup_started.load(Ordering::Acquire) {
+            return Err(DrasiError::invalid_state(
+                "component batch cleanup has begun",
+            ));
+        }
+        Ok(value)
+    }
+
+    pub(crate) async fn external_bindings(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, super::v1::ComponentDescriptor>> {
+        let value = self.value.lock().await;
+        value
+            .as_ref()
+            .map(|batch| {
+                batch
+                    .bindings
+                    .components
+                    .iter()
+                    .map(|(binding, component)| {
+                        (binding.to_string(), component.descriptor().clone())
+                    })
+                    .collect()
+            })
+            .ok_or_else(|| DrasiError::invalid_state("component batch was already submitted"))
+    }
+
+    pub(crate) async fn resources(
+        &self,
+    ) -> Result<std::collections::BTreeMap<super::v1::ResourceId, super::v1::ResourceHandle>> {
+        let value = self.value.lock().await;
+        value
+            .as_ref()
+            .map(|batch| batch.bindings.resources.clone())
+            .ok_or_else(|| DrasiError::invalid_state("component batch was already submitted"))
+    }
+
     fn new(batch: ComponentBatch, control: Option<GraphControl>) -> Arc<Self> {
         let resources = RejectedResources::new(
             batch.definition.resources.iter().cloned(),
@@ -811,7 +878,7 @@ impl PendingComponents {
         Arc::new(Self {
             value: tokio::sync::Mutex::new(Some(batch)),
             resources,
-            control,
+            control: Mutex::new(control),
             done: AtomicBool::new(false),
             cleanup_started: AtomicBool::new(false),
         })
@@ -847,6 +914,8 @@ impl PendingComponents {
         }
         let existing = self
             .control
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
             .as_ref()
             .map(|control| control.registry_snapshot());
         let handles = existing
@@ -935,13 +1004,16 @@ mod tests {
     }
 
     async fn shutdown_after_accepted_revision_change() -> anyhow::Result<()> {
-        let id = ComponentId::try_new("idle")?;
+        let id = ComponentId::generate();
         let stops = Arc::new(AtomicUsize::new(0));
         let mut graph = ComputationGraph::builder("shutdown-revision")
-            .service(Box::new(IdleService {
-                descriptor: ComponentDescriptor::try_new(id.clone(), vec![])?,
-                stops: stops.clone(),
-            }))
+            .service(
+                super::super::v1::ComponentName::try_new("idle")?,
+                Box::new(IdleService {
+                    descriptor: ComponentDescriptor::try_new(id.clone(), vec![])?,
+                    stops: stops.clone(),
+                }),
+            )
             .build()?;
         let run = graph.start()?;
         let control = run.control();
@@ -985,13 +1057,13 @@ mod tests {
         for _ in 0..8 {
             let stops = Arc::new(AtomicUsize::new(0));
             let graph = ComputationGraph::builder("external-cancellation")
-                .service(Box::new(IdleService {
-                    descriptor: ComponentDescriptor::try_new(
-                        ComponentId::try_new("idle")?,
-                        vec![],
-                    )?,
-                    stops: stops.clone(),
-                }))
+                .service(
+                    super::super::v1::ComponentName::try_new("idle")?,
+                    Box::new(IdleService {
+                        descriptor: ComponentDescriptor::try_new(ComponentId::generate(), vec![])?,
+                        stops: stops.clone(),
+                    }),
+                )
                 .build()?;
             let entry = Entry::new(graph, "external-cancellation");
             let handle = entry.ready().await?;

@@ -1354,7 +1354,7 @@ async fn full_lifecycle_with_runtime_context() {
 
     let (tx, _rx) = mpsc::channel::<ComponentUpdate>(16);
     let ctx = ReactionRuntimeContext::new("inst", "rxn", None, tx, None);
-    r.initialize(ctx).await;
+    r.bind_runtime_context(ctx).await;
 
     r.start().await.unwrap();
     assert!(matches!(r.status().await, ComponentStatus::Running));

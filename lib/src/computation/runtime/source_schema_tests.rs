@@ -150,12 +150,15 @@ fn source(
 async fn add(core: &DrasiLib, source: NativeSource) -> ComponentHandle {
     let id = source.descriptor.id().to_string();
     core.add_computation_component(
-        ComponentAddition::new(ConstructedComponent::source(Box::new(source)))
-            .auto_start(false)
-            .bind_stream(
-                PortId::try_new("out").unwrap(),
-                StreamId::try_new(format!("{id}/out")).unwrap(),
-            ),
+        ComponentAddition::new(
+            ComponentName::try_new("source").unwrap(),
+            ConstructedComponent::source(Box::new(source)),
+        )
+        .auto_start(false)
+        .bind_stream(
+            PortId::try_new("out").unwrap(),
+            StreamId::try_new(format!("{id}/out")).unwrap(),
+        ),
     )
     .await
     .unwrap()
@@ -175,18 +178,19 @@ struct Fixture {
 }
 
 async fn fixture() -> Fixture {
-    let (legacy, legacy_control) = ControlledSource::new("legacy");
+    let (legacy, legacy_control) = ControlledSource::fixture("legacy");
     *legacy_control.schema.lock().unwrap() = Some(schema("Legacy"));
-    let core = Arc::new(builder().with_source(legacy).build().await.unwrap());
+    let core = Arc::new(builder().with_source_fixture(legacy).build().await.unwrap());
     // Initialization reports resources, which advance the topology revision.
     bounded(core.computation_component("legacy").unwrap().wait_created())
         .await
         .unwrap();
     let sink = core
         .add_computation_component(
-            ComponentAddition::new(ConstructedComponent::sink(Box::new(Sink(descriptor(
-                "sink", false,
-            )))))
+            ComponentAddition::new(
+                ComponentName::try_new("sink").unwrap(),
+                ConstructedComponent::sink(Box::new(Sink(descriptor("sink", false)))),
+            )
             .auto_start(false),
         )
         .await

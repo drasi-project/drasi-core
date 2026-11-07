@@ -358,7 +358,11 @@ fn retired_query_execution_mode_is_rejected() -> anyhow::Result<()> {
                 ))),
             ),
         )?
-        .component(specification, factory)
+        .component(
+            crate::config::ComponentName::try_new("query")?,
+            specification,
+            factory,
+        )
         .build();
     let error = match graph {
         Ok(_) => anyhow::bail!("removed execution mode must not be accepted"),

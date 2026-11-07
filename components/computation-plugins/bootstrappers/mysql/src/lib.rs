@@ -133,8 +133,8 @@ fn create(
         .scope
         .as_ref()
         .context("MySQL bootstrap requires query scope")?;
-    ComponentId::try_new(scope.instance_id.as_str())?;
-    ComponentId::try_new(scope.graph_id.as_str())?;
+    drasi_computation_contracts::validate_identifier("instance", &scope.instance_id)?;
+    drasi_computation_contracts::validate_identifier("graph", &scope.graph_id)?;
     let progress = progress
         .context("MySQL bootstrap requires its actual query progress owner")?
         .reader();

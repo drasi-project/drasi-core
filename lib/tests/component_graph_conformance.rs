@@ -295,9 +295,6 @@ async fn full_pipeline_preserves_main_ownership_subscription_and_removal_results
             .build()
             .await
             .unwrap();
-        core.remove_source(drasi_lib::sources::COMPONENT_GRAPH_SOURCE_ID, false)
-            .await
-            .unwrap();
         for id in ["source-1", "source-2", "query-1", "query-2", "reaction-1"] {
             core.computation_component(id)
                 .unwrap()

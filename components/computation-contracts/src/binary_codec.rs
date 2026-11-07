@@ -43,7 +43,7 @@ pub struct BinaryEnvelopeCodec {
 }
 
 impl BinaryEnvelopeCodec {
-    pub const VERSION: u32 = 1;
+    pub const VERSION: u32 = 2;
 
     pub fn new(max_bytes: NonZeroUsize) -> Self {
         Self {
@@ -795,7 +795,7 @@ mod tests {
             result
                 .append_annotation(
                     ContextEntry::try_new(
-                        ComponentId::try_new("transform").unwrap(),
+                        ComponentId::try_new("00000000-0000-4000-8000-000000000001").unwrap(),
                         "same-key",
                         value,
                     )
@@ -825,13 +825,13 @@ mod tests {
         assert!(codec.decode(&persisted).is_err());
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&persisted).unwrap()["format"],
-            1
+            EnvelopeCodec::VERSION
         );
         let mut branch = decoded.clone();
         branch
             .append_annotation(
                 ContextEntry::try_new(
-                    ComponentId::try_new("branch").unwrap(),
+                    ComponentId::try_new("00000000-0000-4000-8000-000000000002").unwrap(),
                     "only-here",
                     ContextValue::Bool(true),
                 )
@@ -1187,17 +1187,17 @@ mod tests {
         }
 
         #[test]
-        fn version_is_the_unreleased_first_format() {
-            assert_eq!(BinaryEnvelopeCodec::VERSION, 1);
+        fn uuid_wire_version_rejects_the_previous_format() {
+            assert_eq!(BinaryEnvelopeCodec::VERSION, 2);
             let codec = codec(4096);
             let encoded = codec.encode(&envelope(None, None)).unwrap();
             let mut frame: Frame<'_> = decode_bounded_messagepack(&encoded, 4096).unwrap();
-            assert_eq!(frame.format, 1);
-            frame.format = 2;
+            assert_eq!(frame.format, BinaryEnvelopeCodec::VERSION);
+            frame.format = 1;
             let changed = encode_bounded_messagepack(&frame, 4096).unwrap();
             assert!(matches!(
                 codec.decode(&changed),
-                Err(BinaryEnvelopeCodecError::Version(2))
+                Err(BinaryEnvelopeCodecError::Version(1))
             ));
         }
 
@@ -1351,7 +1351,7 @@ mod tests {
                 let original = ordered(current, historical);
                 let encoded = codec.encode(&original).unwrap();
                 let frame: Frame<'_> = decode_bounded_messagepack(&encoded, 4096).unwrap();
-                assert_eq!(frame.format, 1);
+                assert_eq!(frame.format, BinaryEnvelopeCodec::VERSION);
                 assert_eq!(frame.system.ordering, current);
                 assert_eq!(frame.lineage[0].1.ordering, historical);
                 let decoded = codec.decode(&encoded).unwrap();

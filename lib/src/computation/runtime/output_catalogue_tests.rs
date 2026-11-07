@@ -499,13 +499,16 @@ async fn sink(core: &DrasiLib) -> ComponentHandle {
         return existing;
     }
     core.add_computation_component(
-        ComponentAddition::new(ConstructedComponent::sink(Box::new(FixtureSink(
-            ComponentDescriptor::try_new(
-                ComponentId::try_new("sink").unwrap(),
-                vec![port("in", PortDirection::Input)],
-            )
-            .unwrap(),
-        ))))
+        ComponentAddition::new(
+            ComponentName::try_new("sink").unwrap(),
+            ConstructedComponent::sink(Box::new(FixtureSink(
+                ComponentDescriptor::try_new(
+                    ComponentId::try_new("sink").unwrap(),
+                    vec![port("in", PortDirection::Input)],
+                )
+                .unwrap(),
+            ))),
+        )
         .auto_start(false),
     )
     .await
@@ -516,12 +519,15 @@ async fn add_source(core: &DrasiLib, source: FixtureSource) -> ComponentHandle {
     let id = source.descriptor.id().to_string();
     let handle = core
         .add_computation_component(
-            ComponentAddition::new(ConstructedComponent::source(Box::new(source)))
-                .auto_start(false)
-                .bind_stream(
-                    PortId::try_new("out").unwrap(),
-                    StreamId::try_new(format!("{id}/out")).unwrap(),
-                ),
+            ComponentAddition::new(
+                ComponentName::try_new(id.as_str()).unwrap(),
+                ConstructedComponent::source(Box::new(source)),
+            )
+            .auto_start(false)
+            .bind_stream(
+                PortId::try_new("out").unwrap(),
+                StreamId::try_new(format!("{id}/out")).unwrap(),
+            ),
         )
         .await
         .unwrap();
@@ -539,16 +545,17 @@ async fn add_transformer(
 ) -> ComponentHandle {
     let handle = core
         .add_computation_component(
-            ComponentAddition::new(ConstructedComponent::transformer(Box::new(
-                FixtureTransformer {
+            ComponentAddition::new(
+                ComponentName::try_new(id).unwrap(),
+                ConstructedComponent::transformer(Box::new(FixtureTransformer {
                     descriptor: ComponentDescriptor::try_new(
                         ComponentId::try_new(id).unwrap(),
                         vec![port("in", PortDirection::Input), port("out", PortDirection::Output)],
                     )
                     .unwrap(),
                     readers: readers(shared, "out", registration),
-                },
-            )))
+                })),
+            )
             .auto_start(false)
             .bind_stream(
                 PortId::try_new("out").unwrap(),
@@ -859,12 +866,15 @@ async fn invalid_registrations_are_rejected_at_addition_and_build() {
     let state = Shared::new("bad", 1, 2);
     let rejected = core
         .add_computation_component(
-            ComponentAddition::new(ConstructedComponent::source(Box::new(bad_source(&state))))
-                .auto_start(false)
-                .bind_stream(
-                    PortId::try_new("out").unwrap(),
-                    StreamId::try_new("bad/out").unwrap(),
-                ),
+            ComponentAddition::new(
+                ComponentName::try_new("bad").unwrap(),
+                ConstructedComponent::source(Box::new(bad_source(&state))),
+            )
+            .auto_start(false)
+            .bind_stream(
+                PortId::try_new("out").unwrap(),
+                StreamId::try_new("bad/out").unwrap(),
+            ),
         )
         .await;
     assert!(chain(&rejected.expect_err("addition must be rejected")).contains(UNDECLARED));
@@ -878,7 +888,10 @@ async fn invalid_registrations_are_rejected_at_addition_and_build() {
     core.shutdown().await.unwrap();
 
     let built = ComputationGraph::builder("invalid-readers")
-        .source(Box::new(bad_source(&state)))
+        .source(
+            ComponentName::try_new("bad").unwrap(),
+            Box::new(bad_source(&state)),
+        )
         .build();
     assert!(chain(&built.err().expect("build must be rejected")).contains(UNDECLARED));
 }
@@ -962,13 +975,14 @@ async fn a_registration_that_changes_after_validation_fails_creation_explicitly(
     let state = Shared::new("flaky", 1, 2);
     let handle = core
         .add_computation_component(
-            ComponentAddition::new(ConstructedComponent::source(Box::new(
-                ChangingRegistration {
+            ComponentAddition::new(
+                ComponentName::try_new("flaky").unwrap(),
+                ConstructedComponent::source(Box::new(ChangingRegistration {
                     inner: fixture_source("flaky", &state, BOTH, "out"),
                     calls: AtomicUsize::new(0),
                     changed: fixture_source("flaky", &state, BOTH, "missing"),
-                },
-            )))
+                })),
+            )
             .auto_start(false)
             .bind_stream(
                 PortId::try_new("out").unwrap(),
@@ -1070,9 +1084,16 @@ async fn snapshot_and_replay_must_use_the_ports_declared_schema() {
     assert_ne!(&other_schema, GraphChangeCodec::schema().descriptor());
     // A genuinely different format, not the query helper's shared graph schema.
     core.add_computation_component(
-        ComponentAddition::new(ConstructedComponent::source(Box::new(
-            fixture_source_with_schema("mismatch", &state, BOTH, "out", other_schema),
-        )))
+        ComponentAddition::new(
+            ComponentName::try_new("mismatch").unwrap(),
+            ConstructedComponent::source(Box::new(fixture_source_with_schema(
+                "mismatch",
+                &state,
+                BOTH,
+                "out",
+                other_schema,
+            ))),
+        )
         .auto_start(false)
         .bind_stream(
             PortId::try_new("out").unwrap(),
@@ -1409,7 +1430,7 @@ async fn wait_for_records(handle: &OutputHandle, count: usize) -> OutputSnapshot
     .expect("query output must reach the expected rows")
 }
 
-fn query_config(capacity: usize) -> QueryConfig {
+fn query_config(capacity: usize) -> crate::config::QueryConfig {
     crate::Query::cypher("query")
         .query("MATCH (n:Person) RETURN n.name AS name")
         .from_input("source")
@@ -1417,12 +1438,13 @@ fn query_config(capacity: usize) -> QueryConfig {
         .enable_bootstrap(false)
         .with_outbox_capacity(capacity)
         .build()
+        .unwrap()
 }
 
 async fn running_query(capacity: usize) -> Arc<DrasiLib> {
-    let (source, _) = ControlledSource::new("source");
+    let (source, _) = ControlledSource::fixture("source");
     let core = Arc::new(builder().build().await.unwrap());
-    core.add_source(source).await.unwrap();
+    core.add_source_fixture(source).await.unwrap();
     core.add_query(query_config(capacity)).await.unwrap();
     core
 }
@@ -1568,8 +1590,8 @@ async fn query_input_middleware_uses_the_upstream_component_for_snapshot_and_liv
     )
     .unwrap();
     core.initialize().await.unwrap();
-    let (source, _) = ControlledSource::new("source");
-    core.add_source(source).await.unwrap();
+    let (source, _) = ControlledSource::fixture("source");
+    core.add_source_fixture(source).await.unwrap();
     let mut upstream = query_config(8);
     upstream.query = "MATCH (p:Person) WHERE p.normalized = true RETURN p.name AS name".into();
     upstream.inputs[0].pipeline = vec!["mark".into()];
@@ -1601,7 +1623,8 @@ async fn query_input_middleware_uses_the_upstream_component_for_snapshot_and_liv
                 Default::default(),
             ))
             .auto_start(false)
-            .build(),
+            .build()
+            .unwrap(),
     )
     .await
     .unwrap();
@@ -1651,7 +1674,8 @@ async fn ordinary_query_inputs_bootstrap_from_query_outputs_and_follow_live_chan
             .query("MATCH (r:Result) RETURN r.name AS name")
             .from_input("query")
             .auto_start(false)
-            .build(),
+            .build()
+            .unwrap(),
     )
     .await
     .unwrap();
@@ -1692,7 +1716,8 @@ async fn ordinary_query_inputs_bootstrap_from_query_outputs_and_follow_live_chan
             .query("MATCH (r:Result) WHERE r.name = 'Carol' RETURN r.name AS name")
             .from_input("query")
             .auto_start(false)
-            .build(),
+            .build()
+            .unwrap(),
     )
     .await
     .unwrap();
@@ -1713,15 +1738,16 @@ async fn ordinary_query_inputs_bootstrap_from_query_outputs_and_follow_live_chan
 #[tokio::test]
 async fn ordinary_query_inputs_can_be_declared_before_the_upstream_query() {
     let core = builder().build().await.unwrap();
-    let (source, _) = ControlledSource::new("source");
-    core.add_source(source).await.unwrap();
+    let (source, _) = ControlledSource::fixture("source");
+    core.add_source_fixture(source).await.unwrap();
     let waiting = core
         .add_query_with_handle(
             crate::Query::cypher("derived")
                 .query("MATCH (r:Result) RETURN r.name AS name")
                 .from_input("query")
                 .auto_start(false)
-                .build(),
+                .build()
+                .unwrap(),
         )
         .await
         .unwrap();
@@ -1802,7 +1828,8 @@ async fn persistent_query_inputs_replay_missed_changes_and_report_retention_gaps
             Default::default(),
         ))
         .auto_start(false)
-        .build();
+        .build()
+        .unwrap();
     core.add_query(config.clone()).await.unwrap();
     core.start_query("derived").await.unwrap();
     core.computation_component("derived")

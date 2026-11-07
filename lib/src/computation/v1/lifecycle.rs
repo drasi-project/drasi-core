@@ -109,7 +109,7 @@ pub struct ComponentGeneration(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct OperationEpoch(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum RealizationState {
     Pending,
     Creating,
@@ -118,7 +118,7 @@ pub enum RealizationState {
     CreationFailed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum ComponentLifecycle {
     Stopped,
     Starting,
@@ -376,6 +376,7 @@ impl GraphError {
         match self {
             Self::Creation { disposition, .. } => *disposition,
             Self::Component { source, .. }
+            | Self::ReferenceResolution { source }
             | Self::Driver { source, .. }
             | Self::ResourceCreation { source, .. }
             | Self::ResourceCleanup { source, .. } => operation_failure_disposition(source),
@@ -434,6 +435,9 @@ impl GraphError {
             Self::Contract(_)
             | Self::Recovery(_)
             | Self::Validation { .. }
+            | Self::DuplicateComponentId { .. }
+            | Self::DuplicateComponentName { .. }
+            | Self::ExternalComponentId { .. }
             | Self::Topology { .. }
             | Self::InvalidState { .. }
             | Self::StaleGeneration
@@ -501,6 +505,9 @@ impl ComponentFailure {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum DependencyWait {
+    ComponentName {
+        name: super::ComponentName,
+    },
     Component {
         id: ComponentId,
     },
@@ -521,6 +528,7 @@ pub enum DependencyWait {
 impl std::fmt::Display for DependencyWait {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ComponentName { name } => write!(f, "component named '{name}'"),
             Self::Component { id } => write!(f, "component '{id}'"),
             Self::Resource { id } => write!(f, "resource '{id}'"),
             Self::Factory { implementation } => {

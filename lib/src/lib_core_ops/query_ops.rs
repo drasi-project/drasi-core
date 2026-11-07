@@ -70,15 +70,15 @@ impl DrasiLib {
         query: QueryConfig,
     ) -> Result<crate::computation::v1::ComponentHandle> {
         self.state_guard.require_initialized()?;
-        let _lifecycle = self.instance_graph.lifecycle.lock().await;
         query
             .validate_declarations()
             .map_err(|error| crate::error::DrasiError::validation(error.to_string()))?;
-        let id = query.id.clone();
+        let name = query.name.clone();
         self.computation_runtime
             .add_query(query, self.is_running().await)
             .await
-            .map_err(|error| crate::computation::runtime::map_addition_error("query", &id, error))
+            .and_then(|handle| self.computation_runtime.public_handle(handle))
+            .map_err(|error| crate::computation::runtime::map_addition_error("query", &name, error))
     }
 
     /// Remove a query from a running server
@@ -155,21 +155,27 @@ impl DrasiLib {
         )
     }
 
-    /// Update a query by replacing it with a new configuration.
+    /// Ask the registered query factory to assess and apply a configuration change.
     ///
-    /// Uses the `Reconfiguring` state transition to preserve the graph node, edges,
-    /// and event history. The old query is stopped, the runtime is swapped, and the
-    /// query is restarted if it was running. Failed queries are also stopped to
-    /// release retained resources, but their replacement is not automatically started.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query doesn't exist, if the new configuration
-    /// references non-existent sources, or if provisioning fails.
+    /// The UUID and name are preserved. No reset flag or reconstruction strategy
+    /// is inferred from a changed query. Rebootstrap plans are rejected unless
+    /// the owner can establish snapshot/live and downstream-reset guarantees.
     pub async fn update_query(&self, id: &str, config: QueryConfig) -> Result<()> {
         self.state_guard.require_initialized()?;
+        let assigned = crate::config::ComponentId::try_new(id).map_err(anyhow::Error::from)?;
+        if config
+            .id
+            .as_ref()
+            .is_some_and(|supplied| supplied != &assigned)
+        {
+            return Err(crate::DrasiError::invalid_config(
+                "an update cannot change the component UUID",
+            ));
+        }
         map_component_error(
-            self.computation_runtime.update_query(id, config).await,
+            self.computation_runtime
+                .update_query(id, config.with_assigned_id(assigned))
+                .await,
             "query",
             id,
             "update",
@@ -285,7 +291,7 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_query_config(&self, id: &str) -> Result<QueryConfig> {
+    pub async fn get_query_config(&self, id: &str) -> Result<crate::config::AssignedQueryConfig> {
         self.inspection.get_query_config(id).await
     }
 
@@ -384,11 +390,12 @@ mod tests {
     use crate::channels::ComponentStatus;
     use crate::error::DrasiError;
     use crate::sources::tests::TestMockSource;
+    use crate::test_helpers::creation::BuilderFixtures;
     use crate::{DrasiLib, Query};
 
     /// Build a DrasiLib with a single mock source, started and ready for queries.
     async fn build_core_with_source() -> DrasiLib {
-        let source = TestMockSource::new("test-source".to_string()).unwrap();
+        let source = TestMockSource::fixture("test-source", true);
         let core = DrasiLib::builder()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -403,7 +410,7 @@ mod tests {
                     .clone(),
             )
             .with_id("test")
-            .with_source(source)
+            .with_source_fixture(source)
             .build()
             .await
             .unwrap();
@@ -423,7 +430,8 @@ mod tests {
             .query("MATCH (n:Test) RETURN n")
             .from_input("test-source")
             .auto_start(false)
-            .build();
+            .build()
+            .unwrap();
 
         core.add_query(config).await.unwrap();
 
@@ -440,7 +448,8 @@ mod tests {
             .query("MATCH (n) RETURN n")
             .from_input("nonexistent-source")
             .auto_start(false)
-            .build();
+            .build()
+            .unwrap();
 
         let handle = core.add_query_with_handle(config).await.unwrap();
         let observed = handle.observed().unwrap();
@@ -469,7 +478,8 @@ mod tests {
             .query("MATCH (n:Test) RETURN n")
             .from_input("test-source")
             .auto_start(false)
-            .build();
+            .build()
+            .unwrap();
         core.add_query(config).await.unwrap();
 
         // Remove should succeed
@@ -519,12 +529,14 @@ mod tests {
             .query("MATCH (n) RETURN n")
             .from_input("test-source")
             .auto_start(false)
-            .build();
+            .build()
+            .unwrap();
         let config2 = Query::cypher("q-list-2")
             .query("MATCH (n) RETURN n")
             .from_input("test-source")
             .auto_start(false)
-            .build();
+            .build()
+            .unwrap();
         core.add_query(config1).await.unwrap();
         core.add_query(config2).await.unwrap();
 
@@ -547,7 +559,8 @@ mod tests {
             .query("MATCH (n:Test) RETURN n")
             .from_input("test-source")
             .auto_start(false)
-            .build();
+            .build()
+            .unwrap();
         core.add_query(config).await.unwrap();
 
         // Query added without auto-start should be Added
@@ -580,7 +593,8 @@ mod tests {
             .query("MATCH (n:Test) RETURN n")
             .from_input("test-source")
             .auto_start(false)
-            .build();
+            .build()
+            .unwrap();
         core.add_query(config).await.unwrap();
 
         // Subscribe to events before triggering actions
@@ -625,7 +639,8 @@ mod tests {
             .query("MATCH (n:Person) RETURN n.name")
             .from_input("test-source")
             .auto_start(false)
-            .build();
+            .build()
+            .unwrap();
         core.add_query(config).await.unwrap();
 
         let retrieved = core.get_query_config("q-config").await.unwrap();
@@ -633,6 +648,9 @@ mod tests {
         assert_eq!(retrieved.query, "MATCH (n:Person) RETURN n.name");
         assert!(!retrieved.auto_start);
         assert_eq!(retrieved.inputs.len(), 1);
-        assert_eq!(retrieved.inputs[0].component, "test-source");
+        assert_eq!(
+            retrieved.inputs[0].component.as_id(),
+            Some(core.component_by_name("test-source").unwrap().id())
+        );
     }
 }

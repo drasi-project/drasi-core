@@ -114,7 +114,7 @@ impl Reaction for SnapshotTestReaction {
         )])
     }
 
-    async fn initialize(&self, context: ReactionRuntimeContext) {
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
         if self.panic_on_initialize {
             *self.failed_initialization_store.lock().await = context.state_store;
             tokio::task::yield_now().await;

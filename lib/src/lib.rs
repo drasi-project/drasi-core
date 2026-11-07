@@ -41,8 +41,8 @@
 //! use drasi_computation_contracts::ComponentId;
 //! use drasi_lib::computation::v1::ComponentId as GraphComponentId;
 //!
-//! let id: GraphComponentId = ComponentId::try_new("processor")?;
-//! assert_eq!(id.as_str(), "processor");
+//! let id: GraphComponentId = ComponentId::generate();
+//! assert_eq!(ComponentId::try_new(id.as_str())?, id);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
@@ -250,9 +250,9 @@ pub use observability::get_or_init_global_registry;
 pub use config::snapshot::QueryConfigurationSnapshot;
 /// Configuration types
 pub use config::{
-    BootstrapSnapshot, ConfigurationSnapshot, DrasiLibConfig, QueryConfig, QueryInputConfig,
-    QueryLanguage, QueryResultConfig, QueryRuntime, ReactionRuntime, ReactionSnapshot,
-    RuntimeConfig, SourceRuntime, SourceSnapshot, SourceSubscriptionSettings,
+    AssignedQueryConfig, BootstrapSnapshot, ConfigurationSnapshot, DrasiLibConfig, QueryConfig,
+    QueryInputConfig, QueryLanguage, QueryResultConfig, QueryRuntime, ReactionRuntime,
+    ReactionSnapshot, RuntimeConfig, SourceRuntime, SourceSnapshot, SourceSubscriptionSettings,
 };
 
 /// Schema discovery types.
@@ -279,8 +279,6 @@ pub use reactions::Reaction;
 
 /// Bootstrap provider trait for implementing bootstrap plugins
 pub use bootstrap::BootstrapProvider;
-/// Bootstrap provider that generates data from the component graph
-pub use bootstrap::ComponentGraphBootstrapProvider;
 
 /// Index backend plugin trait for implementing storage backends
 pub use indexes::IndexBackendPlugin;
@@ -324,7 +322,7 @@ pub use builder::Query;
 
 /// Async helper to wait for a component to reach a target status without polling.
 pub use component_graph::wait_for_status;
-/// Component graph types for dependency tracking and configuration queries
+/// Read-only component inspection types derived from ComputationGraph
 pub use component_graph::{
     ComponentGraphView, ComponentKind, ComponentNode, GraphEdge, GraphSnapshot, RelationshipKind,
 };

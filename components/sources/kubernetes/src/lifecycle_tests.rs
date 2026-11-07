@@ -251,7 +251,7 @@ async fn wait_for_error(source: &KubernetesSource) {
 async fn capture_updates(source: &KubernetesSource) -> mpsc::Receiver<ComponentUpdate> {
     let (updates, receiver) = mpsc::channel(32);
     source
-        .initialize(SourceRuntimeContext::new(
+        .bind_runtime_context(SourceRuntimeContext::new(
             "test",
             source.id(),
             None,
@@ -643,7 +643,7 @@ async fn startup_rejects_fatal_list_errors_without_running() {
         let source = api.source();
         let (updates, mut receiver) = mpsc::channel(16);
         source
-            .initialize(SourceRuntimeContext::new(
+            .bind_runtime_context(SourceRuntimeContext::new(
                 "test",
                 source.id(),
                 None,

@@ -39,8 +39,14 @@ impl ReactionManager {
         Self { runtime }
     }
 
-    pub async fn provision_reaction(&self, reaction: impl Reaction + 'static) -> Result<()> {
-        self.runtime.declare_reaction(Box::new(reaction)).await
+    pub async fn provision_reaction(
+        &self,
+        name: crate::config::ComponentName,
+        reaction: impl Reaction + 'static,
+    ) -> Result<()> {
+        self.runtime
+            .declare_reaction(name, Box::new(reaction))
+            .await
     }
 
     pub async fn start_reaction(&self, id: String) -> Result<()> {
@@ -72,9 +78,11 @@ impl ReactionManager {
     pub async fn update_reaction(
         &self,
         id: String,
-        reaction: impl Reaction + 'static,
+        definition: crate::management::OrdinaryComponentRecord,
     ) -> Result<()> {
-        self.runtime.update_reaction(&id, Box::new(reaction)).await
+        self.runtime
+            .update_ordinary_definition(&id, "reaction", definition)
+            .await
     }
 
     pub async fn list_reactions(&self) -> crate::error::Result<Vec<(String, ComponentStatus)>> {

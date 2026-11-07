@@ -47,7 +47,8 @@ mod query_joins_tests {
     ) -> QueryConfig {
         use crate::config::QueryInputConfig;
         QueryConfig {
-            id: id.to_string(),
+            id: None,
+            name: id.to_string(),
             query: query.to_string(),
             query_language: crate::config::QueryLanguage::Cypher,
             middleware: vec![],
@@ -56,7 +57,7 @@ mod query_joins_tests {
                 .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    component: source_id,
+                    component: crate::config::ComponentReference::by_name(source_id).unwrap(),
                     pipeline: vec![],
                     port: None,
                 })
@@ -126,7 +127,7 @@ mod query_joins_tests {
     async fn add_source(
         source_manager: &SourceManager,
         _graph: &crate::component_graph::ComponentGraphView,
-        source: impl crate::sources::Source + 'static,
+        source: crate::test_helpers::creation::SourceFixture<impl crate::sources::Source + 'static>,
     ) -> anyhow::Result<()> {
         source_manager.add(source).await
     }

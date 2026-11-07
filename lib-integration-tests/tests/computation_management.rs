@@ -375,14 +375,7 @@ async fn desired_diff_retains_healthy_instances_and_replaces_changed_or_removes_
         .await?;
     assert!(core.reconcile_desired_state().await?.converged());
     let remaining = core.computation_control()?.desired_snapshot();
-    assert!(!remaining
-        .nodes
-        .iter()
-        .any(|node| ["a", "b", "c"].contains(&node.descriptor.id().as_str())));
-    assert!(remaining
-        .nodes
-        .iter()
-        .any(|node| node.descriptor.id().as_str() == "__component_graph__"));
+    assert!(remaining.nodes.is_empty());
     core.shutdown().await?;
     Ok(())
 }

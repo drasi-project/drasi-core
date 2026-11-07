@@ -159,6 +159,7 @@ impl DrasiLib {
 mod tests {
     use crate::component_graph::ComponentKind;
     use crate::sources::tests::TestMockSource;
+    use crate::test_helpers::creation::BuilderFixtures;
     use crate::{DrasiLib, Query};
 
     // ========================================================================
@@ -206,7 +207,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_graph_with_components() {
-        let source = TestMockSource::new("src1".to_string()).unwrap();
+        let source = TestMockSource::fixture("src1", true);
         let core = DrasiLib::builder()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -221,13 +222,14 @@ mod tests {
                     .clone(),
             )
             .with_id("graph-test")
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
                     .from_input("src1")
                     .auto_start(false)
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .await
@@ -254,7 +256,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_dependents_source_with_query() {
-        let source = TestMockSource::new("src1".to_string()).unwrap();
+        let source = TestMockSource::fixture("src1", true);
         let core = DrasiLib::builder()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -269,13 +271,14 @@ mod tests {
                     .clone(),
             )
             .with_id("dep-test")
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
                     .from_input("src1")
                     .auto_start(false)
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .await
@@ -290,7 +293,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_dependents_leaf_returns_empty() {
-        let source = TestMockSource::new("src1".to_string()).unwrap();
+        let source = TestMockSource::fixture("src1", true);
         let core = DrasiLib::builder()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -305,13 +308,14 @@ mod tests {
                     .clone(),
             )
             .with_id("leaf-test")
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
                     .from_input("src1")
                     .auto_start(false)
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .await
@@ -328,7 +332,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_dependencies_query_depends_on_source() {
-        let source = TestMockSource::new("src1".to_string()).unwrap();
+        let source = TestMockSource::fixture("src1", true);
         let core = DrasiLib::builder()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -343,13 +347,14 @@ mod tests {
                     .clone(),
             )
             .with_id("deps-test")
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
                     .from_input("src1")
                     .auto_start(false)
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .await
@@ -364,7 +369,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_dependencies_source_has_none() {
-        let source = TestMockSource::new("src1".to_string()).unwrap();
+        let source = TestMockSource::fixture("src1", true);
         let core = DrasiLib::builder()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -379,7 +384,7 @@ mod tests {
                     .clone(),
             )
             .with_id("no-deps-test")
-            .with_source(source)
+            .with_source_fixture(source)
             .build()
             .await
             .unwrap();
@@ -394,7 +399,7 @@ mod tests {
 
     #[tokio::test]
     async fn can_remove_component_safe() {
-        let source = TestMockSource::new("src1".to_string()).unwrap();
+        let source = TestMockSource::fixture("src1", true);
         let core = DrasiLib::builder()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -409,13 +414,14 @@ mod tests {
                     .clone(),
             )
             .with_id("remove-safe")
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
                     .from_input("src1")
                     .auto_start(false)
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .await
@@ -427,7 +433,7 @@ mod tests {
 
     #[tokio::test]
     async fn can_remove_component_unsafe_has_dependents() {
-        let source = TestMockSource::new("src1".to_string()).unwrap();
+        let source = TestMockSource::fixture("src1", true);
         let core = DrasiLib::builder()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -442,13 +448,14 @@ mod tests {
                     .clone(),
             )
             .with_id("remove-unsafe")
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
                     .from_input("src1")
                     .auto_start(false)
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .await

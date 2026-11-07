@@ -190,7 +190,7 @@ impl Source for OrderedSource {
     fn supports_replay(&self) -> bool {
         false
     }
-    async fn initialize(&self, context: SourceRuntimeContext) {
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
         self.status.wire(context.update_tx).await;
     }
     async fn start(&self) -> anyhow::Result<()> {

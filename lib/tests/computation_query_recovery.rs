@@ -111,7 +111,7 @@ async fn query_retains_bootstrap_cleanup_across_cancelled_and_timed_out_stop() {
     query.stop().await.expect("joined snapshot worker");
     assert!(bootstrap.worker.read().await.is_none());
     query
-        .deprovision()
+        .delete_owned_resources()
         .await
         .expect("deprovision after cleanup");
     assert_eq!(bootstrap.stops.load(Ordering::SeqCst), 4);
@@ -1223,7 +1223,7 @@ mod persistent {
         );
         query.stop().await.expect("release reconstructed owner");
         query
-            .deprovision()
+            .delete_owned_resources()
             .await
             .expect("reopen and clear incomplete state");
         query
@@ -1625,7 +1625,7 @@ mod persistent {
             );
             published.push(generation);
             query.stop().await.expect("stop");
-            query.deprovision().await.expect("deprovision");
+            query.delete_owned_resources().await.expect("delete owned resources");
         }
         assert!(
             published.windows(2).all(|pair| pair[0] < pair[1]),

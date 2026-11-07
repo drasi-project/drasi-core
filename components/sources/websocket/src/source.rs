@@ -297,8 +297,8 @@ impl Source for WebSocketSource {
         derive_schema(&self.config.mappings)
     }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -338,8 +338,8 @@ impl Source for WebSocketSource {
         self
     }
 
-    async fn deprovision(&self) -> Result<()> {
-        self.base.deprovision_common().await
+    async fn delete_owned_resources(&self) -> Result<()> {
+        self.base.delete_owned_resources_common().await
     }
 
     async fn set_bootstrap_provider(&self, provider: Box<dyn BootstrapProvider + 'static>) {
@@ -774,7 +774,7 @@ mod tests {
             let source = WebSocketSource::new("source", config()).unwrap();
             let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(4);
             source
-                .initialize(SourceRuntimeContext::new(
+                .bind_runtime_context(SourceRuntimeContext::new(
                     "test-instance",
                     "source",
                     None,

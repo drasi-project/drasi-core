@@ -183,6 +183,6 @@ mod tests {
         assert_eq!(size_of::<ProcessingWorkV1>(), 16 + 4 * pointer);
         assert_eq!(size_of::<OutputProcessingWorkV1>(), 24 + 4 * pointer);
         assert_eq!(size_of::<ComponentVTable>(), 16 + 5 * pointer);
-        assert_eq!(ABI_VERSION, "1.0.0");
+        assert_eq!(ABI_VERSION, "2.0.0");
     }
 }

@@ -36,7 +36,7 @@ async fn legacy_mysql57_cdc_with_explicit_positional_keys() -> Result<()> {
         .build()?;
     let (status, _receiver) = tokio::sync::mpsc::channel(64);
     source
-        .initialize(drasi_lib::context::SourceRuntimeContext::new(
+        .bind_runtime_context(drasi_lib::context::SourceRuntimeContext::new(
             "mysql57-legacy",
             "mysql-bulk",
             None,

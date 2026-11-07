@@ -32,7 +32,7 @@ impl ContinuousQueryTransformer {
     /// never a partially cleared query. Completion leaves a baseline reset
     /// marker that carries the generation even for checkpoint stores whose
     /// `write_output_generation` is a no-op.
-    pub(super) async fn deprovision_state(&mut self) -> anyhow::Result<()> {
+    pub(super) async fn delete_owned_state(&mut self) -> anyhow::Result<()> {
         if let Some(bootstrap) = &self.bootstrap {
             bootstrap.stop().await?;
         }

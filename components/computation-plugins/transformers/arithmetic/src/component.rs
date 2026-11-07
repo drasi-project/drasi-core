@@ -301,7 +301,7 @@ mod tests {
     fn subject() -> Arithmetic {
         let descriptor = crate::ArithmeticFactory
             .metadata()
-            .descriptor(ComponentId::try_new("arithmetic").unwrap())
+            .descriptor(ComponentId::try_new("6cb6262b-fc60-423f-9659-12125cb0d388").unwrap())
             .unwrap();
         Arithmetic::new(
             descriptor,

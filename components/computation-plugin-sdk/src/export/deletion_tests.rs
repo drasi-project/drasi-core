@@ -14,7 +14,7 @@ struct TestFactory(Arc<AtomicUsize>);
 impl Factory for TestFactory {
     fn metadata(&self) -> FactoryMetadata {
         FactoryMetadata {
-            implementation: ImplementationIdentity::try_new("fixture/deprovision", "1").unwrap(),
+            implementation: ImplementationIdentity::try_new("fixture/deletion", "1").unwrap(),
             role: ComponentRole::Transformer,
             configuration_version: 1,
             configuration: Default::default(),
@@ -31,7 +31,7 @@ impl Factory for TestFactory {
                 .collect(),
             completion: None,
             capabilities: crate::Capabilities {
-                deprovision: true,
+                delete_owned_resources: true,
                 ..Default::default()
             },
         }
@@ -44,7 +44,7 @@ impl Factory for TestFactory {
     ) -> anyhow::Result<CreatedComponent> {
         Ok(Component::Transformer(Box::new(TestTransformer {
             descriptor: self.metadata().descriptor(request.id.clone())?,
-            deprovisions: self.0.clone(),
+            deletions: self.0.clone(),
         }))
         .into())
     }
@@ -52,7 +52,7 @@ impl Factory for TestFactory {
 
 struct TestTransformer {
     descriptor: ComponentDescriptor,
-    deprovisions: Arc<AtomicUsize>,
+    deletions: Arc<AtomicUsize>,
 }
 
 #[async_trait]
@@ -65,7 +65,7 @@ impl ComputationComponent for TestTransformer {
         Ok(serde_json::json!({}))
     }
 
-    fn supports_deprovision(&self) -> bool {
+    fn supports_delete_owned_resources(&self) -> bool {
         true
     }
 
@@ -77,8 +77,8 @@ impl ComputationComponent for TestTransformer {
         Ok(())
     }
 
-    async fn deprovision(&mut self) -> anyhow::Result<()> {
-        self.deprovisions.fetch_add(1, Ordering::SeqCst);
+    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
+        self.deletions.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -120,10 +120,10 @@ impl Drop for RawComponent {
     }
 }
 
-fn raw_component(deprovisions: Arc<AtomicUsize>) -> anyhow::Result<RawComponent> {
-    let factory = Arc::new(TestFactory(deprovisions));
+fn raw_component(deletions: Arc<AtomicUsize>) -> anyhow::Result<RawComponent> {
+    let factory = Arc::new(TestFactory(deletions));
     let exported = ExportedPlugin::new(PluginDefinition::new(
-        "fixture/direct-deprovision",
+        "fixture/direct-deletion",
         "1",
         vec![factory],
         vec![GraphChangeCodec::schema()],
@@ -133,13 +133,14 @@ fn raw_component(deprovisions: Arc<AtomicUsize>) -> anyhow::Result<RawComponent>
     let mut factory = abi::FactoryHandle::null();
     let mut component = abi::ComponentHandle::null();
     let request = wire::encode(&CreateRequest {
-        id: ComponentId::try_new("direct")?,
+        id: ComponentId::try_new("92178c18-6de1-4403-8db3-9c9940289011")?,
         implementation: metadata.implementation.clone(),
         configuration_version: 1,
         configuration: serde_json::json!({}),
         scope: None,
         inputs: Vec::new(),
         activation_credentials_bound: false,
+        update_directive: None,
     })?;
     unsafe {
         exported.entry(&mut plugin)?;
@@ -162,12 +163,13 @@ fn raw_component(deprovisions: Arc<AtomicUsize>) -> anyhow::Result<RawComponent>
 #[tokio::test(flavor = "current_thread")]
 async fn direct_abi_fences_retirement_and_does_not_repeat_completed_deletion() -> anyhow::Result<()>
 {
-    let deprovisions = Arc::new(AtomicUsize::new(0));
-    let component = raw_component(deprovisions.clone())?;
+    let deletions = Arc::new(AtomicUsize::new(0));
+    let component = raw_component(deletions.clone())?;
+    component.run(abi::operation::INITIALIZE).await?;
     component.run(abi::operation::START).await?;
     assert_eq!(
         component
-            .begin(abi::operation::DEPROVISION, &[])
+            .begin(abi::operation::DELETE_OWNED_RESOURCES, &[])
             .err()
             .expect("running deletion is rejected")
             .code,
@@ -176,7 +178,7 @@ async fn direct_abi_fences_retirement_and_does_not_repeat_completed_deletion() -
     component.run(abi::operation::STOP).await?;
     assert_eq!(
         component
-            .begin(abi::operation::DEPROVISION, b"unexpected")
+            .begin(abi::operation::DELETE_OWNED_RESOURCES, b"unexpected")
             .err()
             .expect("deletion input is rejected")
             .code,
@@ -185,7 +187,7 @@ async fn direct_abi_fences_retirement_and_does_not_repeat_completed_deletion() -
     component.run(abi::operation::START).await?;
     component.run(abi::operation::STOP).await?;
 
-    let cancelled = component.begin(abi::operation::DEPROVISION, &[])?;
+    let cancelled = component.begin(abi::operation::DELETE_OWNED_RESOURCES, &[])?;
     drop(cancelled);
     assert_eq!(
         component
@@ -195,22 +197,20 @@ async fn direct_abi_fences_retirement_and_does_not_repeat_completed_deletion() -
             .code,
         abi::status::CLOSED
     );
-    component.run(abi::operation::DEPROVISION).await?;
-    component.run(abi::operation::DEPROVISION).await?;
-    assert_eq!(deprovisions.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        component
-            .begin(abi::operation::STOP, &[])
-            .err()
-            .expect("retirement fences stop")
-            .code,
-        abi::status::CLOSED
-    );
+    component
+        .run(abi::operation::DELETE_OWNED_RESOURCES)
+        .await?;
+    component
+        .run(abi::operation::DELETE_OWNED_RESOURCES)
+        .await?;
+    assert_eq!(deletions.load(Ordering::SeqCst), 1);
+    component.run(abi::operation::STOP).await?;
+    component.run(abi::operation::DISPOSE).await?;
     Ok(())
 }
 
 #[test]
-fn non_transformers_cannot_advertise_deprovision() {
+fn resource_deletion_is_not_restricted_to_transformer_state() {
     let mut metadata = TestFactory(Arc::new(AtomicUsize::new(0))).metadata();
     let plugin = PluginIdentity {
         id: "fixture".into(),
@@ -221,8 +221,7 @@ fn non_transformers_cannot_advertise_deprovision() {
     metadata
         .ports
         .retain(|port| port.direction() == PortDirection::Output);
-    let error = metadata
+    metadata
         .validate(&plugin, &[GraphChangeCodec::schema().descriptor().clone()])
-        .expect_err("source deprovision is not supported");
-    assert!(error.to_string().contains("requires a transformer"));
+        .expect("sources may explicitly own removable external resources");
 }

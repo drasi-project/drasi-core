@@ -1474,7 +1474,7 @@ async fn test_mysql_multi_row_transactions_and_partial_resume() {
             .unwrap();
         let (updates, _status_rx) = tokio::sync::mpsc::channel(64);
         source
-            .initialize(drasi_lib::context::SourceRuntimeContext::new(
+            .bind_runtime_context(drasi_lib::context::SourceRuntimeContext::new(
                 "mysql-bulk-test",
                 "mysql-bulk",
                 None,
@@ -1716,7 +1716,7 @@ async fn test_mysql_rollback_preserves_only_nontransactional_rows_and_partial_re
             .unwrap();
         let (updates, _status_rx) = tokio::sync::mpsc::channel(64);
         source
-            .initialize(drasi_lib::context::SourceRuntimeContext::new(
+            .bind_runtime_context(drasi_lib::context::SourceRuntimeContext::new(
                 "mysql-rollback-test",
                 "mysql-bulk",
                 None,

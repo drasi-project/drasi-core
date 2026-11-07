@@ -514,6 +514,10 @@ impl ComponentCreationError {
 pub struct ConstructedComponent(pub(super) Component);
 
 impl ConstructedComponent {
+    pub(crate) fn descriptor(&self) -> &ComponentDescriptor {
+        self.0.descriptor()
+    }
+
     pub fn source(source: Box<dyn EnvelopeSource>) -> Self {
         Self(Component::Source(source))
     }
@@ -573,8 +577,18 @@ pub trait ComponentFactory: Send + Sync {
     fn record_schemas(&self) -> Vec<Arc<crate::computation::v1::Schema>> {
         Vec::new()
     }
-    fn supports_reconfiguration(&self) -> bool {
-        false
+    /// Pure per-change assessment by the component author. Creation capability
+    /// alone never authorizes retaining, restarting or reconstructing an object.
+    /// References remain explicit; this must not perform I/O or mutate resources.
+    fn plan_update(
+        &self,
+        _current: &ComponentSpecification,
+        _proposed: &ComponentSpecification,
+    ) -> anyhow::Result<crate::computation::v1::ComponentUpdatePlan> {
+        anyhow::bail!(
+            "factory '{}' does not support managed updates",
+            self.descriptor().implementation.name
+        )
     }
     /// Whether construction consumes [`ConstructionContext::input_bindings`].
     /// Only such factories wait for their declared incoming endpoints and
@@ -676,9 +690,46 @@ pub struct ConstructionContext {
     resources: BTreeMap<ResourceId, ResourceHandle>,
     output_catalogue: crate::computation::v1::OutputCatalogue,
     input_bindings: Vec<InputBinding>,
+    update_directive: Option<crate::computation::v1::ComponentUpdateDirective>,
+}
+
+/// An accepted update of an existing initialized object. This is execution
+/// context, not a serializable request or caller-supplied update authorization.
+pub struct ComponentUpdateContext {
+    /// Stable owner-issued operation ID, retained across retry and process recovery.
+    /// Durable effects must recognize retries across process loss, not merely
+    /// cache a result on the current object.
+    pub operation_id: Arc<str>,
+    /// The factory's approved strategy, validated by the configuration owner.
+    pub plan: crate::computation::v1::ComponentUpdatePlan,
+    /// The creation specification before this accepted update.
+    pub current: Arc<ComponentSpecification>,
+    /// Resolved target configuration and the object's actual bound resources.
+    pub proposed: ConstructionContext,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ComponentUpdateExecution {
+    pub(crate) operation_id: Arc<str>,
+    pub(crate) plan: crate::computation::v1::ComponentUpdatePlan,
+    pub(crate) current: Arc<ComponentSpecification>,
+    pub(crate) proposed: Arc<ComponentSpecification>,
+    pub(crate) require_confirmation: bool,
+}
+
+pub(crate) struct ConstructionBindings {
+    pub(crate) inputs: Vec<InputBinding>,
+    pub(crate) update: Option<crate::computation::v1::ComponentUpdateDirective>,
 }
 
 impl ConstructionContext {
+    /// The accepted update intent when this object is being reconstructed.
+    /// Initial creation has no directive. A directive is not a storage-reset
+    /// boolean: the owner validates data-boundary capabilities before issuing it.
+    pub fn update_directive(&self) -> Option<&crate::computation::v1::ComponentUpdateDirective> {
+        self.update_directive.as_ref()
+    }
+
     /// The component's validated, declared incoming edges. Populated only for
     /// factories reporting [`ComponentFactory::binds_inputs`]; those are held
     /// until every incoming output has a declared stream and are reconstructed
@@ -725,7 +776,7 @@ impl ConstructionContext {
         resources: BTreeMap<ResourceId, ResourceHandle>,
         schema: &ConfigurationSchema,
         output_catalogue: crate::computation::v1::OutputCatalogue,
-        input_bindings: Vec<InputBinding>,
+        bindings: ConstructionBindings,
     ) -> Result<Self, ComponentCreationError> {
         let configuration = schema
             .resolve_values(&specification.configuration, &resources)
@@ -739,7 +790,8 @@ impl ConstructionContext {
             configuration,
             resources,
             output_catalogue,
-            input_bindings,
+            input_bindings: bindings.inputs,
+            update_directive: bindings.update,
         })
     }
 }

@@ -35,6 +35,7 @@ mod recovery;
 mod volatile;
 
 const CONFIGURATION: &str = "\0native-query:configuration:v1";
+const UPDATE_OPERATION: &str = "\0native-query:update-operation:v1";
 const PRODUCER: &str = "\0native-query:producer:v1";
 const EMISSION: &str = "\0native-query:emission:v1";
 const ROW_COUNT: &str = "\0native-query:live-row-count:v1";
@@ -62,6 +63,7 @@ pub(super) struct DurableQuery {
     source_transactions: Option<SourceTransactionLimits>,
     recovery: QueryRecoveryPolicy,
     reset_configuration: bool,
+    update_operation: Option<String>,
     indexes: Arc<indexed::Indexes>,
     evaluator: Option<Arc<QueryEvaluator>>,
     capacity: NonZeroUsize,
@@ -154,6 +156,10 @@ async fn stage_output(
 }
 
 impl DurableQuery {
+    pub(super) fn set_retention(&mut self, capacity: NonZeroUsize) {
+        self.capacity = capacity;
+    }
+
     pub(super) fn new(
         request: &CreateRequest,
         definition: &ContinuousQueryDefinition,
@@ -232,6 +238,10 @@ impl DurableQuery {
                 })
                 .transpose()?
                 .unwrap_or(false),
+            update_operation: request
+                .update_directive
+                .as_ref()
+                .map(|directive| directive.operation_id.clone()),
             indexes: Arc::new(indexed::Indexes::default()),
             evaluator: None,
             capacity: definition.outbox_capacity,
@@ -269,6 +279,7 @@ impl DurableQuery {
         let bootstrap_configured = self.bootstrap_configured;
         let recovery = self.recovery;
         let reset_configuration = self.reset_configuration;
+        let update_operation = self.update_operation.clone();
         let retention = u64::try_from(self.capacity.get())?;
         let non_atomic = self.non_atomic;
         let retry = (definition.clone(), execution.clone(), middleware.clone());
@@ -291,10 +302,13 @@ impl DurableQuery {
                     &context,
                     &configuration,
                     &candidate,
-                    recovery,
-                    bootstrap_configured,
-                    force_reset,
-                    reset_configuration,
+                    recovery::ResetIntent {
+                        policy: recovery,
+                        bootstrap_configured,
+                        force: force_reset,
+                        reset_configuration,
+                        update_operation: update_operation.as_deref(),
+                    },
                 )
                 .await?;
                 let candidate = if reset_plan.is_some() {
@@ -385,6 +399,11 @@ impl DurableQuery {
                     context
                         .stage_checkpoint(CONFIGURATION, 1, Some(&configuration))
                         .await?;
+                    if let Some(operation) = &update_operation {
+                        context
+                            .stage_checkpoint(UPDATE_OPERATION, 1, Some(operation.as_bytes()))
+                            .await?;
+                    }
                     context
                         .stage_checkpoint(PRODUCER, 1, Some(&serde_json::to_vec(&candidate)?))
                         .await?;

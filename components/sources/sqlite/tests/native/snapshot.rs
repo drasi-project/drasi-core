@@ -329,7 +329,7 @@ async fn coordinated_journals_reject_mode_changes_and_missing_initialization_ide
         consumer.start().await?;
         consumer.stop().await?;
         if fault == "reset" {
-            consumer.deprovision().await?;
+            consumer.delete_owned_resources().await?;
         }
         drop(producer);
         drop(consumer);

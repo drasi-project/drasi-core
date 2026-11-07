@@ -47,6 +47,8 @@ compatibility-shim or automatic old-state migration programme is implied.
 | Work area | Main entries |
 |---|---|
 | Implementation, lifecycle and diagnostics | [Deadlines](#cw-06), [errors](#cw-22), [status delivery](#cw-23), [background ownership](#cw-17) |
+| Managed component updates | [Safe rebootstrap coordination](#cw-92); state-preserving factory updates and lifecycle ownership are implemented |
+| Native named references | [Deferred bind-once endpoints](#cw-93); native topology endpoints currently require assigned UUIDs |
 | Testing quality and selection | [Testing overview](#testing-and-qualification), [production-path oracles](#cw-83), [honest runners](#cw-84), [CI selection](#cw-85), [duplication](#cw-86), [behavior ledgers](#cw-88) |
 | Recovery and behavior qualification | [Pending input](#cw-14), [reset](#cw-20), [completion evidence](#cw-36), [combined failures](#cw-39), [FFI](#cw-41), [Server](#cw-46), [examples](#cw-90) |
 | Query-plugin follow-ups | [Large items](#cw-76), [native parity coverage](#cw-77), [complete test run](#cw-78), [performance](#cw-79), [linked-reference retirement](#cw-80) |
@@ -105,6 +107,93 @@ Other conflicting lifecycle work still has a bounded wait. Nonyielding native
 code cannot be preempted by an asynchronous deadline. Wider deployment/provider
 qualification remains in [CW-14](#cw-14), [CW-41](#cw-41) and [CW-46](#cw-46),
 not an unfinished instance-startup contention fix.
+
+<a id="cw-92"></a>
+
+### Coordinate safe rebootstrap during managed updates (CW-92)
+
+**Kind:** Unsupported capability / follow-on implementation.
+**Area:** Core, native SDK/Host, query plugin, Server.
+**Priority:** High for semantic live-query updates; not a prerequisite for the
+guarded state-preserving update contract. **Effort:** Large.
+**Status:** Deferred from the current integration by user decision.
+
+**Current boundary:** Core rejects **every** `Rebootstrap` update plan. Rejection
+occurs before accepting a new managed request, in direct graph update planning,
+and when validating persisted pending update intent. There is no capability-based
+exception, even when a bootstrap provider is registered. Ordinary initial
+bootstrap and the existing, separately configured recovery mechanisms are not
+disabled by this restriction.
+
+The factory can assess a change and report that reconstruction and rebootstrap
+are necessary, but that assessment does not establish a safe graph-wide reset.
+For example, changing a query's filter, joins or grouping can invalidate retained
+state even when its output columns remain unchanged. Such semantic updates are
+currently rejected by DrasiLib/Server rather than applied with stale state.
+Supported state-preserving updates still require an explicit factory plan;
+initialization/disposal and accepted-update journaling are already implemented.
+
+**Work:** Add a graph-owned execution protocol that can establish all of these
+guarantees before discarding state:
+
+1. **Authoritative snapshot and live handover.** Identify the actual input
+   snapshot frontier and retain a consistent path to changes arriving after it.
+   Provider availability or an empty bootstrap result is not proof.
+2. **Exact queued-work treatment.** Identify which admitted work the snapshot
+   supersedes, retain or replay later work, and prevent an unconfirmed output
+   from being silently dropped. Persist the required execution identity and
+   boundaries so retries and process restart cannot reset twice or resume an
+   unconfirmed operation.
+3. **Downstream reset acknowledgement.** Coordinate affected queries and
+   stateful consumers, prove their resynchronization, and preserve shared history
+   and other consumers' obligations. A local query reset must not delete data
+   owned by another component or a shared recovery domain.
+
+Reuse the existing configuration owner, lifecycle operations, bootstrap/read
+services and recovery-domain ownership. Do not add a parallel runtime or assume
+that a Boolean plan, the presence of a factory, or `reset_configuration: true`
+provides these guarantees. Do not disguise a semantic change as `Preserve`.
+
+**Finish when:** Real native query pipelines exercise both changed output shape
+and changed semantics with unchanged columns. Independent result oracles verify
+the snapshot/live boundary, retained post-frontier changes, dependent-query and
+stateful-consumer resynchronization, and isolation of unaffected consumers.
+Cancellation, cleanup failure and process exit before/after reset, bootstrap and
+completion acknowledgement must either resume the same accepted operation safely
+or leave it visibly blocked without losing ownership or data. Unsupported
+provider/consumer combinations must continue to reject before destructive work.
+
+<a id="cw-93"></a>
+
+### Persist and resolve native named endpoints once (CW-93)
+
+**Kind:** Unsupported authoring capability. **Area:** Core, Server, test-infra.
+**Priority:** Medium; needed for separate out-of-order native declarations by name.
+
+**Current boundary:** Native topology relationships require component UUIDs.
+An edge to an already accepted component belongs in `relationships`, even when
+that component was created in another request; `boundary_relationships` is
+scope-boundary context, not a way to connect previous creations. A native
+consumer can be declared disconnected, then explicitly wired after its producer's
+UUID is available. Do not wait for activation before supplying required ports.
+Ordinary declarations' pending name references do not provide this native
+endpoint-authoring capability.
+
+**Work:** Add a configuration-owner-managed native named-endpoint declaration
+that can wait for a later component declaration and bind exactly once to its
+assigned UUID. Preserve unresolved intent and the eventual binding across
+acceptance, retries and restart. A rename or reuse of the old name must not
+retarget a resolved edge. Validate the actual role, port and schema before
+publishing the connection.
+
+Do not derive component UUIDs from names, invent placeholder component objects,
+enable external IDs as a workaround, or introduce a second mutable graph
+registry. Until this contract exists, native helpers requiring named producers
+must either require their declarations first or expose explicit two-step wiring.
+
+**Finish when:** Separate consumer-before-producer requests, missing/wrong ports,
+duplicate names, rename/name reuse, request retry and restart have public-API
+tests proving the original binding cannot silently follow another object.
 
 <a id="cw-44"></a>
 <a id="hosting-connectors-server-and-examples"></a>
@@ -166,6 +255,13 @@ the remaining native components in Server, UI and clients. Make waiting,
 accepted, running and failed states clear. Resolve the recorded full VS Code
 type-check failures in the component and YAML tooling. The concrete gaps are:
 
+- Route first-store Server seeds through Core's common creation preparation and
+  acceptance path. `managed_configuration::configure` still assigns omitted
+  UUIDs in the Host before storing the initial `DesiredInstance`. It enforces
+  external-ID opt-in and preserves stored UUIDs, but duplicates allocation/policy
+  instead of using the normal Core creation receipt and validation path. Keep
+  the persistent-builder guard and genuine stored-record restoration; do not
+  introduce pre-acceptance component construction or a temporary runtime.
 - Expose the existing Rust named-configuration-snapshot operations through HTTP,
   including revision-aware create/list/delete/restore and clear receipt semantics.
 - Expose supported replacement, in-place settings changes, input/resource
@@ -179,7 +275,8 @@ type-check failures in the component and YAML tooling. The concrete gaps are:
   rejects external component/pipe/boundary bindings. Preserve snapshot/live
   handover and replacement ownership rather than introduce another graph owner.
 - Extend solution templates to native topology and resource recipes, with
-  instance-scoped ID rewriting and no accidental cross-deployment sharing.
+  owner-assigned UUIDs, bind-once references and no accidental cross-deployment
+  sharing.
 
 Existing API/UI operations do not depend on every connector conversion. Only
 workflows requiring a missing family depend on [CW-44](#cw-44); broader

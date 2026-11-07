@@ -74,7 +74,17 @@ impl QueryManager {
     }
 
     pub async fn update_query(&self, id: String, config: QueryConfig) -> Result<()> {
-        self.runtime.update_query(&id, config).await
+        let assigned = crate::config::ComponentId::try_new(id.as_str())?;
+        anyhow::ensure!(
+            config
+                .id
+                .as_ref()
+                .is_none_or(|supplied| supplied == &assigned),
+            "an update cannot change the component UUID"
+        );
+        self.runtime
+            .update_query(&id, config.with_assigned_id(assigned))
+            .await
     }
 
     pub async fn teardown_query(&self, id: String) -> Result<()> {
@@ -85,7 +95,10 @@ impl QueryManager {
         Ok(self.runtime.list_components("query").await?)
     }
 
-    pub async fn get_query_config(&self, id: &str) -> crate::error::Result<QueryConfig> {
+    pub async fn get_query_config(
+        &self,
+        id: &str,
+    ) -> crate::error::Result<crate::config::AssignedQueryConfig> {
         Ok(self.runtime.query_configuration(id).await?)
     }
 

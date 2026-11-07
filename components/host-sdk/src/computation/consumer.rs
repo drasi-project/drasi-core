@@ -41,6 +41,7 @@ pub struct NativeConsumerProxy {
     retirement: Arc<DeliveryRetirementState>,
     running: bool,
     cleanup_required: bool,
+    disposing: bool,
 }
 impl NativeConsumerProxy {
     pub(super) async fn new(
@@ -82,6 +83,7 @@ impl NativeConsumerProxy {
             retirement,
             running: false,
             cleanup_required: false,
+            disposing: false,
         })
     }
     async fn reopen(&mut self) -> anyhow::Result<()> {
@@ -109,6 +111,18 @@ impl NativeConsumerProxy {
             recovery.with_delivery_retirement(self.retirement.clone()) == self.recovery,
             "native consumer recovery contract changed"
         );
+        Ok(())
+    }
+    async fn close_delivery(&mut self) -> anyhow::Result<()> {
+        if let Some(runner) = &mut self.runner {
+            self.retirement.close(runner).await?;
+        }
+        self.runner = None;
+        if let Some(cleanup) = &self.pending_cleanup {
+            cleanup.cancel();
+            cleanup.shutdown().await?;
+        }
+        self.pending_cleanup = None;
         Ok(())
     }
     pub async fn progress(&mut self) -> anyhow::Result<Vec<DeliveryProgress>> {
@@ -242,9 +256,34 @@ impl ComputationComponent for NativeConsumerProxy {
     fn requires_readiness_confirmation(&self) -> bool {
         self.component.requires_readiness_confirmation()
     }
+    async fn initialize(&mut self) -> anyhow::Result<()> {
+        self.component.initialize().await
+    }
+    async fn pause_processing(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.running && !self.cleanup_required,
+            "native consumer cannot pause with incomplete work"
+        );
+        self.component.pause_processing().await
+    }
+    async fn resume_processing(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.running && !self.cleanup_required,
+            "native consumer cannot resume with incomplete work"
+        );
+        self.component.resume_processing().await
+    }
+    async fn apply_update(&mut self, context: ComponentUpdateContext) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.cleanup_required && !self.disposing,
+            "native consumer update requires completed delivery and cleanup"
+        );
+        self.component.apply_update(context).await?;
+        self.validate_mode()
+    }
     async fn start(&mut self) -> anyhow::Result<()> {
         anyhow::ensure!(
-            !self.running && !self.cleanup_required,
+            !self.running && !self.cleanup_required && !self.disposing,
             "native consumer requires completed cleanup before starting"
         );
         self.cleanup_required = true;
@@ -261,15 +300,19 @@ impl ComputationComponent for NativeConsumerProxy {
         self.running = false;
         self.cleanup_required = true;
         self.component.stop().await?;
-        if let Some(runner) = &mut self.runner {
-            self.retirement.close(runner).await?;
-        }
-        self.runner = None;
-        if let Some(cleanup) = &self.pending_cleanup {
-            cleanup.cancel();
-            cleanup.shutdown().await?;
-        }
-        self.pending_cleanup = None;
+        self.close_delivery().await?;
+        self.cleanup_required = false;
+        Ok(())
+    }
+    async fn dispose(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.running && (!self.cleanup_required || self.disposing),
+            "native consumer disposal requires completed cleanup"
+        );
+        self.disposing = true;
+        self.cleanup_required = true;
+        self.close_delivery().await?;
+        self.component.dispose().await?;
         self.cleanup_required = false;
         Ok(())
     }

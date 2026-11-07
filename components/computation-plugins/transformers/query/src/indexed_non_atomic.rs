@@ -123,10 +123,13 @@ impl DurableQuery {
                     &context,
                     &configuration,
                     &candidate,
-                    policy,
-                    bootstrap,
-                    force,
-                    reset_configuration,
+                    recovery::ResetIntent {
+                        policy,
+                        bootstrap_configured: bootstrap,
+                        force,
+                        reset_configuration,
+                        update_operation: None,
+                    },
                 )
                 .await?
                 .is_some()

@@ -17,11 +17,13 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+use super::QueryInputConfig;
 use crate::channels::DispatchMode;
 use crate::indexes::{StorageBackendConfig, StorageBackendRef};
 use crate::recovery::RecoveryPolicy;
 pub use drasi_computation_contracts::{
-    QueryInputConfig, QueryJoinConfig, QueryJoinKeyConfig, QueryResultConfig,
+    ComponentId, ComponentName, ComponentReference, QueryJoinConfig, QueryJoinKeyConfig,
+    QueryResultConfig,
 };
 use drasi_core::models::SourceMiddlewareConfig;
 
@@ -219,6 +221,9 @@ pub struct DrasiLibConfig {
     /// Unique identifier for this DrasiLib instance (defaults to UUID)
     #[serde(default = "default_id")]
     pub id: String,
+    /// Permit caller-assigned UUIDs and preconstructed objects. Immutable after construction.
+    #[serde(default, rename = "allowExternalComponentIds")]
+    pub allow_external_component_ids: bool,
     /// Default priority queue capacity for queries and reactions (default: 10000 if not specified)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority_queue_capacity: Option<usize>,
@@ -255,6 +260,7 @@ impl Default for DrasiLibConfig {
     fn default() -> Self {
         Self {
             id: default_id(),
+            allow_external_component_ids: false,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             activation_timeout_secs: None,
@@ -274,6 +280,12 @@ impl Default for DrasiLibConfig {
 /// `QueryConfig` defines a continuous query that processes data changes from sources
 /// and emits incremental result updates. Queries subscribe to one or more sources and
 /// maintain materialized views that update automatically as data changes.
+///
+/// This is authoring input: `name` is required and `id` is optional. Only instances
+/// constructed with `allowExternalComponentIds` accept a supplied UUID. Accepted
+/// configurations use [`AssignedQueryConfig`]. Input strings select names, even
+/// when UUID-shaped; `{"id":"UUID"}` selects an identity. Resolution replaces a
+/// name with the selected UUID once, so rename cannot retarget a connection.
 ///
 /// # Query Languages
 ///
@@ -388,9 +400,12 @@ impl Default for DrasiLibConfig {
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct QueryConfig {
-    /// Unique identifier for the query
-    pub id: String,
+pub struct QueryConfig<I = Option<ComponentId>> {
+    /// Omit for DrasiLib-owned creation. Explicit UUIDs require instance opt-in.
+    #[serde(default)]
+    pub id: I,
+    /// Unique graph-owned name, independent of the immutable UUID.
+    pub name: String,
     /// Query string (Cypher or GQL depending on query_language)
     pub query: String,
     /// Query language to use (default: Cypher)
@@ -451,32 +466,77 @@ pub struct QueryConfig {
     pub bootstrap_timeout_secs: u64,
 }
 
-impl QueryConfig {
+/// Fully assigned query definition used for execution and configuration snapshots.
+/// Only DrasiLib's creation path turns an authoring request into this definition.
+pub type AssignedQueryConfig = QueryConfig<String>;
+
+impl<I> QueryConfig<I> {
+    /// Build fully assigned configuration data for an explicit native pipeline.
+    /// This does not grant admission authority: DrasiLib still enforces its
+    /// creation policy independently of fields in a configuration object.
+    pub fn with_assigned_id(self, id: ComponentId) -> AssignedQueryConfig {
+        self.map_id(id.to_string())
+    }
+
+    pub(crate) fn map_id<J>(self, id: J) -> QueryConfig<J> {
+        QueryConfig {
+            id,
+            name: self.name,
+            query: self.query,
+            query_language: self.query_language,
+            middleware: self.middleware,
+            inputs: self.inputs,
+            result: self.result,
+            auto_start: self.auto_start,
+            joins: self.joins,
+            enable_bootstrap: self.enable_bootstrap,
+            priority_queue_capacity: self.priority_queue_capacity,
+            dispatch_buffer_capacity: self.dispatch_buffer_capacity,
+            dispatch_mode: self.dispatch_mode,
+            storage_backend: self.storage_backend,
+            recovery_policy: self.recovery_policy,
+            outbox_capacity: self.outbox_capacity,
+            bootstrap_timeout_secs: self.bootstrap_timeout_secs,
+        }
+    }
+
     /// Reject malformed input and result declarations before any component is created.
     pub fn validate_declarations(&self) -> Result<()> {
         let mut components = HashSet::new();
         for input in &self.inputs {
             input
                 .validate()
-                .map_err(|error| anyhow::anyhow!("Query '{}': {error}", self.id))?;
-            if input.component == self.id {
+                .map_err(|error| anyhow::anyhow!("Query '{}': {error}", self.name))?;
+            if input
+                .component
+                .as_name()
+                .is_some_and(|name| name.as_str() == self.name)
+            {
                 anyhow::bail!(
                     "Query '{}' cannot consume its own output as input '{}'",
-                    self.id,
+                    self.name,
                     input.component
                 );
             }
-            if !components.insert(input.component.as_str()) {
+            if !components.insert(serde_json::to_string(&input.component)?) {
                 anyhow::bail!(
                     "Query '{}' declares input '{}' more than once",
-                    self.id,
+                    self.name,
                     input.component
                 );
             }
         }
         self.result
             .validate()
-            .map_err(|error| anyhow::anyhow!("Query '{}': {error}", self.id))
+            .map_err(|error| anyhow::anyhow!("Query '{}': {error}", self.name))
+    }
+}
+
+impl AssignedQueryConfig {
+    /// Retain the current UUID when preparing an explicit update request.
+    pub fn into_authoring(self) -> Result<QueryConfig> {
+        let id = ComponentId::try_new(self.id.as_str())?;
+        Ok(self.map_id(Some(id)))
     }
 }
 
@@ -517,9 +577,16 @@ impl DrasiLibConfig {
         }
         // Validate unique query ids
         let mut query_ids = std::collections::HashSet::new();
+        let mut query_names = std::collections::HashSet::new();
         for query in &self.queries {
-            if !query_ids.insert(&query.id) {
-                return Err(anyhow::anyhow!("Duplicate query id: '{}'", query.id));
+            ComponentName::try_new(query.name.as_str())?;
+            if let Some(id) = &query.id {
+                if !query_ids.insert(id) {
+                    return Err(anyhow::anyhow!("Duplicate query id: '{id}'"));
+                }
+            }
+            if !query_names.insert(&query.name) {
+                return Err(anyhow::anyhow!("Duplicate query name: '{}'", query.name));
             }
         }
 
@@ -562,7 +629,7 @@ impl DrasiLibConfig {
                         spec.validate().map_err(|e| {
                             anyhow::anyhow!(
                                 "Query '{}' has invalid inline storage backend configuration: {}",
-                                query.id,
+                                query.name,
                                 e
                             )
                         })?;

@@ -102,9 +102,10 @@ impl ComputationIndexProvider for LegacyIndexProviderAdapter {
         query: &str,
     ) -> Result<ComputationIndexes, IndexError> {
         super::data::validate_identifier("graph", graph).map_err(IndexError::other)?;
-        super::data::validate_identifier("query", query).map_err(IndexError::other)?;
-        let key = Self::storage_key(self.namespace.as_deref(), graph, query);
-        let query_id = query.to_owned();
+        let query_id = super::ComponentId::try_new(query)
+            .map_err(IndexError::other)?
+            .to_string();
+        let key = Self::storage_key(self.namespace.as_deref(), graph, &query_id);
         let provider = self.provider.clone();
         let original = self
             .construction

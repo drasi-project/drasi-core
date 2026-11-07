@@ -810,7 +810,7 @@ mod integration {
             updates,
             None,
         );
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
         set_running(&base).await;
         base
     }
@@ -906,7 +906,7 @@ mod integration {
             updates,
             None,
         );
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
         set_running(&base).await;
         base
     }

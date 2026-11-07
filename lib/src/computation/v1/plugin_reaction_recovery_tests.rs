@@ -139,7 +139,7 @@ impl Reaction for TestReaction {
     fn auto_start(&self) -> bool {
         false
     }
-    async fn initialize(&self, context: ReactionRuntimeContext) {
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
         self.status.wire(context.update_tx).await;
     }
     async fn start(&self) -> anyhow::Result<()> {
@@ -205,7 +205,9 @@ impl Harness {
                 .query("MATCH (n:Person) RETURN n.name AS name")
                 .with_outbox_capacity(capacity)
                 .enable_bootstrap(false)
-                .build();
+                .build()
+                .unwrap()
+                .with_assigned_id(ComponentId::try_new(*id).unwrap());
             configuration.dispatch_mode = Some(crate::DispatchMode::Broadcast);
             configuration.dispatch_buffer_capacity = Some(1);
             let mut query = ContinuousQueryTransformer::new(

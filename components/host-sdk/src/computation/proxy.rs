@@ -20,6 +20,8 @@ use super::{
     loader::PluginOwner,
 };
 
+mod updates;
+
 pub(super) fn native_failure_disposition(error: &Failure) -> FailureDisposition {
     if error.code == abi::status::FAILED && error.retryable {
         FailureDisposition::Retryable
@@ -152,7 +154,11 @@ impl RemoteComponent {
         input: &[u8],
         transaction: Option<&abi::Transaction>,
     ) -> anyhow::Result<OperationFuture> {
-        if self.retiring.load(Ordering::Acquire) && code != abi::operation::DEPROVISION
+        if self.retiring.load(Ordering::Acquire)
+            && !matches!(
+                code,
+                abi::operation::DELETE_OWNED_RESOURCES | abi::operation::DISPOSE
+            )
             || code != abi::operation::STOP && self.stopping.load(Ordering::Acquire)
         {
             return Err(operation_failure(Failure::closed()));
@@ -206,6 +212,7 @@ pub struct NativeComponentProxy {
     pub(super) inner: Arc<RemoteComponent>,
     descriptor: ComponentDescriptor,
     metadata: FactoryMetadata,
+    creation_request: drasi_computation_plugin_sdk::CreateRequest,
     pub(super) codec: Arc<BinaryEnvelopeCodec>,
     schemas: Vec<Arc<Schema>>,
     pending: bool,
@@ -229,7 +236,9 @@ pub struct NativeComponentProxy {
         drasi_computation_plugin_sdk::ActivationCredentialContext,
     )>,
     stop: tokio::sync::Mutex<StopState>,
-    deprovision: tokio::sync::Mutex<DeprovisionState>,
+    deletion: tokio::sync::Mutex<RetirementState>,
+    disposal: tokio::sync::Mutex<RetirementState>,
+    update: tokio::sync::Mutex<Option<updates::UpdateState>>,
 }
 
 struct StopState {
@@ -249,8 +258,9 @@ impl Default for StopState {
 }
 
 #[derive(Default)]
-struct DeprovisionState {
+struct RetirementState {
     operation: Option<OperationFuture>,
+    started: bool,
     completed: bool,
 }
 
@@ -443,7 +453,7 @@ impl NativeComponentProxy {
     pub(super) unsafe fn new(
         raw: abi::ComponentHandle,
         metadata: FactoryMetadata,
-        id: &ComponentId,
+        request: &drasi_computation_plugin_sdk::CreateRequest,
         codec: Arc<BinaryEnvelopeCodec>,
         schemas: Vec<Arc<Schema>>,
         plugin: Arc<PluginOwner>,
@@ -453,7 +463,7 @@ impl NativeComponentProxy {
         let mut bindings = bindings;
         let actual = inner.inspect()?;
         anyhow::ensure!(
-            actual.descriptor == metadata.descriptor(id.clone())?
+            actual.descriptor == metadata.descriptor(request.id.clone())?
                 && actual.capabilities == metadata.capabilities,
             "constructed native component changed its descriptor/capabilities"
         );
@@ -510,11 +520,12 @@ impl NativeComponentProxy {
             inner,
             descriptor: actual.descriptor,
             metadata,
+            creation_request: request.clone(),
             codec,
             schemas,
             pending: false,
             activated: false,
-            construction_scope: None,
+            construction_scope: request.scope.clone(),
             bindings,
             batching: None,
             output_snapshots: None,
@@ -529,12 +540,10 @@ impl NativeComponentProxy {
             input_bindings: Vec::new(),
             identity: None,
             stop: tokio::sync::Mutex::new(StopState::default()),
-            deprovision: tokio::sync::Mutex::new(DeprovisionState::default()),
+            deletion: tokio::sync::Mutex::new(RetirementState::default()),
+            disposal: tokio::sync::Mutex::new(RetirementState::default()),
+            update: tokio::sync::Mutex::new(None),
         })
-    }
-    pub(super) fn with_scope(mut self, scope: Option<drasi_computation_plugin_sdk::Scope>) -> Self {
-        self.construction_scope = scope;
-        self
     }
 
     pub(super) fn with_bootstrap(
@@ -1061,7 +1070,28 @@ impl ComputationComponent for NativeComponentProxy {
     fn requires_readiness_confirmation(&self) -> bool {
         self.metadata.capabilities.readiness
     }
+    async fn initialize(&mut self) -> anyhow::Result<()> {
+        self.inner.unit(abi::operation::INITIALIZE, &[]).await
+    }
+    async fn pause_processing(&mut self) -> anyhow::Result<()> {
+        self.inner.unit(abi::operation::PAUSE_PROCESSING, &[]).await
+    }
+    async fn resume_processing(&mut self) -> anyhow::Result<()> {
+        self.inner
+            .unit(abi::operation::RESUME_PROCESSING, &[])
+            .await
+    }
+    async fn apply_update(&mut self, context: ComponentUpdateContext) -> anyhow::Result<()> {
+        self.apply_managed_update(context).await
+    }
     async fn start(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.update
+                .get_mut()
+                .as_ref()
+                .is_none_or(updates::UpdateState::completed_successfully),
+            "native component cannot start with an unfinished or failed update"
+        );
         if self.inner.stopping.load(Ordering::Acquire)
             || self.inner.retiring.load(Ordering::Acquire)
         {
@@ -1306,14 +1336,14 @@ impl ComputationComponent for NativeComponentProxy {
         self.inner.stopping.store(false, Ordering::Release);
         Ok(())
     }
-    async fn deprovision(&mut self) -> anyhow::Result<()> {
+    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
         anyhow::ensure!(
-            self.metadata.capabilities.deprovision,
+            self.metadata.capabilities.delete_owned_resources,
             "native component does not support permanent state removal"
         );
         anyhow::ensure!(
             self.stop.get_mut().cleanup_complete && !self.inner.stopping.load(Ordering::Acquire),
-            "native deprovision requires successfully stopped work"
+            "native resource deletion requires successfully stopped work"
         );
         self.inner.retiring.store(true, Ordering::Release);
         if let Some(reads) = &self.output_reads {
@@ -1321,9 +1351,7 @@ impl ComputationComponent for NativeComponentProxy {
         }
         self.activated = true;
         let result = async {
-            if !self.deprovision.get_mut().completed
-                && self.deprovision.get_mut().operation.is_none()
-            {
+            if !self.deletion.get_mut().completed && self.deletion.get_mut().operation.is_none() {
                 if let Some(processing) = &mut self.processing {
                     if processing.needs_cleanup()? {
                         processing.close().await?;
@@ -1331,16 +1359,20 @@ impl ComputationComponent for NativeComponentProxy {
                     processing.open().await?;
                 }
             }
-            let state = self.deprovision.get_mut();
+            let state = self.deletion.get_mut();
             if !state.completed {
                 if state.operation.is_none() {
-                    state.operation =
-                        Some(self.inner.begin(abi::operation::DEPROVISION, &[], None)?);
+                    state.operation = Some(self.inner.begin(
+                        abi::operation::DELETE_OWNED_RESOURCES,
+                        &[],
+                        None,
+                    )?);
+                    state.started = true;
                 }
                 let result = state
                     .operation
                     .as_mut()
-                    .expect("owned deprovision operation")
+                    .expect("owned resource-deletion operation")
                     .await;
                 state.operation.take();
                 anyhow::ensure!(
@@ -1365,6 +1397,46 @@ impl ComputationComponent for NativeComponentProxy {
             )
             .into()),
         }
+    }
+    async fn dispose(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.stop.get_mut().cleanup_complete && !self.inner.stopping.load(Ordering::Acquire),
+            "native disposal requires successfully stopped work"
+        );
+        anyhow::ensure!(
+            !self.deletion.get_mut().started || self.deletion.get_mut().completed,
+            "native resource deletion must finish before disposal"
+        );
+        self.inner.retiring.store(true, Ordering::Release);
+        if let Some(schema) = &self.source_schema {
+            schema.retire();
+        }
+        if let Some(reads) = &self.output_reads {
+            reads.retire();
+        }
+        if let Some(processing) = &mut self.processing {
+            processing.close().await?;
+        }
+        let state = self.disposal.get_mut();
+        if state.completed {
+            return Ok(());
+        }
+        if state.operation.is_none() {
+            state.operation = Some(self.inner.begin(abi::operation::DISPOSE, &[], None)?);
+            state.started = true;
+        }
+        let result = state
+            .operation
+            .as_mut()
+            .expect("owned dispose operation")
+            .await;
+        state.operation.take();
+        anyhow::ensure!(
+            result.map_err(operation_failure)?.is_empty(),
+            "native disposal returned unexpected data"
+        );
+        state.completed = true;
+        Ok(())
     }
 }
 #[async_trait]
@@ -1586,9 +1658,6 @@ impl ComputationService for NativeComponentProxy {
     async fn run(&mut self) -> anyhow::Result<()> {
         self.inner.unit(abi::operation::RUN, &[]).await
     }
-    async fn quiesce(&mut self) -> anyhow::Result<()> {
-        self.inner.unit(abi::operation::QUIESCE, &[]).await
-    }
 }
 struct NativeWakeup(Arc<RemoteComponent>);
 #[async_trait]
@@ -1617,11 +1686,26 @@ impl ComputationComponent for NativeTransactionalProxy {
     fn output_readers(&self) -> OutputReaders {
         self.component.output_readers()
     }
+    async fn initialize(&mut self) -> anyhow::Result<()> {
+        self.component.initialize().await
+    }
     async fn start(&mut self) -> anyhow::Result<()> {
         self.component.start().await
     }
     async fn stop(&mut self) -> anyhow::Result<()> {
         self.component.stop().await
+    }
+    async fn pause_processing(&mut self) -> anyhow::Result<()> {
+        self.component.pause_processing().await
+    }
+    async fn resume_processing(&mut self) -> anyhow::Result<()> {
+        self.component.resume_processing().await
+    }
+    async fn apply_update(&mut self, context: ComponentUpdateContext) -> anyhow::Result<()> {
+        self.component.apply_update(context).await
+    }
+    async fn dispose(&mut self) -> anyhow::Result<()> {
+        self.component.dispose().await
     }
 }
 #[async_trait]

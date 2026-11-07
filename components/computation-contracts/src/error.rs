@@ -22,6 +22,12 @@ use super::{
 pub enum ContractError {
     #[error("invalid {kind} identifier {value:?}: expected nonempty text without whitespace or controls")]
     InvalidIdentifier { kind: &'static str, value: String },
+    #[error("invalid component ID {value:?}: expected a UUID, not a component name")]
+    InvalidComponentId {
+        value: String,
+        #[source]
+        source: uuid::Error,
+    },
     #[error("{kind} identity must contain nonempty bytes")]
     EmptyIdentity { kind: &'static str },
     #[error("schema version must be nonzero, got {value}")]

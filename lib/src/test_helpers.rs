@@ -42,7 +42,9 @@ use tokio::sync::broadcast;
 
 use crate::channels::{ComponentEvent, ComponentStatus};
 pub(crate) mod checkpoints;
+pub(crate) mod creation;
 pub(crate) mod managers;
+pub(crate) mod updates;
 mod runtime_behavior;
 
 pub(crate) fn native_query_value(

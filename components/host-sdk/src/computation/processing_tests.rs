@@ -932,8 +932,8 @@ async fn loaded_plugin_case(plugin: &NativePlugin) -> anyhow::Result<()> {
     )?;
     component.start().await?;
     component.stop().await?;
-    component.deprovision().await?;
-    component.deprovision().await?;
+    component.delete_owned_resources().await?;
+    component.delete_owned_resources().await?;
     assert!(component.start().await.is_err());
     let owner = ComputationTransaction::try_new(
         provider
@@ -1067,21 +1067,27 @@ async fn graph_case() -> anyhow::Result<()> {
                 Arc::new(NativeProcessingResource::new(provider.clone())),
             ),
         )?
-        .source(Box::new(OneSource {
-            descriptor: ComponentDescriptor::try_new(
-                source.clone(),
-                vec![port(PortDirection::Output)],
-            )?,
-            envelope: Some(envelope(&source, 1)),
-        }))
-        .component(specification, factory)
-        .sink(Box::new(OneSink {
-            descriptor: ComponentDescriptor::try_new(
-                sink.clone(),
-                vec![port(PortDirection::Input)],
-            )?,
-            received: received.clone(),
-        }))
+        .source(
+            ComponentName::try_new("source")?,
+            Box::new(OneSource {
+                descriptor: ComponentDescriptor::try_new(
+                    source.clone(),
+                    vec![port(PortDirection::Output)],
+                )?,
+                envelope: Some(envelope(&source, 1)),
+            }),
+        )
+        .component(ComponentName::try_new("processor")?, specification, factory)
+        .sink(
+            ComponentName::try_new("sink")?,
+            Box::new(OneSink {
+                descriptor: ComponentDescriptor::try_new(
+                    sink.clone(),
+                    vec![port(PortDirection::Input)],
+                )?,
+                received: received.clone(),
+            }),
+        )
         .connect(
             EdgeDefinition::new(
                 Endpoint::new(source.clone(), PortId::try_new("out")?),

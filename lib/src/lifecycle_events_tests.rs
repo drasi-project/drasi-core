@@ -20,6 +20,7 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::test_helpers::creation::{BuilderFixtures, CoreFixtures};
     use std::time::Duration;
 
     use tokio::sync::broadcast;
@@ -154,8 +155,8 @@ mod tests {
         let core = create_test_core().await;
         let mut event_rx = core.subscribe_all_component_events();
 
-        let source = TestMockSource::with_auto_start("test-src".to_string(), false).unwrap();
-        core.add_source(source).await.unwrap();
+        let source = TestMockSource::fixture("test-src", false);
+        core.add_source_fixture(source).await.unwrap();
 
         // Collect the "added" event
         let events = collect_events_until(
@@ -240,7 +241,7 @@ mod tests {
     #[tokio::test]
     async fn test_query_full_lifecycle_events() {
         // Queries depend on sources, so add a source first.
-        let source = TestMockSource::with_auto_start("q-src".to_string(), false).unwrap();
+        let source = TestMockSource::fixture("q-src", false);
         let core = DrasiLib::builder()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -255,7 +256,7 @@ mod tests {
                     .clone(),
             )
             .with_id("query-lifecycle-test")
-            .with_source(source)
+            .with_source_fixture(source)
             .build()
             .await
             .unwrap();
@@ -266,7 +267,8 @@ mod tests {
             .query("MATCH (n) RETURN n")
             .from_input("q-src")
             .auto_start(false)
-            .build();
+            .build()
+            .unwrap();
 
         core.add_query(query_config).await.unwrap();
 
@@ -360,7 +362,7 @@ mod tests {
     #[tokio::test]
     async fn test_reaction_full_lifecycle_events() {
         // Reactions depend on queries, which depend on sources.
-        let source = TestMockSource::with_auto_start("r-src".to_string(), false).unwrap();
+        let source = TestMockSource::fixture("r-src", false);
         let core = DrasiLib::builder()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -375,13 +377,14 @@ mod tests {
                     .clone(),
             )
             .with_id("reaction-lifecycle-test")
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(
                 Query::cypher("r-query")
                     .query("MATCH (n) RETURN n")
                     .from_input("r-src")
                     .auto_start(false)
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .await
@@ -389,12 +392,9 @@ mod tests {
 
         let mut event_rx = core.subscribe_all_component_events();
 
-        let reaction = TestMockReaction::with_auto_start(
-            "test-rxn".to_string(),
-            vec!["r-query".to_string()],
-            false,
-        );
-        core.add_reaction(reaction).await.unwrap();
+        let reaction =
+            TestMockReaction::fixture("test-rxn".to_string(), vec!["r-query".to_string()], false);
+        core.add_reaction_fixture(reaction).await.unwrap();
 
         // Collect the "added" event
         let events = collect_events_until(
@@ -487,8 +487,8 @@ mod tests {
         // --- Add all components ---
 
         // Add source
-        let source = TestMockSource::with_auto_start("mc-src".to_string(), false).unwrap();
-        core.add_source(source).await.unwrap();
+        let source = TestMockSource::fixture("mc-src", false);
+        core.add_source_fixture(source).await.unwrap();
         let src_added = collect_events_until(
             &mut event_rx,
             "mc-src",
@@ -504,7 +504,8 @@ mod tests {
             .query("MATCH (n) RETURN n")
             .from_input("mc-src")
             .auto_start(false)
-            .build();
+            .build()
+            .unwrap();
         core.add_query(query_config).await.unwrap();
         let qry_added = collect_events_until(
             &mut event_rx,
@@ -517,12 +518,9 @@ mod tests {
         assert_eq!(qry_added[0].status, ComponentStatus::Added);
 
         // Add reaction (depends on query)
-        let reaction = TestMockReaction::with_auto_start(
-            "mc-rxn".to_string(),
-            vec!["mc-query".to_string()],
-            false,
-        );
-        core.add_reaction(reaction).await.unwrap();
+        let reaction =
+            TestMockReaction::fixture("mc-rxn".to_string(), vec!["mc-query".to_string()], false);
+        core.add_reaction_fixture(reaction).await.unwrap();
         let rxn_added = collect_events_until(
             &mut event_rx,
             "mc-rxn",
@@ -680,17 +678,17 @@ mod tests {
     #[tokio::test]
     async fn test_add_duplicate_source_fails() {
         let core = create_test_core().await;
-        let s1 = TestMockSource::with_auto_start("dup-src".to_string(), false).unwrap();
-        core.add_source(s1).await.unwrap();
+        let s1 = TestMockSource::fixture("dup-src", false);
+        core.add_source_fixture(s1).await.unwrap();
 
-        let s2 = TestMockSource::with_auto_start("dup-src".to_string(), false).unwrap();
-        let result = core.add_source(s2).await;
+        let s2 = TestMockSource::fixture("dup-src", false);
+        let result = core.add_source_fixture(s2).await;
         assert!(result.is_err(), "Adding duplicate source should fail");
     }
 
     #[tokio::test]
     async fn test_add_duplicate_query_fails() {
-        let source = TestMockSource::with_auto_start("dup-q-src".to_string(), false).unwrap();
+        let source = TestMockSource::fixture("dup-q-src", false);
         let core = DrasiLib::builder()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -705,7 +703,7 @@ mod tests {
                     .clone(),
             )
             .with_id("dup-query-test")
-            .with_source(source)
+            .with_source_fixture(source)
             .build()
             .await
             .unwrap();
@@ -714,14 +712,16 @@ mod tests {
             .query("MATCH (n) RETURN n")
             .from_input("dup-q-src")
             .auto_start(false)
-            .build();
+            .build()
+            .unwrap();
         core.add_query(config.clone()).await.unwrap();
 
         let config2 = Query::cypher("dup-q")
             .query("MATCH (n) RETURN n")
             .from_input("dup-q-src")
             .auto_start(false)
-            .build();
+            .build()
+            .unwrap();
         let result = core.add_query(config2).await;
         assert!(result.is_err(), "Adding duplicate query should fail");
     }
@@ -730,18 +730,18 @@ mod tests {
     async fn test_add_duplicate_reaction_fails() {
         let core = create_test_core().await;
         let r1 = create_test_mock_reaction("dup-rxn".to_string(), vec![]);
-        core.add_reaction(r1).await.unwrap();
+        core.add_reaction_fixture(r1).await.unwrap();
 
         let r2 = create_test_mock_reaction("dup-rxn".to_string(), vec![]);
-        let result = core.add_reaction(r2).await;
+        let result = core.add_reaction_fixture(r2).await;
         assert!(result.is_err(), "Adding duplicate reaction should fail");
     }
 
     #[tokio::test]
     async fn test_start_already_running_source_fails() {
         let core = create_test_core().await;
-        let source = TestMockSource::with_auto_start("run-src".to_string(), false).unwrap();
-        core.add_source(source).await.unwrap();
+        let source = TestMockSource::fixture("run-src", false);
+        core.add_source_fixture(source).await.unwrap();
 
         let mut event_rx = core.subscribe_all_component_events();
         core.start_source("run-src").await.unwrap();
@@ -763,8 +763,8 @@ mod tests {
     #[tokio::test]
     async fn test_stop_already_stopped_source_fails() {
         let core = create_test_core().await;
-        let source = TestMockSource::with_auto_start("stop-src".to_string(), false).unwrap();
-        core.add_source(source).await.unwrap();
+        let source = TestMockSource::fixture("stop-src", false);
+        core.add_source_fixture(source).await.unwrap();
 
         // Source is in Stopped state; stopping again should fail
         let result = core.stop_source("stop-src").await;
@@ -776,7 +776,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_source_with_dependent_query_fails() {
-        let source = TestMockSource::with_auto_start("dep-src".to_string(), false).unwrap();
+        let source = TestMockSource::fixture("dep-src", false);
         let core = DrasiLib::builder()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -791,7 +791,7 @@ mod tests {
                     .clone(),
             )
             .with_id("dep-test")
-            .with_source(source)
+            .with_source_fixture(source)
             .build()
             .await
             .unwrap();
@@ -800,7 +800,8 @@ mod tests {
             .query("MATCH (n) RETURN n")
             .from_input("dep-src")
             .auto_start(false)
-            .build();
+            .build()
+            .unwrap();
         core.add_query(config).await.unwrap();
 
         // Source has a dependent query — removal should fail
@@ -813,7 +814,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_query_with_dependent_reaction_fails() {
-        let source = TestMockSource::with_auto_start("dep2-src".to_string(), false).unwrap();
+        let source = TestMockSource::fixture("dep2-src", false);
         let core = DrasiLib::builder()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -828,24 +829,25 @@ mod tests {
                     .clone(),
             )
             .with_id("dep2-test")
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(
                 Query::cypher("dep2-query")
                     .query("MATCH (n) RETURN n")
                     .from_input("dep2-src")
                     .auto_start(false)
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .await
             .unwrap();
 
-        let reaction = TestMockReaction::with_auto_start(
+        let reaction = TestMockReaction::fixture(
             "dep2-rxn".to_string(),
             vec!["dep2-query".to_string()],
             false,
         );
-        core.add_reaction(reaction).await.unwrap();
+        core.add_reaction_fixture(reaction).await.unwrap();
 
         // Query has a dependent reaction — removal should fail
         let result = core.remove_query("dep2-query").await;
@@ -877,8 +879,8 @@ mod tests {
         let mut rx1 = core.subscribe_all_component_events();
         let mut rx2 = core.subscribe_all_component_events();
 
-        let source = TestMockSource::with_auto_start("sub-src".to_string(), false).unwrap();
-        core.add_source(source).await.unwrap();
+        let source = TestMockSource::fixture("sub-src", false);
+        core.add_source_fixture(source).await.unwrap();
 
         // Both receivers should get the "added" event
         let events1 =

@@ -232,7 +232,7 @@ mod output_epoch_tests {
     fn identity(incarnation: Option<uuid::Uuid>) -> QueryRecoveryIdentity {
         QueryRecoveryIdentity::try_new(
             "graph",
-            ComponentId::try_new("query").unwrap(),
+            ComponentId::try_new("00112233-4455-4677-8899-aabbccddeeff").unwrap(),
             42,
             incarnation,
         )

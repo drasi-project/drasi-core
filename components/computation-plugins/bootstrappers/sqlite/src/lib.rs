@@ -84,8 +84,8 @@ impl BootstrapFactory for FileBootstrapFactory {
             .scope
             .clone()
             .context("SQLite file bootstrap requires query scope")?;
-        ComponentId::try_new(scope.instance_id.as_str())?;
-        ComponentId::try_new(scope.graph_id.as_str())?;
+        drasi_computation_contracts::validate_identifier("instance", &scope.instance_id)?;
+        drasi_computation_contracts::validate_identifier("graph", &scope.graph_id)?;
         let mut provider = SqliteBootstrapProvider::new(
             ComponentId::try_new(config.source)?,
             StreamId::try_new(config.stream)?,
@@ -106,6 +106,7 @@ mod tests {
         Ok(CreateRequest {
             inputs: Vec::new(),
             activation_credentials_bound: false,
+            update_directive: None,
             id: ComponentId::try_new("query")?,
             implementation: FileBootstrapFactory.metadata().implementation,
             configuration_version: 1,

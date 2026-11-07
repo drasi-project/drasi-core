@@ -212,7 +212,7 @@ pub struct ContinuousQueryTransformer {
     middleware: Option<Arc<drasi_core::middleware::MiddlewareTypeRegistry>>,
     registration: Option<super::query_catalog::QueryRegistration>,
     catalog: Option<super::QueryResultsCatalog>,
-    api_configuration: Option<crate::config::QueryConfig>,
+    api_configuration: Option<crate::config::AssignedQueryConfig>,
     api_view: std::sync::OnceLock<Arc<super::QueryApi>>,
     metrics: Option<Arc<crate::metrics::QueryOutputMetrics>>,
     reset_configuration: bool,
@@ -416,7 +416,7 @@ impl ContinuousQueryTransformer {
         if catalog.graph_id() != self.definition.graph_id {
             anyhow::bail!("query catalogue belongs to another graph");
         }
-        let configuration = self.api_configuration();
+        let configuration = self.api_configuration()?;
         let hash = self.definition.configuration_hash(&self.execution)?;
         catalog.configure_delivery(
             &configuration,
@@ -442,7 +442,7 @@ impl ContinuousQueryTransformer {
 
     pub fn with_query_configuration(
         mut self,
-        configuration: crate::config::QueryConfig,
+        configuration: crate::config::AssignedQueryConfig,
     ) -> anyhow::Result<Self> {
         self.api_view.take();
         anyhow::ensure!(
@@ -469,15 +469,16 @@ impl ContinuousQueryTransformer {
         Ok(self)
     }
 
-    fn api_configuration(&self) -> crate::config::QueryConfig {
-        self.api_configuration.clone().unwrap_or_else(|| {
-            super::query_configuration::query_configuration(
+    fn api_configuration(&self) -> anyhow::Result<crate::config::AssignedQueryConfig> {
+        match self.api_configuration.clone() {
+            Some(configuration) => Ok(configuration),
+            None => super::query_configuration::query_configuration(
                 &self.execution,
                 &self.definition,
                 self.bootstrap.is_some(),
                 self.options.recovery,
-            )
-        })
+            ),
+        }
     }
 
     pub fn with_bootstrap(mut self, provider: Arc<dyn ComputationBootstrapProvider>) -> Self {
@@ -1223,14 +1224,16 @@ impl ComputationComponent for ContinuousQueryTransformer {
     }
 
     async fn bind_inputs(&mut self, bindings: &[super::InputBinding]) -> anyhow::Result<()> {
-        let inputs = self
+        let inputs: Vec<_> = self
             .api_configuration
             .as_ref()
-            .map(|config| config.inputs.as_slice())
-            .unwrap_or_default();
+            .into_iter()
+            .flat_map(|config| &config.inputs)
+            .map(crate::config::QueryInputConfig::execution_input)
+            .collect();
         self.input_scopes = Some(drasi_query_common::query_input_scopes(
             self.definition.id.as_str(),
-            inputs,
+            &inputs,
             bindings,
         )?);
         Ok(())
@@ -1255,11 +1258,18 @@ impl ComputationComponent for ContinuousQueryTransformer {
     }
 
     fn query_api(&self) -> Option<Arc<super::QueryApi>> {
+        let config = match self.api_configuration() {
+            Ok(config) => config,
+            Err(error) => {
+                log::error!("Query configuration has unresolved component identities: {error:#}");
+                return None;
+            }
+        };
         Some(
             self.api_view
                 .get_or_init(|| {
                     Arc::new(super::QueryApi {
-                        config: self.api_configuration(),
+                        config,
                         catalog: self.catalog.clone(),
                         metrics: self.metrics.clone().expect("query metrics"),
                         native_progress: Default::default(),
@@ -1390,8 +1400,8 @@ impl ComputationComponent for ContinuousQueryTransformer {
         Ok(())
     }
 
-    async fn deprovision(&mut self) -> anyhow::Result<()> {
-        self.deprovision_state().await
+    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
+        self.delete_owned_state().await
     }
 
     async fn stop(&mut self) -> anyhow::Result<()> {
@@ -1876,7 +1886,7 @@ impl ContinuousQueryFactory {
     pub(crate) fn query_configuration(
         spec: &ComponentSpecification,
         graph_id: &str,
-    ) -> anyhow::Result<crate::config::QueryConfig> {
+    ) -> anyhow::Result<crate::config::AssignedQueryConfig> {
         let mut values = BTreeMap::new();
         for (name, value) in &spec.configuration {
             if let ConfigurationValue::Literal(value) = value {
@@ -1918,12 +1928,12 @@ impl ContinuousQueryFactory {
             output_stream: StreamId::try_new(stream)?,
             outbox_capacity: outbox,
         };
-        Ok(super::query_configuration::query_configuration(
+        super::query_configuration::query_configuration(
             &execution,
             &definition,
             spec.dependencies.contains_key("bootstrap"),
             options(&values)?.recovery,
-        ))
+        )
     }
 }
 
@@ -1939,7 +1949,7 @@ impl super::QueryAuthoring for ContinuousQueryFactory {
         &self,
         spec: &ComponentSpecification,
         graph_id: &str,
-    ) -> anyhow::Result<crate::config::QueryConfig> {
+    ) -> anyhow::Result<crate::config::AssignedQueryConfig> {
         Self::query_configuration(spec, graph_id)
     }
 
@@ -1962,6 +1972,16 @@ impl ComponentFactory for ContinuousQueryFactory {
     }
     fn query_authoring(&self) -> Option<&dyn super::QueryAuthoring> {
         Some(self)
+    }
+    fn plan_update(
+        &self,
+        current: &ComponentSpecification,
+        proposed: &ComponentSpecification,
+    ) -> anyhow::Result<super::ComponentUpdatePlan> {
+        self.constructor
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("query factory does not support configuration updates"))?
+            .plan_update(current, proposed)
     }
     fn specification_from_config(
         &self,

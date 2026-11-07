@@ -138,7 +138,7 @@ mod tests {
         assert_eq!(size_of::<OutputReadVTable>(), 16 + 3 * pointer);
         assert_eq!(size_of::<ComponentVTable>(), 16 + 5 * pointer);
         assert_eq!(size_of::<OperationVTable>(), 16 + 3 * pointer);
-        assert_eq!(ABI_VERSION, "1.0.0");
-        assert_eq!(WIRE_VERSION, 1);
+        assert_eq!(ABI_VERSION, "2.0.0");
+        assert_eq!(WIRE_VERSION, 2);
     }
 }

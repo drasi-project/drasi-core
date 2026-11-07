@@ -199,6 +199,17 @@ impl OutputFollowHub {
         })
     }
 
+    /// Raise the ceiling for future leases without changing existing leases' bounds.
+    pub fn increase_envelope_limit(&mut self, limit: NonZeroUsize) -> ReadResult<()> {
+        if limit < self.ceiling.max_envelopes {
+            return Err(OutputReadError::invalid(
+                "cannot lower the live output follow envelope limit",
+            ));
+        }
+        self.ceiling.max_envelopes = limit;
+        Ok(())
+    }
+
     pub fn open(
         &mut self,
         snapshot: OutputSnapshot,
@@ -369,7 +380,7 @@ mod tests {
         GraphProducerIdentity::for_epoch(
             "scope".into(),
             "graph".into(),
-            ComponentId::try_new("producer").unwrap(),
+            ComponentId::try_new("9550b377-ff46-4c12-90db-4380704a98fb").unwrap(),
             StreamId::try_new("producer/out").unwrap(),
             uuid::Uuid::from_u128(epoch),
             false,
@@ -410,6 +421,36 @@ mod tests {
 
     fn hub() -> OutputFollowHub {
         OutputFollowHub::new(NonZeroUsize::new(2).unwrap(), limits()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn increasing_envelope_limit_preserves_existing_lease_bounds() {
+        let mut hub = hub();
+        let old = hub.open(snapshot(), limits()).unwrap();
+        hub.increase_envelope_limit(NonZeroUsize::new(4).unwrap())
+            .unwrap();
+        assert!(hub
+            .increase_envelope_limit(NonZeroUsize::new(3).unwrap())
+            .is_err());
+        let new = hub
+            .open(
+                snapshot(),
+                OutputFollowLimits {
+                    max_envelopes: NonZeroUsize::new(4).unwrap(),
+                    ..limits()
+                },
+            )
+            .unwrap();
+        for sequence in 5..=8 {
+            hub.publish(&event(sequence, 1)).unwrap();
+        }
+        let (_, mut old) = old.into_parts();
+        assert!(old.next().await.is_err());
+        let (_, mut new) = new.into_parts();
+        for sequence in 5..=8 {
+            let envelope = new.next().await.unwrap();
+            assert_eq!(envelope.system().sequence(), sequence);
+        }
     }
 
     #[tokio::test]

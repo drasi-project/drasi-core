@@ -42,25 +42,31 @@ async fn generated_batches_bound_receipts_and_reject_expired_ids_across_reopen()
         let second = a.new_request_id().await?;
         let unused = a.new_request_id().await?;
         let foreign = b.new_request_id().await?;
-        b.commit(0, &foreign, &DesiredInstance::default()).await?;
-        expired(a.commit(0, &foreign, &DesiredInstance::default()).await);
-        let receipt = a.commit(0, &first, &DesiredInstance::default()).await?;
+        b.commit(0, &foreign, &DesiredInstance::default(), None, &[])
+            .await?;
+        expired(
+            a.commit(0, &foreign, &DesiredInstance::default(), None, &[])
+                .await,
+        );
+        let receipt = a
+            .commit(0, &first, &DesiredInstance::default(), None, &[])
+            .await?;
         assert_eq!(
-            a.commit(u64::MAX, &first, &DesiredInstance::default())
+            a.commit(u64::MAX, &first, &DesiredInstance::default(), None, &[])
                 .await?,
             receipt
         );
         assert!(matches!(
-            a.commit(0, &first, &changed())
+            a.commit(0, &first, &changed(), None, &[])
                 .await
                 .err()
                 .unwrap()
                 .downcast_ref::<ManagementError>(),
             Some(ManagementError::RequestConflict)
         ));
-        a.commit(0, &second, &changed()).await?;
+        a.commit(0, &second, &changed(), None, &[]).await?;
         assert!(matches!(
-            a.commit(1, &unused, &changed())
+            a.commit(1, &unused, &changed(), None, &[])
                 .await
                 .err()
                 .unwrap()
@@ -69,12 +75,18 @@ async fn generated_batches_bound_receipts_and_reject_expired_ids_across_reopen()
         ));
         latest = a.new_request_id().await?;
         expired(a.receipt(&first).await);
-        expired(a.commit(1, &first, &changed()).await);
-        expired(a.commit(0, &first, &DesiredInstance::default()).await);
-        expired(a.commit(1, &unused, &changed()).await);
-        assert!(a.commit(1, "arbitrary", &changed()).await.is_err());
+        expired(a.commit(1, &first, &changed(), None, &[]).await);
+        expired(
+            a.commit(0, &first, &DesiredInstance::default(), None, &[])
+                .await,
+        );
+        expired(a.commit(1, &unused, &changed(), None, &[]).await);
+        assert!(a
+            .commit(1, "arbitrary", &changed(), None, &[])
+            .await
+            .is_err());
         assert_eq!(b.receipt(&foreign).await?.unwrap().revision, 0);
-        a.commit(1, &latest, &changed()).await?;
+        a.commit(1, &latest, &changed(), None, &[]).await?;
         let transaction = store.owner.database.begin_read()?;
         assert_eq!(
             transaction.open_table(REQUESTS)?.len()?,
@@ -92,7 +104,7 @@ async fn generated_batches_bound_receipts_and_reject_expired_ids_across_reopen()
     assert!(RedbConfigurationStore::new_with_options(&path, [11; 32], options(3)).is_err());
     let store = RedbConfigurationStore::new_with_options(&path, [11; 32], options(2))?;
     let session = store.open("a").await?;
-    expired(session.commit(1, &first, &changed()).await);
+    expired(session.commit(1, &first, &changed(), None, &[]).await);
     assert_eq!(session.receipt(&latest).await?.unwrap().revision, 1);
     assert_eq!(session.load().await?.desired, changed());
     session.close().await?;
@@ -107,7 +119,7 @@ async fn opting_into_expiry_preserves_configuration_and_snapshots_but_expires_le
     {
         let store = RedbConfigurationStore::new(&path, [12; 32])?;
         let session = store.open("instance").await?;
-        session.commit(0, "legacy", &changed()).await?;
+        session.commit(0, "legacy", &changed(), None, &[]).await?;
         session.snapshot("keep").await?;
         session.close().await?;
     }
@@ -120,12 +132,15 @@ async fn opting_into_expiry_preserves_configuration_and_snapshots_but_expires_le
             &metadata_context("key-check"),
             metadata.get("key-check")?.unwrap().value()
         )?,
-        2
+        UUID_EXPIRING_CONFIGURATION_FORMAT
     );
     assert_eq!(transaction.open_table(REQUESTS)?.len()?, 0);
     let session = store.open("instance").await?;
     assert!(session.receipt("legacy").await.is_err());
-    assert!(session.commit(1, "legacy", &changed()).await.is_err());
+    assert!(session
+        .commit(1, "legacy", &changed(), None, &[])
+        .await
+        .is_err());
     assert_eq!(session.load().await?.desired, changed());
     assert_eq!(
         session.load_snapshot("keep").await?.unwrap().desired,
@@ -133,7 +148,7 @@ async fn opting_into_expiry_preserves_configuration_and_snapshots_but_expires_le
     );
     let id = session.new_request_id().await?;
     assert!(session.receipt(&id).await?.is_none());
-    session.commit(1, &id, &changed()).await?;
+    session.commit(1, &id, &changed(), None, &[]).await?;
     session.close().await?;
     let seed = store.open("seed").await?;
     let id = seed.new_request_id().await?;
@@ -163,7 +178,7 @@ async fn damaged_request_batch_state_cannot_reinitialize_or_reapply_missing_rece
         )?;
         let session = store.open("instance").await?;
         let id = session.new_request_id().await?;
-        session.commit(0, &id, &changed()).await?;
+        session.commit(0, &id, &changed(), None, &[]).await?;
         session.close().await?;
         let transaction = store.owner.database.begin_write()?;
         match damage {
@@ -213,14 +228,14 @@ async fn snapshot_pages_and_conditional_deletion_leave_current_state_and_other_i
     let store = RedbConfigurationStore::new(directory.path().join("configuration.redb"), [14; 32])?;
     let session = store.open("a").await?;
     let other = store.open("aa").await?;
-    session.commit(0, "first", &changed()).await?;
+    session.commit(0, "first", &changed(), None, &[]).await?;
     let names = ["a", "a\nb", "a\"b", "b", "\u{e9}"];
     for name in names {
         session.snapshot(name).await?;
     }
     other.snapshot("other").await?;
     session
-        .commit(1, "second", &DesiredInstance::default())
+        .commit(1, "second", &DesiredInstance::default(), None, &[])
         .await?;
     let mut after = None;
     let mut found = std::collections::BTreeSet::new();
@@ -253,7 +268,7 @@ async fn snapshot_pages_and_conditional_deletion_leave_current_state_and_other_i
 async fn seed(store: &RedbConfigurationStore) -> Result<String> {
     let session = store.open("instance").await?;
     let id = session.new_request_id().await?;
-    session.commit(0, &id, &changed()).await?;
+    session.commit(0, &id, &changed(), None, &[]).await?;
     session.snapshot("saved").await?;
     assert!(
         store.rotate_key([22; 32]).await.is_err(),
@@ -284,7 +299,13 @@ async fn key_rotation_preserves_every_record_kind_and_batch_identity() -> Result
     assert!(RedbConfigurationStore::new_with_options(&path, [21; 32], options(2)).is_err());
     let store = RedbConfigurationStore::new_with_options(&path, [22; 32], options(2))?;
     let session = store.open("instance").await?;
-    assert_eq!(session.commit(0, &id, &changed()).await?.revision, 1);
+    assert_eq!(
+        session
+            .commit(0, &id, &changed(), None, &[])
+            .await?
+            .revision,
+        1
+    );
     session.close().await?;
     Ok(())
 }

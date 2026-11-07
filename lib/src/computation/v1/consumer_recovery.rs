@@ -990,21 +990,33 @@ impl ComputationComponent for CheckpointedSink {
     fn requires_readiness_confirmation(&self) -> bool {
         self.inner.requires_readiness_confirmation()
     }
+    async fn initialize(&mut self) -> anyhow::Result<()> {
+        self.inner.initialize().await
+    }
+    async fn dispose(&mut self) -> anyhow::Result<()> {
+        self.inner.dispose().await
+    }
+    async fn pause_processing(&mut self) -> anyhow::Result<()> {
+        self.inner.pause_processing().await
+    }
+    async fn resume_processing(&mut self) -> anyhow::Result<()> {
+        self.inner.resume_processing().await
+    }
     async fn start(&mut self) -> anyhow::Result<()> {
         self.inner.start().await
     }
     async fn stop(&mut self) -> anyhow::Result<()> {
         self.inner.stop().await
     }
-    async fn reconfigure(&mut self, context: super::ConstructionContext) -> anyhow::Result<()> {
-        self.inner.reconfigure(context).await?;
+    async fn apply_update(&mut self, context: super::ComponentUpdateContext) -> anyhow::Result<()> {
+        self.inner.apply_update(context).await?;
         anyhow::ensure!(
             self.inner.recovery_contract().delivery.is_none(),
             "checkpointed sink cannot forward retirement proof that excludes its progress store"
         );
         Ok(())
     }
-    async fn deprovision(&mut self) -> anyhow::Result<()> {
+    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
         anyhow::bail!("checkpointed sink cannot delete its inner state without scoped progress-store deletion")
     }
 }
@@ -1386,7 +1398,7 @@ mod capability_tests {
         assert!(plane.is_ready(&id, generation));
         assert!(wrapped.handle_batch(Vec::new()).await.is_err());
         assert!(wrapped
-            .deprovision()
+            .delete_owned_resources()
             .await
             .unwrap_err()
             .to_string()

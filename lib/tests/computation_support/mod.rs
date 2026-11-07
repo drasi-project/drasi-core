@@ -143,8 +143,16 @@ pub fn values(envelope: &Envelope) -> Vec<u16> {
         .collect()
 }
 
-pub fn component(id: &str) -> ComponentId {
-    ComponentId::try_new(id).expect("component ID")
+/// Stable test identities, separate from fixture names and business namespaces.
+pub fn component(label: &str) -> ComponentId {
+    let namespace = ComponentId::from_uuid(uuid::Uuid::from_u128(
+        0x53b06f53_7ab5_4b95_a64d_6deec593e69d,
+    ));
+    ComponentId::derive_owned(&namespace, label).expect("fixture component identity")
+}
+
+pub fn name(label: &str) -> ComponentName {
+    ComponentName::try_new(label).expect("fixture component name")
 }
 
 pub fn port(id: &str) -> PortId {
@@ -277,6 +285,7 @@ pub type Received = Arc<Mutex<Vec<InputEnvelope>>>;
 
 pub struct CollectSink {
     descriptor: ComponentDescriptor,
+    name: String,
     received: Received,
     annotate: bool,
 }
@@ -285,6 +294,7 @@ impl CollectSink {
     pub fn new(id: &str, inputs: &[&str], received: Received) -> Self {
         Self {
             descriptor: descriptor(id, inputs, &[]),
+            name: id.to_owned(),
             received,
             annotate: false,
         }
@@ -343,9 +353,7 @@ impl EnvelopeSink for CollectSink {
 
     async fn handle(&mut self, mut input: InputEnvelope) -> anyhow::Result<()> {
         if self.annotate {
-            input
-                .envelope
-                .append_annotation(annotation(self.descriptor.id().as_str()))?;
+            input.envelope.append_annotation(annotation(&self.name))?;
         }
         self.received.lock().expect("sink lock").push(input);
         Ok(())

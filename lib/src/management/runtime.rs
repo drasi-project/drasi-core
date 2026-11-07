@@ -21,12 +21,52 @@ use crate::error::{OperationFailures, RetainedError};
 #[path = "close_tests.rs"]
 mod close_tests;
 
+#[path = "prepare.rs"]
+mod prepare;
+#[path = "update_planning.rs"]
+mod update_planning;
+
+pub(crate) enum AuthoringOperation {
+    Definitions(ConfigurationRequest),
+    Native(Box<dyn FnOnce(&mut ComponentIds) -> GraphResult<DesiredTopology> + Send>),
+    Scoped(Box<dyn FnOnce(&mut ComponentIds) -> GraphResult<ComponentBatch> + Send>),
+    Provided(ComponentBatch),
+    QueryUpdate {
+        id: ComponentId,
+        generation: ComponentGeneration,
+        configuration: crate::config::AssignedQueryConfig,
+    },
+    Local {
+        definitions: Vec<crate::computation::runtime::LocalDefinition>,
+        queries: Vec<crate::config::QueryConfig>,
+        native: Vec<Arc<crate::computation::instance::PendingComponents>>,
+        native_factories: Vec<crate::computation::components::ComponentBatchDeclaration>,
+    },
+    Edit {
+        generations: BTreeMap<ComponentId, ComponentGeneration>,
+        edit: Box<dyn FnOnce(&mut DesiredInstance) -> Result<()> + Send>,
+        delete_owned_resources: BTreeSet<ComponentId>,
+    },
+}
+
 enum Command {
     NewRequestId(oneshot::Sender<Result<String>>),
-    Apply {
+    Accept {
         expected: u64,
         request: String,
-        desired: DesiredInstance,
+        operation: AuthoringOperation,
+        activation: crate::computation::instance::StartupCancellation,
+        reply: oneshot::Sender<Result<AcceptanceReceipt>>,
+    },
+    AcceptAuto {
+        operation: AuthoringOperation,
+        activation: crate::computation::instance::StartupCancellation,
+        reply: oneshot::Sender<Result<AcceptanceReceipt>>,
+    },
+    RestoreSnapshot {
+        name: String,
+        expected: u64,
+        request: String,
         reply: oneshot::Sender<Result<AcceptanceReceipt>>,
     },
     Reconcile(
@@ -57,6 +97,7 @@ pub(crate) struct Management {
     graph: Arc<InstanceGraph>,
     running: Arc<RwLock<bool>>,
     confirmed: Arc<AtomicBool>,
+    guarantees: ConfigurationStoreGuarantees,
 }
 
 struct ManagementTask {
@@ -133,12 +174,17 @@ struct Driver {
     shutdown: Arc<AtomicBool>,
     factories: FactoryRegistry,
     resolver: Arc<dyn ManagementResourceResolver>,
-    store: Option<Arc<dyn ConfigurationSession>>,
+    ordinary_resolver: Arc<dyn OrdinaryComponentResolver>,
+    runtime: Arc<crate::computation::runtime::Runtime>,
+    store: Arc<dyn ConfigurationSession>,
+    guarantees: ConfigurationStoreGuarantees,
     current: CommittedConfiguration,
-    receipts: BTreeMap<String, (DesiredInstance, AcceptanceReceipt)>,
-    snapshots: BTreeMap<String, CommittedConfiguration>,
     applied: DesiredTopology,
     pending_realization: Option<PendingRealization>,
+    pending_bindings: Vec<Arc<crate::computation::instance::PendingComponents>>,
+    pending_deprovision: BTreeSet<ComponentId>,
+    pending_cleanup_target: Option<DesiredInstance>,
+    pending_activation_guard: Option<crate::computation::instance::StartupCancellation>,
     desired: watch::Sender<CommittedConfiguration>,
     status: watch::Sender<ManagementStatus>,
     confirmed: Arc<AtomicBool>,
@@ -148,6 +194,7 @@ struct Driver {
 struct PendingRealization {
     desired: DesiredTopology,
     request: BoxFuture<'static, GraphResult<ReconciliationReport>>,
+    bindings: Vec<Arc<crate::computation::instance::PendingComponents>>,
 }
 
 pub(super) struct ManagedResource {
@@ -195,7 +242,7 @@ async fn close_failed_restore(
 
 impl Management {
     pub(crate) fn persistent(&self) -> bool {
-        self.status.borrow().persistent
+        self.guarantees.durable
     }
 
     pub(crate) async fn open(
@@ -203,30 +250,30 @@ impl Management {
         graph: Arc<InstanceGraph>,
         running: Arc<RwLock<bool>>,
         shutdown: Arc<AtomicBool>,
-        options: ManagementOptions,
+        runtime: Arc<crate::computation::runtime::Runtime>,
+        mut options: ManagementOptions,
     ) -> Result<Self> {
-        let store = match options.store {
-            Some(store) => Some(store.open(&instance_id).await?),
-            None => None,
+        if let Some(factory) = runtime.query_factory() {
+            options.factories.select_query_factory(factory)?;
+        }
+        let provider = options
+            .store
+            .unwrap_or_else(|| Arc::new(super::memory::MemoryConfigStore::default()));
+        let guarantees = provider.guarantees();
+        guarantees.validate()?;
+        let store = provider.open(&instance_id).await?;
+        let current = match store.load().await {
+            Ok(current) => current,
+            Err(error) => return Err(close_failed_restore(store.as_ref(), error).await),
         };
-        let current = match &store {
-            Some(store) => match store.load().await {
-                Ok(current) => current,
-                Err(error) => return Err(close_failed_restore(store.as_ref(), error).await),
-            },
-            None => CommittedConfiguration::default(),
-        };
-        if let Err(error) = normalize(current.desired.clone()) {
+        if let Err(error) = normalize_for_store(current.desired.clone(), guarantees) {
             let error = error.context("invalid persisted desired configuration");
-            if let Some(store) = &store {
-                return Err(close_failed_restore(store.as_ref(), error).await);
-            }
-            return Err(error);
+            return Err(close_failed_restore(store.as_ref(), error).await);
         }
         let (desired, desired_rx) = watch::channel(current.clone());
         let (status, status_rx) = watch::channel(ManagementStatus {
             revision: current.revision,
-            persistent: store.is_some(),
+            persistent: guarantees.durable,
             reconciling: true,
             error: None,
             applied: false,
@@ -241,12 +288,17 @@ impl Management {
             shutdown,
             factories: options.factories,
             resolver: options.resources,
+            ordinary_resolver: options.ordinary,
+            runtime,
             store,
+            guarantees,
             applied: DesiredInstance::default().topology,
             pending_realization: None,
+            pending_bindings: Vec::new(),
+            pending_deprovision: BTreeSet::new(),
+            pending_cleanup_target: None,
+            pending_activation_guard: None,
             current,
-            receipts: BTreeMap::new(),
-            snapshots: BTreeMap::new(),
             desired,
             status,
             confirmed: confirmed.clone(),
@@ -262,10 +314,19 @@ impl Management {
             graph,
             running,
             confirmed,
+            guarantees,
         };
         // Declarations and failures are visible on return, without requiring
         // successful component realization to open a persisted instance.
-        management.reconcile().await?;
+        if let Err(error) = management.reconcile().await {
+            return Err(match management.close().await {
+                Ok(()) => error,
+                Err(cleanup) => error.context(crate::error::OperationFailures::new(
+                    "configuration restore cleanup also failed",
+                    vec![cleanup],
+                )),
+            });
+        }
         Ok(management)
     }
 
@@ -289,17 +350,144 @@ impl Management {
         request: String,
         desired: DesiredInstance,
     ) -> Result<AcceptanceReceipt> {
-        let desired = normalize(desired)?;
+        self.apply_configuration(
+            expected,
+            request,
+            ConfigurationRequest {
+                desired: Some(desired),
+                additions: Vec::new(),
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn apply_configuration(
+        &self,
+        expected: u64,
+        request: String,
+        input: ConfigurationRequest,
+    ) -> Result<AcceptanceReceipt> {
+        self.accept(expected, request, AuthoringOperation::Definitions(input))
+            .await
+    }
+
+    pub(crate) async fn accept(
+        &self,
+        expected: u64,
+        request: String,
+        operation: AuthoringOperation,
+    ) -> Result<AcceptanceReceipt> {
         anyhow::ensure!(
             !request.is_empty() && request.len() <= 1024,
             "request ID must contain 1..=1024 bytes"
         );
-        self.request(|reply| Command::Apply {
+        self.request(|reply| Command::Accept {
             expected,
             request,
-            desired,
+            operation,
+            activation: self.graph.startup_cancellation(),
             reply,
         })
+        .await
+    }
+
+    pub(crate) async fn accept_auto(
+        &self,
+        operation: AuthoringOperation,
+    ) -> Result<AcceptanceReceipt> {
+        self.request(|reply| Command::AcceptAuto {
+            operation,
+            activation: self.graph.startup_cancellation(),
+            reply,
+        })
+        .await
+    }
+
+    pub(crate) async fn wait_declared(&self, id: &ComponentId) -> Result<()> {
+        let control = self.graph.get().await?.control();
+        let mut observed = control.subscribe_observed();
+        let mut status = self.status.clone();
+        loop {
+            if control.desired_snapshot().component(id).is_some() {
+                return Ok(());
+            }
+            let current = status.borrow_and_update().clone();
+            if !current.reconciling {
+                if let Some(error) = current.error {
+                    anyhow::bail!("accepted component {id} could not be declared: {error}");
+                }
+                anyhow::ensure!(
+                    super::ordinary::identities(&self.desired.borrow().desired)
+                        .iter()
+                        .any(|entry| &entry.id == id),
+                    "accepted component {id} was removed before declaration"
+                );
+            }
+            tokio::select! {
+                changed = observed.changed() => { changed?; },
+                changed = status.changed() => { changed?; },
+            }
+        }
+    }
+
+    pub(crate) async fn wait_applied(&self, revision: u64) -> Result<ManagementStatus> {
+        let mut status = self.status.clone();
+        loop {
+            let current = status.borrow_and_update().clone();
+            if current.revision >= revision && !current.reconciling {
+                anyhow::ensure!(
+                    current.error.is_none() && current.applied,
+                    "accepted configuration could not be realized: {:?}",
+                    current.error
+                );
+                return Ok(current);
+            }
+            tokio::select! {
+                changed = status.changed() => { changed?; },
+                _ = self.commands.closed() => return Err(ManagementError::Closed.into()),
+            }
+        }
+    }
+    pub(crate) async fn restore_snapshot(
+        &self,
+        name: String,
+        expected: u64,
+        request: String,
+    ) -> Result<AcceptanceReceipt> {
+        self.request(|reply| Command::RestoreSnapshot {
+            name,
+            expected,
+            request,
+            reply,
+        })
+        .await
+    }
+
+    pub(crate) async fn create_component(
+        &self,
+        expected: u64,
+        request: String,
+        definition: ComponentDefinition,
+    ) -> Result<AcceptanceReceipt> {
+        self.apply_configuration(
+            expected,
+            request,
+            ConfigurationRequest::adding([NewComponentDefinition::Native(definition)]),
+        )
+        .await
+    }
+
+    pub(crate) async fn create_ordinary(
+        &self,
+        expected: u64,
+        request: String,
+        definition: OrdinaryComponentDefinition,
+    ) -> Result<AcceptanceReceipt> {
+        self.apply_configuration(
+            expected,
+            request,
+            ConfigurationRequest::adding([NewComponentDefinition::Ordinary(definition)]),
+        )
         .await
     }
 
@@ -317,14 +505,22 @@ impl Management {
             status.revision = desired.revision;
             status.reconciling = true;
             status.error = None;
+            status.applied = false;
         }
         let running = *self.running.read().await;
         let handle = self.graph.get().await?;
-        status.resource_errors = resource_errors(&handle.observed(), &desired.desired.topology);
+        let actual = observed_definition(&handle.control(), &desired.desired)?;
+        status.resource_errors = resource_errors(
+            &handle.observed(),
+            actual.as_ref().unwrap_or(&desired.desired.topology),
+        );
         status.converged = status.applied
             && status.error.is_none()
+            && desired.pending_updates.is_empty()
             && status.resource_errors.is_empty()
-            && graph_converged(&desired.desired.topology, &handle.observed(), running);
+            && actual
+                .as_ref()
+                .is_some_and(|definition| graph_converged(definition, &handle.observed(), running));
         let latest = self.desired.borrow().revision;
         if latest != desired.revision {
             status.revision = latest;
@@ -406,26 +602,47 @@ impl Driver {
         });
     }
 
-    fn adopt_committed(&mut self, committed: CommittedConfiguration) -> Result<()> {
-        let validation: Result<()> = (|| {
-            anyhow::ensure!(
-                committed.revision >= self.current.revision,
-                "configuration store regressed its committed revision"
-            );
-            anyhow::ensure!(
-                committed.revision != self.current.revision
-                    || committed.desired == self.current.desired,
-                "configuration store changed desired state without advancing its revision"
-            );
-            normalize(committed.desired.clone())
-                .context("invalid persisted desired configuration")?;
-            Ok(())
-        })();
+    fn validate_committed(&self, committed: &CommittedConfiguration) -> Result<()> {
+        let validation: Result<()> =
+            (|| {
+                anyhow::ensure!(
+                    committed.revision >= self.current.revision,
+                    "configuration store regressed its committed revision"
+                );
+                anyhow::ensure!(
+                    committed.revision != self.current.revision
+                        || committed.desired == self.current.desired,
+                    "configuration store changed desired state without advancing its revision"
+                );
+                normalize_for_store(committed.desired.clone(), self.guarantees)
+                    .context("invalid persisted desired configuration")?;
+                let mut updating = BTreeSet::new();
+                let mut operations = BTreeSet::new();
+                for pending in &committed.pending_updates {
+                    pending.validate(&committed.desired)?;
+                    anyhow::ensure!(
+                        updating.insert(pending.component_id.clone())
+                            && operations.insert(pending.operation_id.clone()),
+                        "configuration store duplicated an accepted update"
+                    );
+                    if committed.revision == self.current.revision {
+                        anyhow::ensure!(self.current.pending_updates.contains(pending),
+                        "configuration store changed update intent without advancing its revision");
+                    }
+                }
+                Ok(())
+            })();
         if let Err(error) = validation {
             self.unconfirmed(&error);
             return Err(error);
         }
-        let changed = self.current != committed;
+        Ok(())
+    }
+
+    fn adopt_committed(&mut self, committed: CommittedConfiguration) -> Result<()> {
+        self.validate_committed(&committed)?;
+        let changed = self.current.desired != committed.desired
+            || self.current.revision != committed.revision;
         if let Some(transition) = self.transition.take() {
             if changed {
                 transition.retire();
@@ -443,23 +660,54 @@ impl Driver {
     }
 
     async fn refresh_committed(&mut self) -> Result<()> {
-        let Some(store) = &self.store else {
-            return Ok(());
-        };
-        let committed = match store.load().await {
+        let committed = match self.store.load().await {
             Ok(committed) => committed,
             Err(error) => {
                 self.unconfirmed(&error);
                 return Err(error.context("configuration state could not be confirmed"));
             }
         };
+        self.validate_committed(&committed)?;
+        let completed: Vec<_> = self
+            .current
+            .pending_updates
+            .iter()
+            .filter(|old| {
+                !committed.pending_updates.iter().any(|pending| {
+                    pending.component_id == old.component_id
+                        && pending.operation_id == old.operation_id
+                })
+            })
+            .map(crate::management::AcceptedComponentUpdate::completion)
+            .collect();
+        if !completed.is_empty() {
+            anyhow::ensure!(
+                committed.revision >= self.current.revision,
+                "configuration completion regressed its revision"
+            );
+            self.graph
+                .get()
+                .await?
+                .control()
+                .management_control()
+                .confirm_updates(completed)
+                .await?;
+        }
+        if let Some(target) = self.pending_cleanup_target.take() {
+            if target != committed.desired {
+                self.pending_deprovision.clear();
+                for pending in std::mem::take(&mut self.pending_bindings) {
+                    pending.cleanup().await?;
+                }
+            }
+        }
         self.adopt_committed(committed)
     }
 
     fn pending(&self) {
         self.status.send_replace(ManagementStatus {
             revision: self.current.revision,
-            persistent: self.store.is_some(),
+            persistent: self.guarantees.durable,
             reconciling: true,
             error: None,
             applied: false,
@@ -468,12 +716,17 @@ impl Driver {
         });
     }
 
-    async fn commit(
+    async fn commit_prepared(
         &mut self,
         expected: u64,
         request: String,
         desired: DesiredInstance,
+        creation: Option<AcceptedComponentCreation>,
     ) -> Result<AcceptanceReceipt> {
+        anyhow::ensure!(
+            !request.is_empty() && request.len() <= 1024,
+            "request ID must contain 1..=1024 bytes"
+        );
         anyhow::ensure!(
             !self.shutdown.load(Ordering::Acquire),
             "instance is shut down"
@@ -484,26 +737,54 @@ impl Driver {
         if !self.confirmed.load(Ordering::Acquire) {
             self.refresh_committed().await?;
         }
-        let retry = if let Some(store) = &self.store {
-            store.receipt(&request).await?.is_some()
-        } else {
-            self.receipts.contains_key(&request)
-        };
-        if self.store.is_none() {
-            if let Some((prior, receipt)) = self.receipts.get(&request) {
-                if prior != &desired {
-                    return Err(ManagementError::RequestConflict.into());
+        let prior_receipt = self.store.receipt(&request).await?;
+        if prior_receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.creation != creation)
+        {
+            return Err(ManagementError::RequestConflict.into());
+        }
+        let retry = prior_receipt.is_some();
+        let mut provided = BTreeMap::new();
+        let mut external = BTreeMap::new();
+        for pending in &self.pending_bindings {
+            provided.extend(pending.resources().await?);
+            external.extend(pending.external_bindings().await?);
+        }
+        if !retry {
+            self.runtime.validate_local_records(&desired, &provided)?;
+            let publication = self.graph.get().await?.control().registry_snapshot();
+            for node in &desired.topology.components {
+                if let ComponentConstruction::External { binding } = &node.construction {
+                    let current = self
+                        .current
+                        .desired
+                        .topology
+                        .components
+                        .iter()
+                        .find(|current| current.descriptor.id() == node.descriptor.id());
+                    let live = current.is_some_and(|current| {
+                        current.construction == node.construction
+                            && current.descriptor == node.descriptor
+                            && current.role == node.role
+                    }) && publication
+                        .desired
+                        .component(node.descriptor.id())
+                        .is_some();
+                    anyhow::ensure!(
+                        live || external
+                            .get(binding)
+                            .is_some_and(|descriptor| descriptor == &node.descriptor),
+                        "opaque component {} is unavailable for reconstruction",
+                        node.descriptor.id()
+                    );
                 }
-                return Ok(receipt.clone());
-            }
-            if expected != self.current.revision {
-                return Err(ManagementError::RevisionConflict {
-                    expected,
-                    actual: self.current.revision,
-                }
-                .into());
             }
         }
+        let updates = match &prior_receipt {
+            Some(receipt) => receipt.updates.clone(),
+            None => self.plan_updates(&desired, &request, &provided).await?,
+        };
         let mut required_transition = None;
         if !retry {
             if expected != self.current.revision {
@@ -513,6 +794,7 @@ impl Driver {
                 }
                 .into());
             }
+            super::ordinary::validate_transition(&self.current.desired, &desired)?;
             if let Err(error) = self
                 .resolver
                 .validate_transition(&self.current.desired.topology, &desired.topology)
@@ -534,7 +816,7 @@ impl Driver {
                 if !retry && desired.retirement != self.current.desired.retirement =>
             {
                 authorization.validate_transition(
-                    self.store.is_some(),
+                    self.guarantees.durable,
                     self.current.revision,
                     &self.current.desired.topology,
                     required_transition.as_ref(),
@@ -543,29 +825,20 @@ impl Driver {
             }
             _ => false,
         };
-        self.protect(&control, &desired.topology).await?;
+        self.protect(&control, &desired).await?;
         let admission =
-            check_ownership(&control, &self.applied, &desired.topology).and_then(|()| {
+            check_instance_ownership(&control, &self.applied, &desired).and_then(|()| {
                 anyhow::ensure!(
-                    desired
-                        .topology
-                        .components
+                    super::ordinary::identities(&desired)
                         .iter()
-                        .all(|node| node.descriptor.id().as_str() != self.instance_id),
+                        .all(|node| node.id.as_str() != self.instance_id),
                     "instance identity is reserved"
                 );
                 Ok(())
             });
         if let Err(error) = admission {
-            self.protect(&control, &self.current.desired.topology)
-                .await?;
+            self.protect(&control, &self.current.desired).await?;
             return Err(error);
-        }
-        if self.store.is_none() && desired != self.current.desired {
-            self.current
-                .revision
-                .checked_add(1)
-                .context("configuration revision exhausted")?;
         }
         if let Some(required) = required_transition {
             match required
@@ -574,83 +847,69 @@ impl Driver {
             {
                 Ok(transition) => self.transition = Some(transition),
                 Err(error) => {
-                    self.protect(&control, &self.current.desired.topology)
-                        .await?;
+                    self.protect(&control, &self.current.desired).await?;
                     return Err(error);
                 }
             }
         }
-        if let Some(store) = &self.store {
-            let result = store.commit(expected, &request, &desired).await;
-            // Also resolves a backend error after a commit: never roll memory
-            // backward or assume an uncertain commit was a rejection.
-            let committed = match store.load().await {
-                Ok(committed) => committed,
-                Err(error) => {
-                    self.unconfirmed(&error);
-                    return Err(error.context("configuration state could not be confirmed"));
-                }
-            };
-            if let Ok(receipt) = &result {
-                if receipt.request_id != request
-                    || !receipt.durable
-                    || receipt.revision > committed.revision
-                    || receipt.revision == committed.revision && committed.desired != desired
-                {
-                    let error = anyhow::anyhow!(
-                        "configuration store receipt does not confirm the committed definition"
-                    );
-                    self.unconfirmed(&error);
-                    return Err(error);
-                }
+        let result = self
+            .store
+            .commit(expected, &request, &desired, creation.as_ref(), &updates)
+            .await;
+        // Also resolves a backend error after a commit: never roll memory
+        // backward or assume an uncertain commit was a rejection.
+        let committed = match self.store.load().await {
+            Ok(committed) => committed,
+            Err(error) => {
+                self.unconfirmed(&error);
+                return Err(error.context("configuration state could not be confirmed"));
             }
-            self.adopt_committed(committed)?;
-            self.protect(&control, &self.current.desired.topology)
-                .await?;
-            if result.is_ok() {
-                self.pending();
-            }
-            return result;
-        }
-        if desired != self.current.desired {
-            self.current.revision = self
-                .current
-                .revision
-                .checked_add(1)
-                .context("configuration revision exhausted")?;
-            self.current.desired = desired.clone();
-        }
-        if let Some(transition) = self.transition.take() {
-            transition.retire();
-        }
-        let receipt = AcceptanceReceipt {
-            request_id: request.clone(),
-            revision: self.current.revision,
-            durable: false,
         };
-        self.receipts.insert(request, (desired, receipt.clone()));
-        self.desired.send_replace(self.current.clone());
-        self.pending();
-        Ok(receipt)
+        if let Ok(receipt) = &result {
+            if receipt.request_id != request
+                || receipt.creation != creation
+                || receipt.updates != updates
+                || receipt.durable != self.guarantees.durable
+                || receipt.revision > committed.revision
+                || receipt.revision == committed.revision && committed.desired != desired
+                || !retry
+                    && updates
+                        .iter()
+                        .any(|update| !committed.pending_updates.contains(update))
+            {
+                let error = anyhow::anyhow!(
+                    "configuration store receipt does not confirm the committed definition"
+                );
+                self.unconfirmed(&error);
+                return Err(error);
+            }
+        }
+        self.adopt_committed(committed)?;
+        self.protect(&control, &self.current.desired).await?;
+        if result.is_ok() {
+            self.pending();
+        }
+        result
     }
 
     fn protect<'a>(
         &self,
         control: &'a GraphControl,
-        desired: &DesiredTopology,
+        desired: &DesiredInstance,
     ) -> impl std::future::Future<Output = Result<()>> + Send + 'a {
         let components = self
             .applied
             .components
             .iter()
-            .chain(&desired.components)
+            .chain(&desired.topology.components)
             .map(|node| node.descriptor.id().clone())
+            .chain(desired.ordinary.iter().map(|record| record.id.clone()))
             .collect();
         let resources = self
             .applied
             .resources
             .iter()
-            .chain(&desired.resources)
+            .chain(&desired.topology.resources)
             .map(|resource| resource.id.clone())
             .collect();
         async move {
@@ -671,18 +930,30 @@ impl Driver {
         if result.as_ref().is_ok_and(|report| report.committed) {
             self.applied = pending.desired;
         }
-        result.map(Some).map_err(Into::into)
+        let mut cleanup = Vec::new();
+        for binding in pending.bindings {
+            if let Err(error) = binding.cleanup().await {
+                cleanup.push(error.into());
+            }
+        }
+        if cleanup.is_empty() {
+            result.map(Some).map_err(Into::into)
+        } else {
+            if let Err(error) = result {
+                cleanup.insert(0, error.into());
+            }
+            Err(OperationFailures::new("accepted component cleanup failed", cleanup).into())
+        }
     }
 
     async fn realize(
         &mut self,
-        desired: &DesiredTopology,
+        configuration: &DesiredInstance,
         lifecycle: tokio::sync::OwnedMutexGuard<crate::computation::instance::InstanceLifecycle>,
     ) -> ManagementStatus {
-        let id = &desired.graph_id;
         let mut status = ManagementStatus {
             revision: self.current.revision,
-            persistent: self.store.is_some(),
+            persistent: self.guarantees.durable,
             reconciling: false,
             applied: false,
             converged: false,
@@ -692,18 +963,50 @@ impl Driver {
         let result: Result<()> = async {
             let handle = self.graph.get().await?;
             let public_control = handle.control();
-            self.protect(&public_control, desired).await?;
-            check_ownership(&public_control, &self.applied, desired)?;
+            self.protect(&public_control, configuration).await?;
+            check_instance_ownership(&public_control, &self.applied, configuration)?;
             let control = public_control.management_control();
             let actual = control.desired_snapshot();
             let old = actual.select(GraphSelection::All)?;
             let observed = control.observed();
-            let mut bindings = TopologyBindings {
-                factories: self.factories.clone(),
-                deferred_management_validation: true,
-                defer_activation: true,
-                ..Default::default()
+            let mut pending_resources = BTreeMap::new();
+            for pending in &self.pending_bindings {
+                pending_resources.extend(pending.resources().await?);
+            }
+            let mut compiled = ComponentBatch {
+                definition: configuration.topology.clone(),
+                bindings: TopologyBindings {
+                    factories: self.factories.clone(),
+                    deferred_management_validation: true,
+                    defer_activation: true,
+                    ..Default::default()
+                },
             };
+            let ordinary = self
+                .runtime
+                .managed_components(
+                    &configuration.ordinary,
+                    &configuration.topology,
+                    &self.applied,
+                    &self.factories,
+                    self.ordinary_resolver.clone(),
+                    &pending_resources,
+                    &self.current.pending_updates,
+                )
+                .await?;
+            crate::computation::runtime::managed::merge(&mut compiled, ordinary)?;
+            compiled.definition.resolve_required_relationships();
+            let owners = std::mem::take(&mut self.pending_bindings);
+            for pending in &owners {
+                let pending = pending.take().await?;
+                compiled.bindings.merge(pending.bindings)?;
+            }
+            let desired = &compiled.definition;
+            let updates = self
+                .update_bindings(configuration, desired, &pending_resources)
+                .await?;
+            let id = &desired.graph_id;
+            let mut bindings = compiled.bindings;
             let mut changed_resources = control.retired_resources().await?;
             for resource in &desired.resources {
                 let current_resource = observed.resources.get(&resource.id);
@@ -726,10 +1029,16 @@ impl Driver {
                 if !changed_resources.contains(&resource.id) {
                     continue;
                 }
-                let configuration = desired
-                    .resource_configurations
-                    .get(&resource.id)
-                    .context("missing provider construction recipe")?;
+                if bindings.resources.contains_key(&resource.id)
+                    || bindings.resource_constructors.contains_key(&resource.id)
+                {
+                    continue;
+                }
+                let Some(configuration) = desired.resource_configurations.get(&resource.id) else {
+                    // Generated ordinary resources carry their constructors/bindings;
+                    // unavailable source bindings remain explicit graph dependencies.
+                    continue;
+                };
                 bindings.resource_constructors.insert(
                     resource.id.clone(),
                     resource_constructor(
@@ -742,13 +1051,59 @@ impl Driver {
                 );
             }
             let request_control = control.clone();
+            let current_bindings = control.registry_snapshot();
+            bindings.resources.retain(|id, supplied| {
+                !current_bindings
+                    .resource(id)
+                    .is_ok_and(|current| current.same_shared_instance(supplied))
+            });
             let previous = self.applied.clone();
             let next = desired.clone();
+            let running = *self.running.read().await;
+            let cancellation = self
+                .pending_activation_guard
+                .take()
+                .unwrap_or_else(|| self.graph.startup_cancellation());
+            let activation = desired
+                .components
+                .iter()
+                .filter(|node| {
+                    let id = node.descriptor.id();
+                    observed.components.get(id).map_or(
+                        running && node.lifecycle.auto_start,
+                        |state| {
+                            matches!(
+                                state.lifecycle,
+                                ComponentLifecycle::Running | ComponentLifecycle::Starting
+                            ) || state.failure.is_none()
+                                && (running
+                                    && node.lifecycle.auto_start
+                                    && !state.lifecycle_requested
+                                    || state.lifecycle_requested
+                                        && !current_bindings.activation_is_deferred(id)
+                                        && matches!(
+                                            state.realization,
+                                            RealizationState::Pending | RealizationState::Creating
+                                        ))
+                        },
+                    )
+                })
+                .map(|node| (node.descriptor.id().clone(), cancellation.clone()))
+                .collect();
+            let delete_owned_resources = std::mem::take(&mut self.pending_deprovision);
             self.pending_realization = Some(PendingRealization {
                 desired: next.clone(),
+                bindings: owners,
                 request: Box::pin(async move {
                     request_control
-                        .reconcile_components(previous, next, bindings)
+                        .reconcile_components(
+                            previous,
+                            next,
+                            bindings,
+                            activation,
+                            delete_owned_resources,
+                            updates,
+                        )
                         .await
                 }),
             });
@@ -765,60 +1120,12 @@ impl Driver {
             } else {
                 anyhow::bail!("component transition did not commit: {:?}", report.failures);
             }
-            self.protect(&public_control, desired).await?;
-            if *self.running.read().await {
-                let state = control.observed();
-                let start: Vec<_> = desired
-                    .components
-                    .iter()
-                    .filter(|node| node.lifecycle.auto_start)
-                    .filter(|node| {
-                        state
-                            .components
-                            .get(node.descriptor.id())
-                            .is_some_and(|state| {
-                                state.realization == RealizationState::Created
-                                    && state.lifecycle == ComponentLifecycle::Stopped
-                            })
-                    })
-                    .map(|node| node.descriptor.id().clone())
-                    .collect();
-                if !start.is_empty() {
-                    control
-                        .start_components(
-                            control.desired_snapshot().revision,
-                            GraphSelection::Exact(start),
-                        )
-                        .await?;
-                }
-            }
-            {
-                let state = control.observed();
-                let running: Vec<_> = state
-                    .components
-                    .iter()
-                    .filter(|(id, node)| {
-                        desired.components.iter().any(|target| {
-                            target.descriptor.id() == *id && !target.lifecycle.auto_start
-                        }) && matches!(
-                            node.lifecycle,
-                            ComponentLifecycle::Running | ComponentLifecycle::Starting
-                        )
-                    })
-                    .map(|(id, _)| id.clone())
-                    .collect();
-                if !running.is_empty() {
-                    control
-                        .stop_components(
-                            control.desired_snapshot().revision,
-                            GraphSelection::Exact(running),
-                        )
-                        .await?;
-                }
-            }
+            self.finish_ready_updates().await?;
+            self.protect(&public_control, configuration).await?;
             let observed = control.observed();
             status.resource_errors = resource_errors(&observed, desired);
             status.converged = status.resource_errors.is_empty()
+                && self.current.pending_updates.is_empty()
                 && graph_converged(desired, &observed, *self.running.read().await);
             Ok(())
         }
@@ -855,22 +1162,69 @@ impl Driver {
     }
 
     async fn reconcile_active(&mut self) -> Result<ManagementStatus> {
-        anyhow::ensure!(
-            !self.shutdown.load(Ordering::Acquire),
-            "instance is shut down"
-        );
-        self.settle_realization().await?;
-        let graph = self.graph.clone();
-        let lifecycle = graph.lifecycle.clone().lock_owned().await;
-        self.refresh_committed().await?;
-        let desired = self.current.desired.clone();
-        let status = self.realize(&desired.topology, lifecycle).await;
-        self.status.send_replace(status.clone());
-        Ok(status)
+        loop {
+            anyhow::ensure!(
+                !self.shutdown.load(Ordering::Acquire),
+                "instance is shut down"
+            );
+            self.settle_realization().await?;
+            self.refresh_committed().await?;
+            let normalized = self.normalize_desired(self.current.desired.clone())?;
+            if normalized != self.current.desired {
+                let request = self.store.new_request_id().await?;
+                // Binding names is a configuration write, not an in-memory restore
+                // shortcut. Confirm this write before compiling any constructors.
+                if let Err(error) = self
+                    .commit_prepared(self.current.revision, request, normalized.clone(), None)
+                    .await
+                {
+                    if !self.confirmed.load(Ordering::Acquire) || self.current.desired != normalized
+                    {
+                        return Err(error);
+                    }
+                }
+            }
+            let graph = self.graph.clone();
+            let lifecycle = graph.lifecycle.clone().lock_owned().await;
+            self.refresh_committed().await?;
+            let desired = self.current.desired.clone();
+            let status = self.realize(&desired, lifecycle).await;
+            self.status.send_replace(status.clone());
+            if status.error.is_some()
+                || self.normalize_desired(self.current.desired.clone())? == self.current.desired
+            {
+                return Ok(status);
+            }
+        }
     }
 
     async fn run(&mut self, mut receive: mpsc::Receiver<Command>) {
-        while let Some(command) = receive.recv().await {
+        let mut observations = self
+            .graph
+            .get()
+            .await
+            .ok()
+            .map(|handle| handle.control().update_observations());
+        loop {
+            let command = tokio::select! {
+                command = receive.recv() => command,
+                changed = async {
+                    match &mut observations {
+                        Some(observations) => observations.changed().await,
+                        None => std::future::pending().await,
+                    }
+                }, if !self.current.pending_updates.is_empty() => {
+                    if changed.is_err() { observations = None; }
+                    if let Err(error) = self.finish_ready_updates().await {
+                        self.status.send_modify(|status| {
+                            status.error = Some(format!("accepted update completion is pending: {error:#}"));
+                            status.converged = false;
+                        });
+                    }
+                    continue;
+                }
+            };
+            let Some(command) = command else { break };
             match command {
                 Command::NewRequestId(reply) => {
                     let result = if self.shutdown.load(Ordering::Acquire) {
@@ -878,28 +1232,82 @@ impl Driver {
                     } else if !self.confirmed.load(Ordering::Acquire) {
                         Err(ManagementError::ConfigurationUnconfirmed.into())
                     } else {
-                        match &self.store {
-                            Some(store) => store.new_request_id().await,
-                            None => Ok(uuid::Uuid::new_v4().to_string()),
-                        }
+                        self.store.new_request_id().await
                     };
                     let _ = reply.send(result);
                 }
-                Command::Apply {
+                Command::Accept {
                     expected,
                     request,
-                    desired,
+                    operation,
+                    activation,
                     reply,
                 } => {
                     let previous = self.current.revision;
-                    let result = self.commit(expected, request, desired).await;
+                    let result = self.accept(expected, request, operation).await;
                     let accepted = result.is_ok() || self.current.revision != previous;
                     let _ = reply.send(result);
                     if accepted {
+                        self.pending_activation_guard = Some(activation);
                         if let Err(error) = self.reconcile().await {
                             log::error!(
                                 "Accepted configuration is pending reconciliation: {error}"
                             );
+                            self.status.send_modify(|status| {
+                                status.reconciling = false;
+                                status.error = Some(format!("{error:#}"));
+                            });
+                        }
+                    }
+                }
+                Command::AcceptAuto {
+                    operation,
+                    activation,
+                    reply,
+                } => {
+                    let previous = self.current.revision;
+                    let result = async {
+                        self.refresh_committed().await?;
+                        let request = self.store.new_request_id().await?;
+                        self.accept(self.current.revision, request, operation).await
+                    }
+                    .await;
+                    let accepted = result.is_ok() || self.current.revision != previous;
+                    let _ = reply.send(result);
+                    if accepted {
+                        self.pending_activation_guard = Some(activation);
+                        if let Err(error) = self.reconcile().await {
+                            self.status.send_modify(|status| {
+                                status.reconciling = false;
+                                status.error = Some(format!("{error:#}"));
+                            });
+                        }
+                    }
+                }
+                Command::RestoreSnapshot {
+                    name,
+                    expected,
+                    request,
+                    reply,
+                } => {
+                    let previous = self.current.revision;
+                    let snapshot = self.store.load_snapshot(&name).await;
+                    let result = match snapshot {
+                        Ok(Some(snapshot)) => {
+                            match normalize_for_store(snapshot.desired, self.guarantees) {
+                                Ok(desired) => {
+                                    self.commit_prepared(expected, request, desired, None).await
+                                }
+                                Err(error) => Err(error),
+                            }
+                        }
+                        Ok(None) => Err(anyhow::anyhow!("configuration snapshot does not exist")),
+                        Err(error) => Err(error),
+                    };
+                    let accepted = result.is_ok() || self.current.revision != previous;
+                    let _ = reply.send(result);
+                    if accepted {
+                        if let Err(error) = self.reconcile().await {
                             self.status.send_modify(|status| {
                                 status.reconciling = false;
                                 status.error = Some(format!("{error:#}"));
@@ -937,77 +1345,27 @@ impl Driver {
                     }
                 }
                 Command::Receipt(id, reply) => {
-                    let result = match &self.store {
-                        Some(store) => store.receipt(&id).await,
-                        None => Ok(self.receipts.get(&id).map(|(_, receipt)| receipt.clone())),
-                    };
+                    let result = self.store.receipt(&id).await;
                     let _ = reply.send(result);
                 }
                 Command::Snapshot(name, reply) => {
-                    let result = match &self.store {
-                        Some(store) => store.snapshot(&name).await,
-                        None if self.snapshots.contains_key(&name) => {
-                            Err(ManagementError::SnapshotExists(name).into())
-                        }
-                        None => {
-                            self.snapshots.insert(name, self.current.clone());
-                            Ok(self.current.clone())
-                        }
-                    };
+                    let result = self.store.snapshot(&name).await;
                     let _ = reply.send(result);
                 }
                 Command::LoadSnapshot(name, reply) => {
-                    let result = match &self.store {
-                        Some(store) => store.load_snapshot(&name).await,
-                        None => Ok(self.snapshots.get(&name).cloned()),
-                    };
+                    let result = self.store.load_snapshot(&name).await;
                     let _ = reply.send(result);
                 }
                 Command::ListSnapshots(after, limit, reply) => {
-                    let result = match &self.store {
-                        Some(store) => store.list_snapshots(after.as_deref(), limit).await,
-                        None => Ok(self
-                            .snapshots
-                            .range::<str, _>((
-                                after
-                                    .as_deref()
-                                    .map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded),
-                                std::ops::Bound::Unbounded,
-                            ))
-                            .take(limit.get())
-                            .map(|(name, snapshot)| ConfigurationSnapshotSummary {
-                                name: name.clone(),
-                                revision: snapshot.revision,
-                            })
-                            .collect()),
-                    };
+                    let result = self.store.list_snapshots(after.as_deref(), limit).await;
                     let _ = reply.send(result);
                 }
                 Command::DeleteSnapshot(name, expected, reply) => {
-                    let result = match &self.store {
-                        Some(store) => store.delete_snapshot(&name, expected).await,
-                        None => match self.snapshots.get(&name) {
-                            Some(snapshot) if snapshot.revision != expected => {
-                                Err(ManagementError::RevisionConflict {
-                                    expected,
-                                    actual: snapshot.revision,
-                                }
-                                .into())
-                            }
-                            Some(_) => {
-                                self.snapshots.remove(&name);
-                                Ok(true)
-                            }
-                            None => Ok(false),
-                        },
-                    };
+                    let result = self.store.delete_snapshot(&name, expected).await;
                     let _ = reply.send(result);
                 }
                 Command::Close(reply) => {
-                    let result = match &self.store {
-                        Some(store) => store.close().await,
-                        None => Ok(()),
-                    };
+                    let result = self.store.close().await;
                     let closed = result.is_ok();
                     let _ = reply.send(result);
                     if closed {
@@ -1020,12 +1378,8 @@ impl Driver {
         loop {
             let stopped = self.graph.shutdown().await;
             if stopped.is_ok() {
-                if let Some(store) = &self.store {
-                    if let Err(error) = store.close().await {
-                        log::error!("Closing dropped configuration session failed; ownership retained, retry in {retry_delay:?}: {error}");
-                    } else {
-                        break;
-                    }
+                if let Err(error) = self.store.close().await {
+                    log::error!("Closing dropped configuration session failed; ownership retained, retry in {retry_delay:?}: {error}");
                 } else {
                     break;
                 }
@@ -1056,10 +1410,12 @@ fn graph_converged(desired: &DesiredTopology, observed: &ObservedGraph, running:
             .is_some_and(|actual| {
                 actual.realization == RealizationState::Created
                     && actual.failure.is_none()
-                    && if running && node.lifecycle.auto_start {
-                        actual.lifecycle == ComponentLifecycle::Running
-                    } else {
-                        actual.lifecycle == ComponentLifecycle::Stopped
+                    && match actual.lifecycle {
+                        ComponentLifecycle::Running => true,
+                        ComponentLifecycle::Stopped => {
+                            actual.lifecycle_requested || !running || !node.lifecycle.auto_start
+                        }
+                        _ => false,
                     }
             })
     }) && desired.relationships.iter().all(|edge| {
@@ -1104,6 +1460,64 @@ fn resource_errors(
         .collect()
 }
 
+fn observed_definition(
+    control: &GraphControl,
+    desired: &DesiredInstance,
+) -> Result<Option<DesiredTopology>> {
+    let publication = control.registry_snapshot();
+    let mut ids: BTreeSet<_> = super::ordinary::identities(desired)
+        .into_iter()
+        .map(|identity| identity.id)
+        .collect();
+    if ids
+        .iter()
+        .any(|id| publication.desired.component(id).is_none())
+    {
+        return Ok(None);
+    }
+    for record in &desired.ordinary {
+        if matches!(record.component, OrdinaryComponent::Query { .. }) {
+            ids.extend(
+                crate::computation::runtime::native_query::query_members(&publication, &record.id)
+                    .into_keys(),
+            );
+        }
+    }
+    let mut definition = publication
+        .desired
+        .select(GraphSelection::Exact(ids.into_iter().collect()))?;
+    let all = publication.desired.select(GraphSelection::All)?;
+    let mut resources: BTreeSet<_> = definition
+        .resources
+        .iter()
+        .chain(&desired.topology.resources)
+        .map(|resource| resource.id.clone())
+        .collect();
+    all.include_resource_dependencies(&mut resources);
+    if resources
+        .iter()
+        .any(|id| !publication.desired.resources.contains_key(id))
+    {
+        return Ok(None);
+    }
+    definition.resources = all
+        .resources
+        .into_iter()
+        .filter(|resource| resources.contains(&resource.id))
+        .collect();
+    definition.resource_configurations = all
+        .resource_configurations
+        .into_iter()
+        .filter(|(id, _)| resources.contains(id))
+        .collect();
+    definition.resource_dependencies = all
+        .resource_dependencies
+        .into_iter()
+        .filter(|(id, _)| resources.contains(id))
+        .collect();
+    Ok(Some(definition))
+}
+
 fn valid_name(name: &str) -> Result<()> {
     anyhow::ensure!(
         !name.is_empty() && name.len() <= 1024,
@@ -1134,12 +1548,22 @@ fn canonical_graph(graph: &mut DesiredTopology) {
     graph
         .relationships
         .sort_by(|left, right| left.definition.cmp(&right.definition));
+    graph
+        .boundary_relationships
+        .sort_by(|left, right| left.definition.cmp(&right.definition));
     graph.control_connections.sort();
     graph.subscriptions.sort();
 }
 
-pub(super) fn normalize(mut desired: DesiredInstance) -> Result<DesiredInstance> {
-    anyhow::ensure!(desired.version == 1, "unsupported desired instance version");
+pub(super) fn normalize(desired: DesiredInstance) -> Result<DesiredInstance> {
+    normalize_for_store(desired, ConfigurationStoreGuarantees::DURABLE)
+}
+
+pub(super) fn normalize_for_store(
+    mut desired: DesiredInstance,
+    guarantees: ConfigurationStoreGuarantees,
+) -> Result<DesiredInstance> {
+    anyhow::ensure!(desired.version == 2, "unsupported desired instance version; use fresh UUID configuration and state, without migrating or deleting the old data");
     if let Some(authorization) = &desired.retirement {
         authorization.validate_removed(&desired.topology)?;
     }
@@ -1150,36 +1574,74 @@ pub(super) fn normalize(mut desired: DesiredInstance) -> Result<DesiredInstance>
             "definition does not belong to the instance ComputationGraph"
         );
         topology.validate_structure()?;
+        topology.resolve_required_relationships();
         anyhow::ensure!(
-            topology.boundary_relationships.is_empty(),
-            "managed components require complete boundary definitions"
-        );
-        anyhow::ensure!(
-            topology
-                .components
-                .iter()
-                .all(|node| matches!(node.construction, ComponentConstruction::Factory(_))),
+            !guarantees.requires_reconstructible_definitions
+                || topology
+                    .components
+                    .iter()
+                    .all(|node| matches!(node.construction, ComponentConstruction::Factory(_))),
             "managed components require reconstruction factories, not opaque object bindings"
         );
         anyhow::ensure!(
-            topology
-                .relationships
-                .iter()
-                .all(|edge| !matches!(edge.pipe, DesiredPipe::External { .. })),
+            !guarantees.requires_reconstructible_definitions
+                || topology
+                    .relationships
+                    .iter()
+                    .chain(&topology.boundary_relationships)
+                    .all(|edge| !matches!(edge.pipe, DesiredPipe::External { .. })),
             "managed pipes require reconstructible definitions"
         );
         anyhow::ensure!(
-            topology
-                .resources
-                .iter()
-                .all(|resource| topology.resource_configurations.contains_key(&resource.id)),
+            !guarantees.requires_reconstructible_definitions
+                || topology
+                    .resources
+                    .iter()
+                    .all(|resource| topology.resource_configurations.contains_key(&resource.id)),
             "managed resources require construction recipes"
         );
         canonical_graph(topology);
     }
+    super::ordinary::normalize(&mut desired)?;
+    anyhow::ensure!(
+        !guarantees.requires_reconstructible_definitions
+            || desired
+                .ordinary
+                .iter()
+                .all(|record| !matches!(record.component, OrdinaryComponent::ProcessLocal { .. })),
+        "process-local definitions are not reconstructible"
+    );
     Ok(desired)
 }
 
+fn check_instance_ownership(
+    control: &GraphControl,
+    previous: &DesiredTopology,
+    desired: &DesiredInstance,
+) -> Result<()> {
+    check_ownership(control, previous, &desired.topology)?;
+    let current = control.registry_snapshot();
+    let owned: BTreeSet<_> = previous
+        .components
+        .iter()
+        .map(|node| node.descriptor.id())
+        .collect();
+    for identity in super::ordinary::identities(desired) {
+        if current.desired.component(&identity.id).is_some() && !owned.contains(&identity.id) {
+            control.check_new_component(&identity.id, &identity.name, true)?;
+        }
+        if let Some(existing) = current.desired.component_by_name(&identity.name) {
+            if existing.descriptor.id() != &identity.id && !owned.contains(existing.descriptor.id())
+            {
+                return Err(GraphError::DuplicateComponentName {
+                    existing: Box::new(current.desired.conflict(existing, &current.observed)),
+                }
+                .into());
+            }
+        }
+    }
+    Ok(())
+}
 fn check_ownership(
     control: &GraphControl,
     previous: &DesiredTopology,
@@ -1228,11 +1690,18 @@ pub(crate) fn compose_definition(
         .components
         .iter()
         .filter(|node| {
-            desired
+            match desired
                 .components
                 .iter()
                 .find(|next| next.descriptor.id() == node.descriptor.id())
-                != Some(*node)
+            {
+                Some(next) => {
+                    let mut previous = (**node).clone();
+                    previous.name = next.name.clone();
+                    previous != *next
+                }
+                None => true,
+            }
         })
         .map(|node| node.descriptor.id().clone())
         .collect();
@@ -1269,12 +1738,19 @@ pub(crate) fn compose_definition(
     current
         .resource_dependencies
         .extend(desired.resource_dependencies.clone());
-    current
-        .relationships
-        .retain(|edge| !previous.relationships.contains(edge));
+    // A previously unbound owned edge may now be bound in the live graph.
+    for relationships in [&mut current.relationships, &mut current.boundary_relationships] {
+        relationships.retain(|edge| {
+            !previous.relationships.contains(edge)
+                && !previous.boundary_relationships.contains(edge)
+        });
+    }
     current
         .relationships
         .extend(desired.relationships.iter().cloned());
+    current
+        .boundary_relationships
+        .extend(desired.boundary_relationships.iter().cloned());
     current
         .control_connections
         .retain(|edge| !previous.control_connections.contains(edge));
@@ -1366,6 +1842,7 @@ pub(crate) fn compose_definition(
     current
         .resource_dependencies
         .retain(|id, _| !unused.contains(id));
+    current.resolve_required_relationships();
     current.validate_structure()?;
     Ok(current)
 }
@@ -1396,12 +1873,19 @@ mod recovery_tests {
         }
     }
 
-    fn definition(ids: &[&str]) -> DesiredTopology {
+    fn component(number: u128) -> ComponentId {
+        ComponentId::from_uuid(uuid::Uuid::from_u128(number))
+    }
+
+    fn definition(ids: &[(u128, &str)]) -> DesiredTopology {
         let mut builder = ComputationGraph::builder("managed-recovery");
-        for id in ids {
-            builder = builder.service(Box::new(Service(
-                ComponentDescriptor::try_new(ComponentId::try_new(*id).unwrap(), vec![]).unwrap(),
-            )));
+        for (number, name) in ids {
+            builder = builder.service(
+                ComponentName::try_new(*name).unwrap(),
+                Box::new(Service(
+                    ComponentDescriptor::try_new(component(*number), vec![]).unwrap(),
+                )),
+            );
         }
         builder
             .build()
@@ -1411,40 +1895,139 @@ mod recovery_tests {
             .unwrap()
     }
 
-    fn requirement(id: &str) -> RecoveryRequirement {
+    fn requirement(number: u128) -> RecoveryRequirement {
         RecoveryRequirement {
-            consumer: ComponentId::try_new(id).unwrap(),
+            consumer: component(number),
             scope: RecoveryScope::MemoryLifetime,
             guarantees: [RecoveryGuarantee::Acceptance].into(),
         }
     }
 
+    fn connected_definition(ids: &[(u128, &str)]) -> DesiredTopology {
+        let mut topology = definition(ids);
+        for node in &mut topology.components {
+            node.descriptor = ComponentDescriptor::try_new(
+                node.descriptor.id().clone(),
+                [("in", PortDirection::Input), ("out", PortDirection::Output)]
+                    .into_iter()
+                    .map(|(port, direction)| {
+                        PortDescriptor::new(
+                            PortId::try_new(port).unwrap(),
+                            direction,
+                            GraphChangeCodec::schema().descriptor().clone(),
+                            PipeRequirements::default(),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+            node.role = ComponentRole::Transformer;
+            node.streams.insert(
+                PortId::try_new("out").unwrap(),
+                StreamId::try_new(format!("{}/out", node.descriptor.id())).unwrap(),
+            );
+        }
+        topology
+    }
+
+    fn relationship(from: u128, to: u128) -> DesiredRelationship {
+        DesiredRelationship {
+            definition: EdgeDefinition::new(
+                Endpoint::new(component(from), PortId::try_new("out").unwrap()),
+                Endpoint::new(component(to), PortId::try_new("in").unwrap()),
+            ),
+            policy: RelationshipPolicy::default(),
+            pipe: DesiredPipe::Bounded { capacity: 8 },
+        }
+    }
+
+    #[test]
+    fn managed_composition_tracks_edge_ownership_across_binding() {
+        let owned = relationship(1, 2);
+        let unmanaged = relationship(3, 4);
+        let mut previous = connected_definition(&[(1, "producer"), (2, "consumer")]);
+        previous.boundary_relationships.push(owned.clone());
+        let mut current = connected_definition(&[
+            (1, "producer"),
+            (2, "consumer"),
+            (3, "manual-producer"),
+            (4, "manual-consumer"),
+        ]);
+        current.relationships = vec![owned, unmanaged.clone()];
+        let mut desired = previous.clone();
+        let repeated = compose_definition(current, &previous, &desired, &BTreeSet::new()).unwrap();
+        assert_eq!(repeated.relationships.len(), 2);
+        assert!(repeated.boundary_relationships.is_empty());
+        assert!(repeated.relationships.contains(&unmanaged));
+        assert!(repeated
+            .relationships
+            .contains(&desired.boundary_relationships[0]));
+
+        desired.boundary_relationships[0].pipe = DesiredPipe::Bounded { capacity: 16 };
+        let updated = compose_definition(repeated, &previous, &desired, &BTreeSet::new()).unwrap();
+        assert_eq!(updated.relationships.len(), 2);
+        assert!(updated.boundary_relationships.is_empty());
+        assert!(updated.relationships.contains(&unmanaged));
+        assert!(updated
+            .relationships
+            .contains(&desired.boundary_relationships[0]));
+
+        previous = desired.clone();
+        desired.boundary_relationships.clear();
+        let removed = compose_definition(updated, &previous, &desired, &BTreeSet::new()).unwrap();
+        assert_eq!(removed.relationships, vec![unmanaged]);
+        assert!(removed.boundary_relationships.is_empty());
+    }
+
+    #[test]
+    fn managed_composition_retains_pending_edges_and_unmanaged_optional_boundaries() {
+        let owned = relationship(1, 2);
+        let mut unmanaged = relationship(3, 4);
+        unmanaged.policy.required_for_binding = false;
+        unmanaged.policy.orphan_permitted = true;
+        let mut current = connected_definition(&[(3, "manual-producer")]);
+        current.boundary_relationships.push(unmanaged.clone());
+        let previous = definition(&[]);
+        let mut desired = connected_definition(&[(1, "producer")]);
+        desired.relationships.push(owned.clone());
+        let pending = compose_definition(current, &previous, &desired, &BTreeSet::new()).unwrap();
+        assert!(pending.relationships.is_empty());
+        assert_eq!(
+            pending.boundary_relationships,
+            vec![unmanaged.clone(), owned.clone()]
+        );
+
+        let previous = desired.clone();
+        desired
+            .components
+            .extend(connected_definition(&[(2, "consumer")]).components);
+        let bound = compose_definition(pending, &previous, &desired, &BTreeSet::new()).unwrap();
+        assert_eq!(bound.relationships, vec![owned]);
+        assert_eq!(bound.boundary_relationships, vec![unmanaged]);
+    }
+
     #[test]
     fn managed_composition_preserves_unmanaged_assertions_and_applies_managed_assertions() {
-        let mut previous = definition(&["managed"]);
-        previous.recovery_requirements.push(requirement("managed"));
-        let mut current = definition(&["managed", "manual"]);
-        current.recovery_requirements = vec![requirement("managed"), requirement("manual")];
+        let mut previous = definition(&[(1, "managed")]);
+        previous.recovery_requirements.push(requirement(1));
+        let mut current = definition(&[(1, "managed"), (2, "manual")]);
+        current.recovery_requirements = vec![requirement(1), requirement(2)];
         let mut desired = previous.clone();
         desired.recovery_requirements[0]
             .guarantees
             .insert(RecoveryGuarantee::Replay);
         let composed = compose_definition(current, &previous, &desired, &BTreeSet::new()).unwrap();
         assert_eq!(composed.recovery_requirements.len(), 2);
-        assert!(composed
-            .recovery_requirements
-            .contains(&requirement("manual")));
+        assert!(composed.recovery_requirements.contains(&requirement(2)));
         assert!(composed
             .recovery_requirements
             .contains(&desired.recovery_requirements[0]));
-        assert!(!composed
-            .recovery_requirements
-            .contains(&requirement("managed")));
+        assert!(!composed.recovery_requirements.contains(&requirement(1)));
     }
 
     #[tokio::test]
     async fn detached_dependent_resources_leave_no_dangling_recipes_or_dependencies() {
-        let previous = definition(&["managed"]);
+        let previous = definition(&[(1, "managed")]);
         let mut current = previous.clone();
         let parent = ResourceId::try_new("parent").unwrap();
         let child = ResourceId::try_new("attached/child").unwrap();
@@ -1463,10 +2046,9 @@ mod recovery_tests {
             child.clone(),
             BTreeMap::from([(parent.clone(), ResourceRole::StateStore)]),
         );
-        current.component_resources.insert(
-            ComponentId::try_new("managed").unwrap(),
-            BTreeSet::from([child.clone()]),
-        );
+        current
+            .component_resources
+            .insert(component(1), BTreeSet::from([child.clone()]));
         current.validate_structure().unwrap();
         let mut target = previous.clone();
         target.components.clear();

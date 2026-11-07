@@ -111,6 +111,15 @@ impl Runtime {
                 .ok_or_else(|| anyhow::anyhow!("graph component {id} has no observation"))?;
             let mut metadata = record.metadata.clone();
             metadata.insert(
+                "name".into(),
+                publication
+                    .desired
+                    .component(&record.node)
+                    .ok_or(GraphError::StaleGeneration)?
+                    .name
+                    .to_string(),
+            );
+            metadata.insert(
                 "autoStart".into(),
                 publication.desired.lifecycle_policies[&record.node]
                     .auto_start
@@ -156,6 +165,7 @@ impl Runtime {
                     .auto_start
                     .to_string(),
             )]);
+            metadata.insert("name".into(), node.name.to_string());
             if kind == "query" {
                 metadata.insert(
                     "query".into(),

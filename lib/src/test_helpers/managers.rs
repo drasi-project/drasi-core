@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::test_helpers::creation::{CoreFixtures, ReactionFixture, SourceFixture};
 use crate::{
     config::{DrasiLibConfig, RuntimeConfig},
     DrasiLib, Source,
@@ -87,8 +88,11 @@ impl SourceManager {
         }
     }
 
-    pub(crate) async fn add(&self, source: impl Source + 'static) -> anyhow::Result<()> {
-        Ok(self.0.add_source(source).await?)
+    pub(crate) async fn add<S: Source + 'static>(
+        &self,
+        source: SourceFixture<S>,
+    ) -> anyhow::Result<()> {
+        Ok(self.0.add_source_fixture(source).await?)
     }
     pub(crate) async fn delete(&self, id: &str, cleanup: bool) -> anyhow::Result<()> {
         Ok(self.0.remove_source(id, cleanup).await?)
@@ -102,9 +106,9 @@ impl SourceManager {
     pub(crate) async fn update_source(
         &self,
         id: String,
-        source: impl Source + 'static,
+        definition: crate::management::OrdinaryComponentRecord,
     ) -> anyhow::Result<()> {
-        Ok(self.0.update_source(&id, source).await?)
+        Ok(self.0.update_source(&id, definition).await?)
     }
     pub(crate) async fn start_all(&self) -> anyhow::Result<()> {
         self.0.computation_runtime.start_kind("source").await
@@ -127,11 +131,11 @@ impl Deref for ReactionManager {
     }
 }
 impl ReactionManager {
-    pub(crate) async fn add(&self, reaction: impl crate::Reaction + 'static) -> anyhow::Result<()> {
-        self.0
-            .computation_runtime
-            .declare_reaction(Box::new(reaction))
-            .await
+    pub(crate) async fn add(
+        &self,
+        reaction: ReactionFixture<impl crate::Reaction + 'static>,
+    ) -> anyhow::Result<()> {
+        Ok(self.0.add_reaction_fixture(reaction).await?)
     }
     pub(crate) async fn delete(&self, id: &str, cleanup: bool) -> anyhow::Result<()> {
         Ok(self.0.remove_reaction(id, cleanup).await?)
@@ -142,9 +146,9 @@ impl ReactionManager {
     pub(crate) async fn update_reaction(
         &self,
         id: String,
-        reaction: impl crate::Reaction + 'static,
+        definition: crate::management::OrdinaryComponentRecord,
     ) -> anyhow::Result<()> {
-        Ok(self.0.update_reaction(&id, reaction).await?)
+        Ok(self.0.update_reaction(&id, definition).await?)
     }
     pub(crate) async fn start_all(&self) -> anyhow::Result<()> {
         self.0.computation_runtime.start_kind("reaction").await

@@ -423,7 +423,7 @@ async fn query_deprovision_cannot_silently_resume_after_sqlite_history_retiremen
     producer.stop().await?;
     assert_eq!(journal_state(directory.path())?, (1, 1, 0));
     consumer.stop().await?;
-    consumer.deprovision().await?;
+    consumer.delete_owned_resources().await?;
     drop(consumer);
     drop(producer);
 

@@ -95,7 +95,7 @@ impl Source for Input {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-    async fn initialize(&self, context: SourceRuntimeContext) {
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
         self.status.wire(context.update_tx).await;
     }
     async fn start(&self) -> Result<()> {

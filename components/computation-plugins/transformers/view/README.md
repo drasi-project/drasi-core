@@ -149,12 +149,12 @@ Stopping and restarting the **same component object** preserves its state and
 epoch, without re-running mappings. Reconstruction creates an empty view and a
 fresh volatile epoch; rebuild it from full inputs. Snapshot reads before start
 or while stopped return `NotReady`; readers of a removed/dropped instance return
-`Retired`. Explicit deprovision after stop (or before first start) clears retained
+`Retired`. Explicit `delete_owned_resources` after stop (or before first start) clears retained
 inputs and outputs and permanently fences the instance. It is idempotent and owns no
 background work or external resources.
 
 The advertised capabilities are output snapshots, an originating output
-progress boundary and explicit deprovision. There is **no durable storage,
+progress boundary and explicit owned-resource deletion. There is **no durable storage,
 replay, snapshot-follow, transaction participation, input deduplication,
 scheduled processing, durable bootstrap, or atomic state/output/delivery
 recovery**. In-memory staging is not a storage transaction or a delivery

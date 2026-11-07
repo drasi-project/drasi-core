@@ -24,14 +24,15 @@
 //!
 //! # Plugin Architecture
 //!
-//! **Important**: drasi-lib has ZERO awareness of which plugins exist. Sources and
-//! reactions are created externally as fully-configured instances implementing
-//! `Source` and `Reaction` traits, then passed to DrasiLibBuilder via
-//! `with_source()` and `with_reaction()`.
+//! Supply source and reaction constructors through `with_source_factory()` and
+//! `with_reaction_factory()`. DrasiLib assigns each component's UUID and verifies
+//! that the constructor used it. Names are separate graph-owned metadata.
+//! Preconstructed objects require `with_allow_external_component_ids(true)`;
+//! that immutable policy also applies to direct graph operations and batches.
 //!
 //! # Examples
 //!
-//! ## Basic Usage with Pre-built Instances
+//! ## Basic Query Declaration
 //!
 //! ```no_run
 //! use drasi_lib::{DrasiLib, Query};
@@ -50,7 +51,7 @@
 //!         Query::cypher("my-query")
 //!             .query("MATCH (n:Person) RETURN n")
 //!             .from_input("events")
-//!             .build()
+//!             .build()?
 //!     )
 //!     .build()
 //!     .await?;
@@ -90,9 +91,10 @@ use drasi_core::models::SourceMiddlewareConfig;
 ///
 /// # Plugin Architecture
 ///
-/// **Important**: drasi-lib has ZERO awareness of which plugins exist. Sources and
-/// reactions are created externally as fully-configured instances implementing
-/// `Source` and `Reaction` traits, then passed via `with_source()` and `with_reaction()`.
+/// Default creation uses constructors that receive a library-assigned UUID.
+/// Preconstructed sources/reactions require explicit external-ID opt-in and a
+/// separate name. No constructor, configuration record or runtime call can
+/// change that creation-time policy.
 ///
 /// # Example
 ///
@@ -113,7 +115,7 @@ use drasi_core::models::SourceMiddlewareConfig;
 ///         Query::cypher("my-query")
 ///             .query("MATCH (n) RETURN n")
 ///             .from_input("my-source")
-///             .build()
+///             .build()?
 ///     )
 ///     .build()
 ///     .await?;
@@ -122,6 +124,7 @@ use drasi_core::models::SourceMiddlewareConfig;
 /// ```
 pub struct DrasiLibBuilder {
     management: Option<crate::management::ManagementOptions>,
+    allow_external_component_ids: bool,
     server_id: Option<String>,
     priority_queue_capacity: Option<usize>,
     dispatch_buffer_capacity: Option<usize>,
@@ -137,15 +140,19 @@ pub struct DrasiLibBuilder {
     #[cfg(feature = "test-support")]
     query_test_controls: Vec<(String, crate::test_support::QueryTestControl)>,
     source_instances: Vec<(
+        String,
         Box<dyn SourceTrait>,
         std::collections::HashMap<String, String>,
     )>,
     reaction_instances: Vec<(
+        String,
         Box<dyn ReactionTrait>,
         std::collections::HashMap<String, String>,
     )>,
+    reaction_factories: Vec<crate::computation::runtime::NamedReactionRegistration>,
+    async_sources: Vec<crate::computation::runtime::AsyncSourceRegistration>,
     /// Bootstrap provider metadata to register in the component graph.
-    /// Each entry: (source_id, kind, properties).
+    /// Each entry: (source_name, kind, properties).
     bootstrap_metadata: Vec<(
         String,
         String,
@@ -159,6 +166,7 @@ pub struct DrasiLibBuilder {
     default_recovery_policy: Option<crate::recovery::RecoveryPolicy>,
     default_index_backend: Option<crate::indexes::StorageBackendRef>,
     component_batches: Vec<crate::computation::v1::ComponentBatch>,
+    component_batch_factories: Vec<crate::computation::components::ComponentBatchDeclaration>,
 }
 
 impl Default for DrasiLibBuilder {
@@ -168,6 +176,13 @@ impl Default for DrasiLibBuilder {
 }
 
 impl DrasiLibBuilder {
+    /// Permit externally assigned component UUIDs and preconstructed objects.
+    /// The default is false and the policy cannot change after `build`.
+    pub fn with_allow_external_component_ids(mut self, allow: bool) -> Self {
+        self.allow_external_component_ids = allow;
+        self
+    }
+
     /// Select the implementation used by ordinary query creation and replacement.
     /// The factory must support query authoring; execution failures never fall
     /// back to another implementation.
@@ -212,9 +227,38 @@ impl DrasiLibBuilder {
         self
     }
 
+    /// Resolve ordinary source/reaction recipes loaded or accepted by the same
+    /// managed configuration owner. Queries still require an explicit query factory.
+    pub fn with_ordinary_component_resolver(
+        mut self,
+        resolver: Arc<dyn crate::management::OrdinaryComponentResolver>,
+    ) -> Self {
+        self.management
+            .get_or_insert_with(Default::default)
+            .ordinary = resolver;
+        self
+    }
+
     /// Add components and their connections to the instance graph.
     pub fn with_components(mut self, components: crate::computation::v1::ComponentBatch) -> Self {
         self.component_batches.push(components);
+        self
+    }
+
+    /// Declare native components with library-owned UUIDs in the same initial
+    /// acceptance batch as ordinary declarations. The callback supplies metadata
+    /// and deferred factories, not already constructed component objects.
+    /// Persistent instances instead accept definitions after restoration.
+    pub fn with_component_batch_factory(
+        mut self,
+        declare: impl FnOnce(
+                &mut crate::computation::v1::ComponentIds,
+            )
+                -> crate::computation::v1::GraphResult<crate::computation::v1::ComponentBatch>
+            + Send
+            + 'static,
+    ) -> Self {
+        self.component_batch_factories.push(Box::new(declare));
         self
     }
 
@@ -222,6 +266,7 @@ impl DrasiLibBuilder {
     pub fn new() -> Self {
         Self {
             management: None,
+            allow_external_component_ids: false,
             server_id: None,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
@@ -238,6 +283,8 @@ impl DrasiLibBuilder {
             query_test_controls: Vec::new(),
             source_instances: Vec::new(),
             reaction_instances: Vec::new(),
+            reaction_factories: Vec::new(),
+            async_sources: Vec::new(),
             bootstrap_metadata: Vec::new(),
             index_providers: HashMap::new(),
             state_store_provider: None,
@@ -247,6 +294,7 @@ impl DrasiLibBuilder {
             default_recovery_policy: None,
             default_index_backend: None,
             component_batches: Vec::new(),
+            component_batch_factories: Vec::new(),
         }
     }
 
@@ -515,6 +563,8 @@ impl DrasiLibBuilder {
 
     /// Add a source instance, taking ownership.
     ///
+    /// Requires `with_allow_external_component_ids(true)`. The name is independent
+    /// of the source's UUID. Prefer `with_source_factory` in the default mode.
     /// Source instances are created externally by plugins with their own typed configurations.
     /// drasi-lib only knows about the `Source` trait - it has no knowledge of which plugins exist.
     ///
@@ -524,15 +574,68 @@ impl DrasiLibBuilder {
     ///
     /// async fn build_with_source(source: impl Source + 'static) -> anyhow::Result<DrasiLib> {
     /// let core = DrasiLib::builder()
-    ///     .with_source(source)  // Ownership transferred
+    ///     .with_allow_external_component_ids(true)
+    ///     .with_source("orders", source)
     ///     .build()
     ///     .await?;
     /// Ok(core)
     /// }
     /// ```
-    pub fn with_source(mut self, source: impl SourceTrait + 'static) -> Self {
-        self.source_instances
-            .push((Box::new(source), std::collections::HashMap::new()));
+    pub fn with_source(
+        mut self,
+        name: impl Into<String>,
+        source: impl SourceTrait + 'static,
+    ) -> Self {
+        self.source_instances.push((
+            name.into(),
+            Box::new(source),
+            std::collections::HashMap::new(),
+        ));
+        self
+    }
+
+    /// Create a source with a UUID allocated by this DrasiLib.
+    /// The constructor must return a source exposing exactly the supplied UUID.
+    pub fn with_source_factory<S: SourceTrait + 'static>(
+        self,
+        name: impl Into<String>,
+        auto_start: bool,
+        factory: impl FnOnce(crate::config::ComponentId) -> anyhow::Result<S> + Send + 'static,
+    ) -> Self {
+        self.with_source_factory_async(name, None, auto_start, move |id| async move {
+            Ok((factory(id)?, HashMap::new()))
+        })
+    }
+
+    /// Declare an asynchronous source constructor owned by the graph. Explicit
+    /// UUIDs require instance opt-in. The returned object's ID is validated and
+    /// metadata retained; await the component handle for construction readiness.
+    /// Opaque closures cannot be used as persistent reconstruction recipes.
+    pub fn with_source_factory_async<S, F, Fut>(
+        mut self,
+        name: impl Into<String>,
+        requested_id: Option<crate::config::ComponentId>,
+        auto_start: bool,
+        factory: F,
+    ) -> Self
+    where
+        S: SourceTrait + 'static,
+        F: FnOnce(crate::config::ComponentId) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = anyhow::Result<(S, HashMap<String, String>)>>
+            + Send
+            + 'static,
+    {
+        self.async_sources.push((
+            name.into(),
+            requested_id,
+            auto_start,
+            Box::new(move |id| {
+                Box::pin(async move {
+                    let (source, metadata) = factory(id).await?;
+                    Ok((Box::new(source) as Box<dyn SourceTrait>, metadata))
+                })
+            }),
+        ));
         self
     }
 
@@ -542,11 +645,12 @@ impl DrasiLibBuilder {
     /// (e.g. `pluginId`) into the component graph node.
     pub fn with_source_metadata(
         mut self,
+        name: impl Into<String>,
         source: impl SourceTrait + 'static,
         extra_metadata: std::collections::HashMap<String, String>,
     ) -> Self {
         self.source_instances
-            .push((Box::new(source), extra_metadata));
+            .push((name.into(), Box::new(source), extra_metadata));
         self
     }
 
@@ -563,7 +667,7 @@ impl DrasiLibBuilder {
     /// `snapshot_configuration()` output.
     ///
     /// # Arguments
-    /// * `source_id` - The ID of the source this bootstrap provider is attached to
+    /// * `source_name` - The builder declaration's name; the recipe is attached to its assigned UUID
     /// * `kind` - Bootstrap provider kind (e.g., "http", "postgres", "scriptfile")
     /// * `properties` - Configuration properties for persistence (raw config with
     ///   ConfigValue envelopes intact for lossless roundtripping)
@@ -575,24 +679,27 @@ impl DrasiLibBuilder {
     ///
     /// fn configure(my_source: impl Source + 'static, config_properties: HashMap<String, serde_json::Value>) -> DrasiLibBuilder {
     /// let builder = DrasiLib::builder()
-    ///     .with_source(my_source)
+    ///     .with_allow_external_component_ids(true)
+    ///     .with_source("my-source", my_source)
     ///     .with_bootstrap_for_source("my-source", "http", config_properties);
     /// builder
     /// }
     /// ```
     pub fn with_bootstrap_for_source(
         mut self,
-        source_id: impl Into<String>,
+        source_name: impl Into<String>,
         kind: impl Into<String>,
         properties: std::collections::HashMap<String, serde_json::Value>,
     ) -> Self {
         self.bootstrap_metadata
-            .push((source_id.into(), kind.into(), properties));
+            .push((source_name.into(), kind.into(), properties));
         self
     }
 
     /// Add a reaction instance, taking ownership.
     ///
+    /// Requires `with_allow_external_component_ids(true)`. Prefer
+    /// `with_reaction_factory` in the default mode.
     /// Reaction instances are created externally by plugins with their own typed configurations.
     /// drasi-lib only knows about the `Reaction` trait - it has no knowledge of which plugins exist.
     ///
@@ -602,15 +709,94 @@ impl DrasiLibBuilder {
     ///
     /// async fn build_with_reaction(reaction: impl Reaction + 'static) -> anyhow::Result<DrasiLib> {
     /// let core = DrasiLib::builder()
-    ///     .with_reaction(reaction)  // Ownership transferred
+    ///     .with_allow_external_component_ids(true)
+    ///     .with_reaction("notifications", reaction)
     ///     .build()
     ///     .await?;
     /// Ok(core)
     /// }
     /// ```
-    pub fn with_reaction(mut self, reaction: impl ReactionTrait + 'static) -> Self {
-        self.reaction_instances
-            .push((Box::new(reaction), std::collections::HashMap::new()));
+    pub fn with_reaction(
+        mut self,
+        name: impl Into<String>,
+        reaction: impl ReactionTrait + 'static,
+    ) -> Self {
+        self.reaction_instances.push((
+            name.into(),
+            Box::new(reaction),
+            std::collections::HashMap::new(),
+        ));
+        self
+    }
+
+    /// Create a reaction with a UUID allocated by this DrasiLib.
+    pub fn with_reaction_factory<R: ReactionTrait + 'static>(
+        self,
+        name: impl Into<String>,
+        inputs: Vec<crate::config::ComponentReference>,
+        auto_start: bool,
+        factory: impl FnOnce(crate::config::ComponentId, Vec<crate::config::ComponentId>) -> anyhow::Result<R>
+            + Send
+            + 'static,
+    ) -> Self {
+        self.with_reaction_inputs_factory(name, inputs, auto_start, factory)
+    }
+
+    /// Create a reaction after the graph resolves its named query dependencies.
+    /// The callback receives the reaction UUID and its immutable input UUIDs.
+    pub fn with_reaction_inputs_factory<R: ReactionTrait + 'static>(
+        mut self,
+        name: impl Into<String>,
+        inputs: Vec<crate::config::ComponentReference>,
+        auto_start: bool,
+        factory: impl FnOnce(crate::config::ComponentId, Vec<crate::config::ComponentId>) -> anyhow::Result<R>
+            + Send
+            + 'static,
+    ) -> Self {
+        self.reaction_factories.push((
+            name.into(),
+            None,
+            inputs,
+            auto_start,
+            crate::computation::runtime::ReactionConstructor::Sync(Box::new(move |id, inputs| {
+                Ok(Box::new(factory(id, inputs)?) as Box<dyn ReactionTrait>)
+            })),
+        ));
+        self
+    }
+
+    /// Declare an asynchronous reaction constructor. The graph binds each input
+    /// reference once before supplying UUIDs to the callback. Construction and
+    /// cancellation remain graph-owned, including after the builder returns.
+    pub fn with_reaction_inputs_factory_async<R, F, Fut>(
+        mut self,
+        name: impl Into<String>,
+        requested_id: Option<crate::config::ComponentId>,
+        inputs: Vec<crate::config::ComponentReference>,
+        auto_start: bool,
+        factory: F,
+    ) -> Self
+    where
+        R: ReactionTrait + 'static,
+        F: FnOnce(crate::config::ComponentId, Vec<crate::config::ComponentId>) -> Fut
+            + Send
+            + 'static,
+        Fut: std::future::Future<Output = anyhow::Result<(R, HashMap<String, String>)>>
+            + Send
+            + 'static,
+    {
+        self.reaction_factories.push((
+            name.into(),
+            requested_id,
+            inputs,
+            auto_start,
+            crate::computation::runtime::ReactionConstructor::Async(Box::new(move |id, inputs| {
+                Box::pin(async move {
+                    let (reaction, metadata) = factory(id, inputs).await?;
+                    Ok((Box::new(reaction) as Box<dyn ReactionTrait>, metadata))
+                })
+            })),
+        ));
         self
     }
 
@@ -620,11 +806,12 @@ impl DrasiLibBuilder {
     /// (e.g. `pluginId`) into the component graph node.
     pub fn with_reaction_metadata(
         mut self,
+        name: impl Into<String>,
         reaction: impl ReactionTrait + 'static,
         extra_metadata: std::collections::HashMap<String, String>,
     ) -> Self {
         self.reaction_instances
-            .push((Box::new(reaction), extra_metadata));
+            .push((name.into(), Box::new(reaction), extra_metadata));
         self
     }
 
@@ -648,53 +835,36 @@ impl DrasiLibBuilder {
     /// After building, you can call `start()` to begin processing.
     pub async fn build(self) -> Result<DrasiLib> {
         let mut builder = self;
-        let management = builder.management.take();
+        let management = builder.management.take().unwrap_or_default();
         if management
+            .store
             .as_ref()
-            .is_some_and(|options| options.store.is_some())
+            .is_some_and(|store| store.guarantees().requires_reconstructible_definitions)
             && (!builder.source_instances.is_empty()
+                || !builder.async_sources.is_empty()
                 || !builder.reaction_instances.is_empty()
+                || !builder.reaction_factories.is_empty()
                 || !builder.query_configs.is_empty()
-                || !builder.component_batches.is_empty())
+                || !builder.component_batches.is_empty()
+                || !builder.component_batch_factories.is_empty())
         {
             return Err(DrasiError::invalid_config(
                 "persistent instances restore authoritative definitions; add reconstructible components through apply_desired_state instead of preconstructed builder objects",
             ));
         }
         let batches = std::mem::take(&mut builder.component_batches);
-        let core =
-            crate::computation::instance::build_instance(builder.build_inner(), batches).await?;
-        if let Some(options) = management {
-            let persistent = options.store.is_some();
-            let opened = crate::management::Management::open(
-                core.config.id.clone(),
-                core.instance_graph.clone(),
-                core.running.clone(),
-                core.is_shutdown.clone(),
-                options,
-            )
-            .await;
-            let opened = match opened {
-                Ok(opened) => opened,
-                Err(error) => {
-                    return Err(crate::computation::instance::cleanup_failed_instance(
-                        core,
-                        error.into(),
-                    )
-                    .await)
-                }
-            };
-            core.management
-                .set(opened)
-                .map_err(|_| DrasiError::invalid_state("management already initialized"))?;
-            if persistent {
-                core.computation_control()?.protect_configuration();
-            }
-        }
-        Ok(core)
+        crate::computation::instance::build_instance(
+            move |batches| Box::pin(builder.build_inner(management, batches)),
+            batches,
+        )
+        .await
     }
 
-    async fn build_inner(self) -> Result<DrasiLib> {
+    async fn build_inner(
+        self,
+        management: crate::management::ManagementOptions,
+        batches: Vec<Arc<crate::computation::instance::PendingComponents>>,
+    ) -> Result<DrasiLib> {
         if !self.query_configs.is_empty() && self.query_factory.is_none() {
             let cause = crate::computation::v1::QueryFactoryNotRegistered;
             return Err(DrasiError::invalid_config(cause.to_string()).with_cause(cause));
@@ -703,7 +873,7 @@ impl DrasiLibBuilder {
         let test_controls = {
             let mut controls = std::collections::BTreeMap::new();
             for (id, control) in self.query_test_controls {
-                if !self.query_configs.iter().any(|query| query.id == id) {
+                if !self.query_configs.iter().any(|query| query.name == id) {
                     return Err(DrasiError::invalid_config(format!(
                         "test control references unknown builder query '{id}'"
                     )));
@@ -722,6 +892,7 @@ impl DrasiLibBuilder {
         // Build the configuration
         let config = DrasiLibConfig {
             id: self.server_id.unwrap_or_else(|| "drasi-lib".to_string()),
+            allow_external_component_ids: self.allow_external_component_ids,
             priority_queue_capacity: self.priority_queue_capacity,
             dispatch_buffer_capacity: self.dispatch_buffer_capacity,
             activation_timeout_secs: self.activation_timeout_secs,
@@ -797,11 +968,18 @@ impl DrasiLibBuilder {
         ));
         crate::computation::runtime::build(
             runtime_config,
-            self.source_instances,
-            self.reaction_instances,
-            self.bootstrap_metadata,
+            crate::computation::runtime::OrdinaryDeclarations {
+                sources: self.source_instances,
+                async_sources: self.async_sources,
+                reactions: self.reaction_instances,
+                reaction_factories: self.reaction_factories,
+                bootstraps: self.bootstrap_metadata,
+                native: batches,
+                native_factories: self.component_batch_factories,
+            },
             self.wal_provider,
             self.query_factory,
+            management,
             #[cfg(feature = "test-support")]
             test_controls,
         )
@@ -826,13 +1004,15 @@ impl DrasiLibBuilder {
 ///     .query("MATCH (n:Person) RETURN n.name, n.age")
 ///     .from_input("my-source")
 ///     .auto_start(true)
-///     .build();
+///     .build()?;
+/// # Ok::<(), anyhow::Error>(())
 /// ```
 pub struct Query {
-    id: String,
+    id: Option<crate::config::ComponentId>,
+    name: String,
     query: String,
     query_language: QueryLanguage,
-    inputs: Vec<QueryInputConfig>,
+    inputs: Vec<anyhow::Result<QueryInputConfig>>,
     result: QueryResultConfig,
     middleware: Vec<SourceMiddlewareConfig>,
     auto_start: bool,
@@ -849,9 +1029,10 @@ pub struct Query {
 
 impl Query {
     /// Create a new Cypher query builder.
-    pub fn cypher(id: impl Into<String>) -> Self {
+    pub fn cypher(name: impl Into<String>) -> Self {
         Self {
-            id: id.into(),
+            id: None,
+            name: name.into(),
             query: String::new(),
             query_language: QueryLanguage::Cypher,
             inputs: Vec::new(),
@@ -871,9 +1052,10 @@ impl Query {
     }
 
     /// Create a new GQL (ISO/IEC 39075:2024) query builder.
-    pub fn gql(id: impl Into<String>) -> Self {
+    pub fn gql(name: impl Into<String>) -> Self {
         Self {
-            id: id.into(),
+            id: None,
+            name: name.into(),
             query: String::new(),
             query_language: QueryLanguage::GQL,
             inputs: Vec::new(),
@@ -892,6 +1074,12 @@ impl Query {
         }
     }
 
+    /// Choose an external identity. Admission requires instance opt-in.
+    pub fn with_id(mut self, id: crate::config::ComponentId) -> Self {
+        self.id = Some(id);
+        self
+    }
+
     /// Set the query string.
     pub fn query(mut self, query: impl Into<String>) -> Self {
         self.query = query.into();
@@ -906,7 +1094,8 @@ impl Query {
     /// intermediate join results; it is not arrival ordering. The queue does not
     /// wait for other inputs or reorder events already processed.
     pub fn from_input(mut self, component: impl Into<String>) -> Self {
-        self.inputs.push(QueryInputConfig::new(component));
+        self.inputs
+            .push(QueryInputConfig::by_name(component.into()));
         self
     }
 
@@ -917,7 +1106,7 @@ impl Query {
         port: impl Into<String>,
     ) -> Self {
         self.inputs
-            .push(QueryInputConfig::new(component).with_port(port));
+            .push(QueryInputConfig::by_name(component.into()).map(|input| input.with_port(port)));
         self
     }
 
@@ -931,14 +1120,15 @@ impl Query {
         component: impl Into<String>,
         pipeline: Vec<String>,
     ) -> Self {
-        self.inputs
-            .push(QueryInputConfig::new(component).with_pipeline(pipeline));
+        self.inputs.push(
+            QueryInputConfig::by_name(component.into()).map(|input| input.with_pipeline(pipeline)),
+        );
         self
     }
 
     /// Consume a fully specified input binding.
     pub fn with_input(mut self, input: QueryInputConfig) -> Self {
-        self.inputs.push(input);
+        self.inputs.push(Ok(input));
         self
     }
 
@@ -1020,12 +1210,13 @@ impl Query {
     }
 
     /// Build the query configuration.
-    pub fn build(self) -> QueryConfig {
-        QueryConfig {
+    pub fn build(self) -> anyhow::Result<QueryConfig> {
+        Ok(QueryConfig {
             id: self.id,
+            name: self.name,
             query: self.query,
             query_language: self.query_language,
-            inputs: self.inputs,
+            inputs: self.inputs.into_iter().collect::<anyhow::Result<_>>()?,
             result: self.result,
             middleware: self.middleware,
             auto_start: self.auto_start,
@@ -1038,7 +1229,7 @@ impl Query {
             recovery_policy: self.recovery_policy,
             outbox_capacity: self.outbox_capacity,
             bootstrap_timeout_secs: self.bootstrap_timeout_secs,
-        }
+        })
     }
 }
 
@@ -1061,14 +1252,19 @@ mod tests {
             .query("MATCH (n) RETURN n")
             .from_input("source1")
             .auto_start(false)
-            .build();
+            .build()
+            .unwrap();
 
-        assert_eq!(config.id, "test-query");
+        assert!(config.id.is_none());
+        assert_eq!(config.name, "test-query");
         assert_eq!(config.query, "MATCH (n) RETURN n");
         assert_eq!(config.query_language, QueryLanguage::Cypher);
         assert!(!config.auto_start);
         assert_eq!(config.inputs.len(), 1);
-        assert_eq!(config.inputs[0].component, "source1");
+        assert_eq!(
+            config.inputs[0].component.as_name().unwrap().as_str(),
+            "source1"
+        );
     }
 
     #[test]
@@ -1076,7 +1272,8 @@ mod tests {
         let config = Query::gql("test-query")
             .query("MATCH (n:Person) RETURN n.name")
             .from_input("source1")
-            .build();
+            .build()
+            .unwrap();
 
         assert_eq!(config.query_language, QueryLanguage::GQL);
     }
@@ -1087,7 +1284,8 @@ mod tests {
             .query("MATCH (n) RETURN n")
             .from_input("source1")
             .from_input("source2")
-            .build();
+            .build()
+            .unwrap();
 
         assert_eq!(config.inputs.len(), 2);
     }
@@ -1160,7 +1358,7 @@ mod tests {
                     .query("MATCH (n) RETURN n")
                     // No from_input() call - query has no source subscriptions
                     .auto_start(false)
-                    .build(),
+                    .build().unwrap(),
             )
             .build()
             .await
@@ -1206,7 +1404,6 @@ mod tests {
         // In the instance-based approach, sources and reactions are added as instances
         // after the builder creates the core. Here we just test query config addition.
         // Source must be registered before a query can reference it
-        let source = crate::sources::tests::TestMockSource::new("source1".to_string()).unwrap();
         let core = DrasiLib::builder()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -1221,12 +1418,15 @@ mod tests {
                     .clone(),
             )
             .with_id("complex-server")
-            .with_source(source)
+            .with_source_factory("source1", true, |id| {
+                crate::sources::tests::TestMockSource::new(id.to_string())
+            })
             .with_query(
                 Query::cypher("query1")
                     .query("MATCH (n) RETURN n")
                     .from_input("source1")
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .await;
@@ -1319,7 +1519,10 @@ mod tests {
 
     #[test]
     fn test_builder_with_query_adds_to_list() {
-        let q = Query::cypher("q1").query("MATCH (n) RETURN n").build();
+        let q = Query::cypher("q1")
+            .query("MATCH (n) RETURN n")
+            .build()
+            .unwrap();
         let builder = DrasiLibBuilder::new()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -1335,13 +1538,20 @@ mod tests {
             )
             .with_query(q);
         assert_eq!(builder.query_configs.len(), 1);
-        assert_eq!(builder.query_configs[0].id, "q1");
+        assert!(builder.query_configs[0].id.is_none());
+        assert_eq!(builder.query_configs[0].name, "q1");
     }
 
     #[test]
     fn test_builder_with_multiple_queries() {
-        let q1 = Query::cypher("q1").query("MATCH (a) RETURN a").build();
-        let q2 = Query::gql("q2").query("MATCH (b) RETURN b").build();
+        let q1 = Query::cypher("q1")
+            .query("MATCH (a) RETURN a")
+            .build()
+            .unwrap();
+        let q2 = Query::gql("q2")
+            .query("MATCH (b) RETURN b")
+            .build()
+            .unwrap();
         let builder = DrasiLibBuilder::new()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -1358,8 +1568,9 @@ mod tests {
             .with_query(q1)
             .with_query(q2);
         assert_eq!(builder.query_configs.len(), 2);
-        assert_eq!(builder.query_configs[0].id, "q1");
-        assert_eq!(builder.query_configs[1].id, "q2");
+        assert!(builder.query_configs.iter().all(|query| query.id.is_none()));
+        assert_eq!(builder.query_configs[0].name, "q1");
+        assert_eq!(builder.query_configs[1].name, "q2");
     }
 
     #[test]
@@ -1461,7 +1672,10 @@ mod tests {
                 enable_archive: false,
             },
         };
-        let q = Query::cypher("q1").query("MATCH (n) RETURN n").build();
+        let q = Query::cypher("q1")
+            .query("MATCH (n) RETURN n")
+            .build()
+            .unwrap();
 
         let builder = DrasiLibBuilder::new()
             .with_query_factory(
@@ -1546,7 +1760,8 @@ mod tests {
         let query = Query::cypher("q")
             .query("MATCH (n) RETURN n")
             .with_storage_backend(StorageBackendRef::Named("nope".to_string()))
-            .build();
+            .build()
+            .unwrap();
         let result = DrasiLibBuilder::new()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -1621,7 +1836,8 @@ mod tests {
         let query = Query::cypher("q")
             .query("MATCH (n) RETURN n")
             .with_storage_backend(StorageBackendRef::Named("mem".to_string()))
-            .build();
+            .build()
+            .unwrap();
         let core = DrasiLibBuilder::new()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -1655,7 +1871,8 @@ mod tests {
         let query = Query::cypher("q")
             .query("MATCH (n) RETURN n")
             .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
-            .build();
+            .build()
+            .unwrap();
         let result = DrasiLibBuilder::new()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -1727,7 +1944,8 @@ mod tests {
             .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::Plugin {
                 kind: "rocksdb".to_string(),
             }))
-            .build();
+            .build()
+            .unwrap();
         let result = DrasiLibBuilder::new()
             .with_query_factory(
                 crate::computation::v1::FactoryRegistry::standard()
@@ -1916,7 +2134,12 @@ mod tests {
                     .clone(),
             )
             .with_default_index_provider("rocks", Arc::new(MockPersistentPlugin))
-            .with_query(Query::cypher("q1").query("MATCH (n) RETURN n").build())
+            .with_query(
+                Query::cypher("q1")
+                    .query("MATCH (n) RETURN n")
+                    .build()
+                    .unwrap(),
+            )
             .build()
             .await
             .expect("build with default index provider should succeed");
@@ -1928,16 +2151,18 @@ mod tests {
     }
 
     #[test]
-    fn test_query_cypher_sets_id_and_language() {
+    fn test_query_cypher_sets_name_and_language_without_adopting_an_id() {
         let q = Query::cypher("cypher-q");
-        assert_eq!(q.id, "cypher-q");
+        assert!(q.id.is_none());
+        assert_eq!(q.name, "cypher-q");
         assert_eq!(q.query_language, QueryLanguage::Cypher);
     }
 
     #[test]
-    fn test_query_gql_sets_id_and_language() {
+    fn test_query_gql_sets_name_and_language_without_adopting_an_id() {
         let q = Query::gql("gql-q");
-        assert_eq!(q.id, "gql-q");
+        assert!(q.id.is_none());
+        assert_eq!(q.name, "gql-q");
         assert_eq!(q.query_language, QueryLanguage::GQL);
     }
 
@@ -1945,7 +2170,16 @@ mod tests {
     fn test_query_from_source_adds_source() {
         let q = Query::cypher("q").from_input("src1");
         assert_eq!(q.inputs.len(), 1);
-        assert_eq!(q.inputs[0].component, "src1");
+        assert_eq!(
+            q.inputs[0]
+                .as_ref()
+                .unwrap()
+                .component
+                .as_name()
+                .unwrap()
+                .as_str(),
+            "src1"
+        );
     }
 
     #[test]
@@ -1955,9 +2189,36 @@ mod tests {
             .from_input("src2")
             .from_input("src3");
         assert_eq!(q.inputs.len(), 3);
-        assert_eq!(q.inputs[0].component, "src1");
-        assert_eq!(q.inputs[1].component, "src2");
-        assert_eq!(q.inputs[2].component, "src3");
+        assert_eq!(
+            q.inputs[0]
+                .as_ref()
+                .unwrap()
+                .component
+                .as_name()
+                .unwrap()
+                .as_str(),
+            "src1"
+        );
+        assert_eq!(
+            q.inputs[1]
+                .as_ref()
+                .unwrap()
+                .component
+                .as_name()
+                .unwrap()
+                .as_str(),
+            "src2"
+        );
+        assert_eq!(
+            q.inputs[2]
+                .as_ref()
+                .unwrap()
+                .component
+                .as_name()
+                .unwrap()
+                .as_str(),
+            "src3"
+        );
     }
 
     #[test]
@@ -2037,14 +2298,22 @@ mod tests {
             .with_priority_queue_capacity(50000)
             .with_dispatch_buffer_capacity(2500)
             .with_dispatch_mode(DispatchMode::Broadcast)
-            .build();
+            .build()
+            .unwrap();
 
-        assert_eq!(config.id, "full-query");
+        assert!(config.id.is_none());
+        assert_eq!(config.name, "full-query");
         assert_eq!(config.query, "MATCH (n:Person) RETURN n.name");
         assert_eq!(config.query_language, QueryLanguage::Cypher);
         assert_eq!(config.inputs.len(), 2);
-        assert_eq!(config.inputs[0].component, "source-a");
-        assert_eq!(config.inputs[1].component, "source-b");
+        assert_eq!(
+            config.inputs[0].component.as_name().unwrap().as_str(),
+            "source-a"
+        );
+        assert_eq!(
+            config.inputs[1].component.as_name().unwrap().as_str(),
+            "source-b"
+        );
         assert!(!config.auto_start);
         assert!(!config.enable_bootstrap);
         assert_eq!(config.priority_queue_capacity, Some(50000));
@@ -2060,9 +2329,11 @@ mod tests {
         let config = Query::gql("gql-full")
             .query("MATCH (n) RETURN n")
             .from_input("src")
-            .build();
+            .build()
+            .unwrap();
 
-        assert_eq!(config.id, "gql-full");
+        assert!(config.id.is_none());
+        assert_eq!(config.name, "gql-full");
         assert_eq!(config.query_language, QueryLanguage::GQL);
         assert_eq!(config.query, "MATCH (n) RETURN n");
         assert_eq!(config.inputs.len(), 1);
@@ -2073,9 +2344,10 @@ mod tests {
 
     #[test]
     fn test_query_build_defaults() {
-        let config = Query::cypher("defaults-only").build();
+        let config = Query::cypher("defaults-only").build().unwrap();
 
-        assert_eq!(config.id, "defaults-only");
+        assert!(config.id.is_none());
+        assert_eq!(config.name, "defaults-only");
         assert_eq!(config.query, "");
         assert_eq!(config.query_language, QueryLanguage::Cypher);
         assert!(config.inputs.is_empty());

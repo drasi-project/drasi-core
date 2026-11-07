@@ -577,7 +577,8 @@ async fn real_c_interfaces_preserve_envelopes_configuration_and_service_lifecycl
         .unwrap();
     service.start().await.unwrap();
     service.run().await.unwrap();
-    service.quiesce().await.unwrap();
+    service.pause_processing().await.unwrap();
+    service.resume_processing().await.unwrap();
     assert_eq!(service.configuration().unwrap()["seen"], 1);
     service.stop().await.unwrap();
 }
@@ -747,8 +748,8 @@ async fn host_graph_factories_and_control_progress_while_native_data_is_pending(
     plugin.register_factories(&mut registry).unwrap();
     assert!(plugin.register_factories(&mut registry).is_err());
     let mut graph = ComputationGraph::builder("native-control-test")
-        .component(spec, source)
-        .sink(Box::new(sink))
+        .component(ComponentName::try_new("native").unwrap(), spec, source)
+        .sink(ComponentName::try_new("sink").unwrap(), Box::new(sink))
         .connect(
             EdgeDefinition {
                 from: Endpoint::new(
@@ -856,7 +857,7 @@ fn strict_metadata_roles_versions_schema_and_required_fields() {
         .unwrap();
     spec.configuration_version += 1;
     assert!(ComponentFactory::validate(plugin.factories()[0].as_ref(), &spec).is_err());
-    assert_eq!(drasi_plugin_sdk::ffi::FFI_SDK_VERSION, "0.17.0");
+    assert_eq!(drasi_plugin_sdk::ffi::FFI_SDK_VERSION, "0.18.0");
 }
 
 #[test]
@@ -936,7 +937,7 @@ fn rejects_missing_or_incompatible_native_metadata_before_entry() {
         .unwrap_err_string();
     assert!(error.contains("incompatible native computation ABI header"));
 
-    const UNSUPPORTED_WIRE_MANIFEST: &[u8] = br#"{"abi_version":"1.0.0","wire_version":2,"plugin":{"id":"unsupported-wire-native","version":"1"},"factories":[],"schemas":[]}"#;
+    const UNSUPPORTED_WIRE_MANIFEST: &[u8] = br#"{"abi_version":"2.0.0","wire_version":3,"plugin":{"id":"unsupported-wire-native","version":"1"},"factories":[],"schemas":[]}"#;
     static UNSUPPORTED_WIRE: SharedMetadata = SharedMetadata(abi::Metadata {
         header: abi::Header::new::<abi::Metadata>(),
         target: abi::BorrowedBytes {

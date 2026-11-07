@@ -9,9 +9,9 @@ use std::{
 };
 
 use drasi_computation_contracts::{
-    ComponentDescriptor, ComponentId, ComponentRole, ComponentSemanticKind, ImplementationIdentity,
-    OutputProgress, PluginIdentity, PortDescriptor, PortDirection, PortFormatAlternative, PortId,
-    PortPrimaries, SchemaDescriptor, SinkCompletion,
+    ComponentDescriptor, ComponentId, ComponentRole, ComponentSemanticKind, ComponentUpdateMode,
+    ImplementationIdentity, OutputProgress, PluginIdentity, PortDescriptor, PortDirection,
+    PortFormatAlternative, PortId, PortPrimaries, SchemaDescriptor, SinkCompletion,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -91,7 +91,7 @@ impl ConfigSchema {
             );
         }
         for (name, value) in object {
-            ComponentId::try_new(name.as_str())?;
+            drasi_computation_contracts::validate_identifier("configuration field", name)?;
             match self.fields.get(name) {
                 Some(field) => anyhow::ensure!(
                     field.value_type.accepts(value),
@@ -182,10 +182,15 @@ pub struct Capabilities {
     /// start and processing, without requiring construction-time bindings.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub input_binding_updates: bool,
-    /// The transformer implements retryable, explicit deletion of its own
-    /// state after successful cleanup. Other roles cannot declare this.
+    /// Retryable, explicit permanent deletion of owned state/resources after
+    /// positive cleanup. Never implies permission to delete borrowed/shared state.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub deprovision: bool,
+    pub delete_owned_resources: bool,
+    /// Strategies the factory's pure planner can return. Empty means unsupported.
+    /// Every retained-object mode requires NativeComponent::supports_apply_update;
+    /// Recreate alone does not. These declarations are not storage/data proofs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub update_modes: Vec<ComponentUpdateMode>,
     /// The transformer requires the host-owned indexed processing service.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub indexed_processing: bool,
@@ -280,8 +285,7 @@ impl FactoryMetadata {
         plugin: &PluginIdentity,
         schemas: &[SchemaDescriptor],
     ) -> anyhow::Result<()> {
-        ComponentId::try_new(self.implementation.name.as_ref())?;
-        ComponentId::try_new(self.implementation.version.as_ref())?;
+        self.implementation.validate()?;
         anyhow::ensure!(
             self.implementation.plugin.as_ref() == Some(plugin),
             "native factory plugin provenance does not match its manifest"
@@ -291,9 +295,11 @@ impl FactoryMetadata {
             "invalid native configuration version"
         );
         for name in self.configuration.fields.keys() {
-            ComponentId::try_new(name.as_str())?;
+            drasi_computation_contracts::validate_identifier("configuration field", name)?;
         }
-        self.descriptor(ComponentId::try_new("validation")?)?;
+        self.descriptor(ComponentId::try_new(
+            "00000000-0000-0000-0000-000000000000",
+        )?)?;
         let inputs = self
             .ports
             .iter()
@@ -359,10 +365,13 @@ impl FactoryMetadata {
                 || matches!(self.role, ComponentRole::Sink | ComponentRole::Transformer),
             "input-binding updates require a native sink or transformer"
         );
-        anyhow::ensure!(
-            !c.deprovision || self.role == ComponentRole::Transformer,
-            "native deprovision currently requires a transformer"
-        );
+        let mut update_modes = BTreeSet::new();
+        for mode in &c.update_modes {
+            anyhow::ensure!(
+                update_modes.insert(mode),
+                "duplicate native update mode {mode:?}"
+            );
+        }
         anyhow::ensure!(
             !c.indexed_processing || (self.role == ComponentRole::Transformer && !c.transactional),
             "native indexed processing requires a non-participant transformer"
@@ -535,8 +544,8 @@ impl PluginMetadata {
             self.abi_version == abi::ABI_VERSION && self.wire_version == abi::WIRE_VERSION,
             "unsupported native plugin ABI or wire format"
         );
-        ComponentId::try_new(self.plugin.id.as_ref())?;
-        ComponentId::try_new(self.plugin.version.as_ref())?;
+        drasi_computation_contracts::validate_identifier("plugin", &self.plugin.id)?;
+        drasi_computation_contracts::validate_identifier("plugin version", &self.plugin.version)?;
         let mut schema_ids = BTreeSet::new();
         for schema in &self.schemas {
             anyhow::ensure!(

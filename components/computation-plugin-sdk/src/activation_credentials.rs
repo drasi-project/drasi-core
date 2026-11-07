@@ -17,6 +17,11 @@ struct BoundCreateRequest {
 /// Only use after negotiating the activation-credentials extension for the
 /// factory. The ordinary CreateRequest encoding remains unchanged.
 pub fn encode_bound_create_request(request: &crate::CreateRequest) -> anyhow::Result<Vec<u8>> {
+    if request.update_directive.is_some() {
+        let mut request = request.clone();
+        request.activation_credentials_bound = true;
+        return crate::wire::encode_create_request(&request);
+    }
     crate::wire::encode(&BoundCreateRequest {
         activation_credentials_version: crate::abi::activation_credentials::VERSION,
         request: request.clone(),
@@ -27,14 +32,16 @@ pub(crate) fn decode_create_request(bytes: &[u8]) -> anyhow::Result<crate::Creat
     if let Ok(request) = crate::wire::decode::<crate::CreateRequest>(bytes) {
         return Ok(request);
     }
-    let mut bound: BoundCreateRequest = crate::wire::decode(bytes)
-        .map_err(|_| anyhow::anyhow!("invalid native component creation request"))?;
-    anyhow::ensure!(
-        bound.activation_credentials_version == crate::abi::activation_credentials::VERSION,
-        "unsupported activation credential creation version"
-    );
-    bound.request.activation_credentials_bound = true;
-    Ok(bound.request)
+    if let Ok(mut bound) = crate::wire::decode::<BoundCreateRequest>(bytes) {
+        anyhow::ensure!(
+            bound.activation_credentials_version == crate::abi::activation_credentials::VERSION,
+            "unsupported activation credential creation version"
+        );
+        bound.request.activation_credentials_bound = true;
+        return Ok(bound.request);
+    }
+    crate::wire::decode_update_creation(bytes)
+        .map_err(|error| anyhow::anyhow!("invalid native component creation request: {error:#}"))
 }
 
 pub use crate::abi::activation_credentials::{
@@ -116,12 +123,13 @@ mod tests {
     ) -> anyhow::Result<()> {
         let request = crate::CreateRequest {
             inputs: Vec::new(),
-            id: ComponentId::try_new("component")?,
+            id: ComponentId::try_new("be265aa1-f390-4488-b8c1-f9145f17e406")?,
             implementation: ImplementationIdentity::try_new("fixture/credentials", "1")?,
             configuration_version: 1,
             configuration: json!({"hostname":"host", "port":3306, "user":""}),
             scope: None,
             activation_credentials_bound: true,
+            update_directive: None,
         };
         let json = serde_json::to_value(&request)?;
         assert!(json.get("activation_credentials_bound").is_none());
@@ -182,6 +190,48 @@ mod tests {
         }
         .validate()
         .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn reconstruction_and_credentials_share_one_strict_execution_envelope() -> anyhow::Result<()> {
+        let directive = crate::UpdateDirective {
+            operation_id: "accepted-operation".into(),
+            plan: crate::ComponentUpdatePlan {
+                mode: crate::ComponentUpdateMode::Recreate,
+                data: crate::ComponentUpdateData::Preserve,
+            },
+        };
+        let mut request = crate::CreateRequest {
+            id: ComponentId::try_new("be265aa1-f390-4488-b8c1-f9145f17e406")?,
+            implementation: ImplementationIdentity::try_new("fixture/credentials", "1")?,
+            configuration_version: 1,
+            configuration: json!({"hostname": "host", "port": 3306}),
+            scope: None,
+            inputs: Vec::new(),
+            activation_credentials_bound: true,
+            update_directive: Some(directive.clone()),
+        };
+        let bytes = crate::wire::encode_create_request(&request)?;
+        assert_eq!(decode_create_request(&bytes)?, request);
+        assert_eq!(
+            decode_create_request(&encode_bound_create_request(&request)?)?,
+            request
+        );
+        let mut envelope: serde_json::Value = crate::wire::decode(&bytes)?;
+        assert!(envelope["request"]
+            .get("activation_credentials_bound")
+            .is_none());
+        assert!(envelope["request"].get("update_directive").is_none());
+        envelope["activation_credentials_version"] = json!(2);
+        assert!(decode_create_request(&crate::wire::encode(&envelope)?).is_err());
+        request.activation_credentials_bound = false;
+        let decoded = decode_create_request(&crate::wire::encode_create_request(&request)?)?;
+        assert!(!decoded.activation_credentials_bound);
+        assert_eq!(decoded.update_directive, Some(directive));
+        let described = decode_create_request(&crate::wire::encode(&request)?)?;
+        assert!(described.update_directive.is_none());
+        assert_eq!(described.configuration, request.configuration);
         Ok(())
     }
 }

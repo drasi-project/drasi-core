@@ -14,19 +14,19 @@
 //! All entry points and callbacks must contain panics. Libraries are pinned for
 //! process lifetime; this ABI does not provide hot unloading.
 //!
-//! V1 headers and layouts are frozen. Read and validate the header before reading
-//! the rest of a table. V1 requires an exact version and size, including reserved
+//! V2 headers and layouts are frozen. Read and validate the header before reading
+//! the rest of a table. V2 requires an exact version and size, including reserved
 //! fields. Metadata and tables remain valid until their owning handle is released.
 //! Calls on one operation are serialized by its owner; wake/retain/release may be
 //! called concurrently. A poll must be cooperative and must never wait for I/O.
 
 use std::{ffi::c_void, fmt, mem::size_of, ptr};
 
-pub const ABI_VERSION: &str = "1.0.0";
-pub const ABI_MAJOR: u16 = 1;
+pub const ABI_VERSION: &str = "2.0.0";
+pub const ABI_MAJOR: u16 = 2;
 pub const ABI_MINOR: u16 = 0;
-pub const ABI_MAGIC: u64 = 0x4452_4153_4943_4731; // DRASICG1
-pub const WIRE_VERSION: u32 = 1;
+pub const ABI_MAGIC: u64 = 0x4452_4153_4943_4732; // DRASICG2
+pub const WIRE_VERSION: u32 = 2;
 pub const METADATA_SYMBOL: &[u8] = b"drasi_computation_plugin_metadata\0";
 pub const ENTRY_SYMBOL: &[u8] = b"drasi_computation_plugin_entry\0";
 pub const MAX_METADATA_BYTES: usize = 1024 * 1024;
@@ -229,11 +229,18 @@ pub struct FactoryVTable {
     /// Configuration-only constructor. No I/O, activation, workers or blocking.
     pub create:
         Option<unsafe extern "C" fn(*mut c_void, BorrowedBytes, *mut ComponentHandle) -> Status>,
+    /// Pure configuration inspection. Input is a JSON UpdateRequest and success
+    /// returns a JSON ComponentUpdatePlan, each bounded by MAX_METADATA_BYTES.
+    /// No construction, I/O, activation or inspection of mutable external state.
+    /// Unsupported changes return an error, never an implicit recreate plan.
+    pub plan_update: Option<unsafe extern "C" fn(*mut c_void, BorrowedBytes) -> Reply>,
 }
 
 #[repr(C)]
 pub struct ComponentVTable {
     pub header: Header,
+    /// Final reference release only. The owner must first await DISPOSE; this
+    /// synchronous function cannot substitute for or acknowledge async cleanup.
     pub release: Option<unsafe extern "C" fn(*mut c_void)>,
     pub inspect: Option<unsafe extern "C" fn(*mut c_void) -> Reply>,
     pub configuration: Option<unsafe extern "C" fn(*mut c_void) -> Reply>,
@@ -253,13 +260,16 @@ pub struct ComponentVTable {
 }
 
 pub mod operation {
+    /// Requires successful INITIALIZE. Successful repeats do not reactivate.
     pub const START: u32 = 1;
+    /// End an activation, including a partial START. Retry incomplete cleanup.
     pub const STOP: u32 = 2;
     pub const NEXT: u32 = 3;
     pub const TRANSFORM: u32 = 4;
     pub const HANDLE: u32 = 5;
     pub const RUN: u32 = 6;
-    pub const QUIESCE: u32 = 7;
+    /// Temporary processing pause, retaining the current activation.
+    pub const PAUSE_PROCESSING: u32 = 7;
     pub const DELIVERY_COMPLETED: u32 = 8;
     pub const CONTINUE: u32 = 9;
     pub const WAKE_WAIT: u32 = 10;
@@ -270,8 +280,9 @@ pub mod operation {
     pub const TRANSACT: u32 = 15;
     /// Available only after negotiating `batching::PluginBatchingV1`.
     pub const HANDLE_BATCH: u32 = 16;
-    /// Available only when the transformer declares the deprovision capability.
-    pub const DEPROVISION: u32 = 17;
+    /// Explicit, permanent deletion of owned state/resources after positive STOP
+    /// cleanup (or before activation). Never implied by disposal or an update.
+    pub const DELETE_OWNED_RESOURCES: u32 = 17;
     /// Available only when the component declares input-binding updates.
     pub const BIND_INPUTS: u32 = 18;
     /// One initialization envelope for the declared provider-bootstrap input.
@@ -284,6 +295,17 @@ pub mod operation {
     pub const BOOTSTRAP_RESET: u32 = 22;
     /// Reschedule retained output after the Host validates actual destinations.
     pub const DELIVERY_RESUME: u32 = 23;
+    /// Once per constructed object, before its first START. Failure/cancellation
+    /// requires DISPOSE, not another initialization attempt on the same object.
+    pub const INITIALIZE: u32 = 24;
+    /// Await final instance cleanup after STOP, including partial initialization.
+    /// Successful repeats acknowledge completion; release is not a substitute.
+    pub const DISPOSE: u32 = 25;
+    /// Resume a successfully paused activation, not another START.
+    pub const RESUME_PROCESSING: u32 = 26;
+    /// Bounded named MessagePack ApplyUpdateRequest. Only retained-object plans;
+    /// Recreate is executed by the host using disposal and factory construction.
+    pub const APPLY_UPDATE: u32 = 27;
 }
 
 pub const POLL_PENDING: u32 = 0;
@@ -383,7 +405,8 @@ mod tests {
         assert_eq!(offset_of!(Metadata, target), 16);
         assert_eq!(size_of::<Metadata>(), 16 + 4 * p);
         assert_eq!(size_of::<PluginVTable>(), 16 + 3 * p);
-        assert_eq!(size_of::<FactoryVTable>(), 16 + 2 * p);
+        assert_eq!(size_of::<FactoryVTable>(), 16 + 3 * p);
+        assert_eq!(offset_of!(FactoryVTable, plan_update), 16 + 2 * p);
         assert_eq!(size_of::<ComponentVTable>(), 16 + 5 * p);
         assert_eq!(size_of::<OperationVTable>(), 16 + 3 * p);
         assert_eq!(size_of::<Wake>(), 16 + 4 * p);
@@ -403,6 +426,11 @@ mod tests {
         good.validate::<ComponentVTable>().unwrap();
         for bad in [
             Header { magic: 0, ..good },
+            Header {
+                magic: 0x4452_4153_4943_4731,
+                major: 1,
+                ..good
+            },
             Header { major: 0, ..good },
             Header { minor: 1, ..good },
             Header { size: 16, ..good },

@@ -150,7 +150,7 @@ impl GraphRegistrySnapshot {
     pub(crate) fn authored_query_configuration(
         &self,
         specification: &ComponentSpecification,
-    ) -> Option<anyhow::Result<crate::config::QueryConfig>> {
+    ) -> Option<anyhow::Result<crate::config::AssignedQueryConfig>> {
         self.factory(&specification.implementation)
             .and_then(|factory| {
                 factory
@@ -368,8 +368,8 @@ mod tests {
 
     fn graph() -> ComputationGraph {
         ComputationGraph::builder("registry")
-            .service(Box::new(Idle(
-                ComponentDescriptor::try_new(ComponentId::try_new("component").unwrap(), vec![])
+            .service(ComponentName::try_new("component").unwrap(), Box::new(Idle(
+                ComponentDescriptor::try_new(ComponentId::from_uuid(uuid::Uuid::from_u128(1)), vec![])
                     .unwrap(),
             )))
             .build()
@@ -383,16 +383,16 @@ mod tests {
         for count in [16, 1024, 4096] {
             let mut builder = ComputationGraph::builder("publication-scaling");
             for index in 0..count {
-                builder = builder.service(Box::new(Idle(
+                builder = builder.service(ComponentName::try_new(format!("component-{index:05}")).unwrap(), Box::new(Idle(
                     ComponentDescriptor::try_new(
-                        ComponentId::try_new(format!("component-{index:05}")).unwrap(),
+                        ComponentId::from_uuid(uuid::Uuid::from_u128(index + 1)),
                         vec![],
                     )
                     .unwrap(),
                 )));
             }
             let graph = builder.build().unwrap();
-            let id = ComponentId::try_new("component-00000").unwrap();
+            let id = ComponentId::from_uuid(uuid::Uuid::from_u128(1));
             let began = std::time::Instant::now();
             for index in 0..128 {
                 super::super::controller::update(&graph, |state| {
@@ -416,7 +416,7 @@ mod tests {
     fn configuration_comparison_ignores_status_but_fences_changed_owners_and_values() {
         let graph = graph();
         let original = graph.registry.borrow().clone();
-        let id = ComponentId::try_new("component").unwrap();
+        let id = ComponentId::from_uuid(uuid::Uuid::from_u128(1));
         let mut status = (*original).clone();
         let observed = Arc::make_mut(&mut status.observed);
         let component = observed.components.get_mut(&id).unwrap();

@@ -591,7 +591,7 @@ mod tests {
     fn output_progress_is_independent_of_semantic_identity() {
         let node = |role, kind, progress| {
             let mut descriptor = super::super::ComponentDescriptor::try_new(
-                ComponentId::try_new("producer").unwrap(),
+                ComponentId::generate(),
                 Vec::new(),
             )
             .unwrap();
@@ -602,6 +602,7 @@ mod tests {
                 descriptor = descriptor.with_output_progress(progress);
             }
             super::super::NodeSnapshot {
+                name: crate::config::ComponentName::try_new("producer").unwrap(),
                 descriptor,
                 role,
                 completion: None,

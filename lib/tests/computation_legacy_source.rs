@@ -60,9 +60,9 @@ impl Source for SourceFixture {
     fn supports_replay(&self) -> bool {
         false
     }
-    async fn initialize(&self, context: SourceRuntimeContext) {
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
         self.calls.initialize.fetch_add(1, Ordering::SeqCst);
-        self.base.initialize(context).await;
+        self.base.bind_runtime_context(context).await;
     }
     async fn start(&self) -> anyhow::Result<()> {
         self.calls.start.fetch_add(1, Ordering::SeqCst);
@@ -83,7 +83,7 @@ impl Source for SourceFixture {
         self.calls.stop.fetch_add(1, Ordering::SeqCst);
         self.base.stop_common().await
     }
-    async fn deprovision(&self) -> anyhow::Result<()> {
+    async fn delete_owned_resources(&self) -> anyhow::Result<()> {
         self.calls.deprovision.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }

@@ -34,7 +34,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::channels::ComponentStatus;
 use crate::component_graph::GraphEdge;
-use crate::config::schema::QueryConfig;
+use crate::config::schema::AssignedQueryConfig as QueryConfig;
+
+/// An opaque ordinary constructor has not supplied real configuration yet.
+/// Hosts must retain their supplied definition or wait; never persist placeholder
+/// plugin kinds and empty properties as if construction had succeeded.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "configuration for component {component} is unavailable: its constructor has not succeeded"
+)]
+pub struct ComponentConfigurationUnavailable {
+    /// UUID of the declaration whose configuration is unavailable.
+    pub component: crate::config::ComponentId,
+}
 
 /// A point-in-time snapshot of the full drasi-lib instance configuration.
 ///
@@ -78,6 +90,8 @@ pub struct ConfigurationSnapshot {
 pub struct SourceSnapshot {
     /// Source component identifier
     pub id: String,
+    /// Current graph-owned name, independent of the UUID.
+    pub name: String,
     /// Plugin type identifier (e.g., "postgres", "http", "grpc")
     pub source_type: String,
     /// Lifecycle status at the time of snapshot
@@ -113,6 +127,8 @@ pub struct BootstrapSnapshot {
 pub struct QueryConfigurationSnapshot {
     /// Query component identifier
     pub id: String,
+    /// Current graph-owned name.
+    pub name: String,
     /// Full query configuration (query string, source subscriptions, joins, etc.)
     pub config: QueryConfig,
     /// Lifecycle status at the time of snapshot
@@ -124,6 +140,8 @@ pub struct QueryConfigurationSnapshot {
 pub struct ReactionSnapshot {
     /// Reaction component identifier
     pub id: String,
+    /// Current graph-owned name.
+    pub name: String,
     /// Plugin type identifier (e.g., "log", "http", "grpc")
     pub reaction_type: String,
     /// Lifecycle status at the time of snapshot
@@ -131,7 +149,7 @@ pub struct ReactionSnapshot {
     /// Whether the reaction was configured to auto-start
     pub auto_start: bool,
     /// Query IDs this reaction subscribes to
-    pub queries: Vec<String>,
+    pub queries: Vec<super::ComponentReference>,
     /// Configuration properties from [`crate::Reaction::properties()`], including secrets.
     ///
     /// For an ordinary plugin with a known construction contract, this is its
@@ -150,7 +168,7 @@ mod tests {
         let config = crate::Query::cypher("query")
             .query("MATCH (n:Item) RETURN n.name AS name")
             .from_input("source")
-            .build();
+            .build().unwrap();
         let expected = serde_json::json!({
             "id": "query",
             "config": config,

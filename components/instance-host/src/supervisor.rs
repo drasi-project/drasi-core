@@ -1192,7 +1192,7 @@ impl ComputationComponent for SupervisorService {
         Ok(())
     }
 
-    async fn deprovision(&mut self) -> Result<()> {
+    async fn delete_owned_resources(&mut self) -> Result<()> {
         self.stop().await
     }
 }

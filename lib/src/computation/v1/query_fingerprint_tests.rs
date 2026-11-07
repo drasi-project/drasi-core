@@ -19,12 +19,16 @@ use super::*;
 mod tests {
     use super::*;
     use crate::channels::DispatchMode;
-    use crate::config::{QueryConfig, QueryJoinConfig, QueryLanguage};
+    use crate::config::{AssignedQueryConfig as QueryConfig, ComponentReference, QueryJoinConfig, QueryLanguage};
     use crate::config::{QueryInputConfig, QueryJoinKeyConfig};
     use crate::recovery::RecoveryPolicy;
     use drasi_core::models::SourceMiddlewareConfig;
     use serde_json::{Map, Value};
     use std::sync::Arc;
+
+    const QUERY_ID: &str = "00000000-0000-4000-8000-000000000001";
+    const SOURCE_1: &str = "00000000-0000-4000-8000-000000000002";
+    const SOURCE_2: &str = "00000000-0000-4000-8000-000000000003";
 
     fn compute_config_hash(config: &QueryConfig) -> u64 {
         ContinuousQueryDefinition {
@@ -45,12 +49,13 @@ mod tests {
 
     fn base() -> QueryConfig {
         QueryConfig {
-            id: "q1".into(),
+            id: QUERY_ID.into(),
+            name: "q1".into(),
             query: "MATCH (n) RETURN n".into(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
             inputs: vec![QueryInputConfig {
-                component: "s1".into(),
+                component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
                 nodes: vec!["A".into()],
                 relations: vec![],
                 pipeline: vec![],
@@ -97,7 +102,7 @@ mod tests {
     fn different_source_id_different_hash() {
         let a = base();
         let mut b = base();
-        b.inputs[0].component = "s2".into();
+        b.inputs[0].component = ComponentReference::by_id(ComponentId::try_new(SOURCE_2).unwrap());
         assert_ne!(compute_config_hash(&a), compute_config_hash(&b));
     }
 
@@ -197,7 +202,7 @@ mod tests {
     fn id_change_same_hash() {
         let a = base();
         let mut b = base();
-        b.id = "q-other".into();
+        b.id = ComponentId::generate().to_string();
         assert_eq!(compute_config_hash(&a), compute_config_hash(&b));
     }
 
@@ -258,14 +263,14 @@ mod tests {
         let mut a = base();
         a.inputs = vec![
             QueryInputConfig {
-                component: "s1".into(),
+                component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
                 nodes: vec!["A".into()],
                 relations: vec![],
                 pipeline: vec![],
                 port: None,
             },
             QueryInputConfig {
-                component: "s2".into(),
+                component: ComponentReference::by_id(ComponentId::try_new(SOURCE_2).unwrap()),
                 nodes: vec!["B".into()],
                 relations: vec![],
                 pipeline: vec![],
@@ -276,14 +281,14 @@ mod tests {
         let mut b = base();
         b.inputs = vec![
             QueryInputConfig {
-                component: "s2".into(),
+                component: ComponentReference::by_id(ComponentId::try_new(SOURCE_2).unwrap()),
                 nodes: vec!["B".into()],
                 relations: vec![],
                 pipeline: vec![],
                 port: None,
             },
             QueryInputConfig {
-                component: "s1".into(),
+                component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
                 nodes: vec!["A".into()],
                 relations: vec![],
                 pipeline: vec![],

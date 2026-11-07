@@ -1183,8 +1183,8 @@ impl drasi_lib::Source for SlowReadySource {
     fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
         std::collections::HashMap::new()
     }
-    async fn initialize(&self, context: drasi_lib::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
         if self.fail_initialize {
             self.base
                 .set_status(

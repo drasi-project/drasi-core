@@ -4,7 +4,7 @@
 use std::{any::Any, num::NonZeroUsize, result::Result, sync::Arc};
 
 use super::*;
-use crate::config::QueryConfig;
+use crate::config::AssignedQueryConfig as QueryConfig;
 use drasi_core::{computation::ComputationIndexProvider, middleware::MiddlewareTypeRegistry};
 use drasi_query_common::QueryExecutionSettingsExt;
 
@@ -34,6 +34,8 @@ pub trait QueryAuthoring: Send + Sync {
 pub struct QueryConstruction {
     pub instance_id: Arc<str>,
     pub generation: ComponentGeneration,
+    /// Owner-accepted reconstruction intent, never an authoring configuration flag.
+    pub update_directive: Option<ComponentUpdateDirective>,
     pub definition: ContinuousQueryDefinition,
     pub provider: Arc<dyn ComputationIndexProvider>,
     pub execution: QueryExecutionSettings,
@@ -55,6 +57,15 @@ pub struct QueryConstruction {
 /// Execution construction behind the existing query authoring and validation path.
 #[async_trait::async_trait]
 pub trait QueryConstructor: Send + Sync {
+    /// Assess a proposed change without constructing a query or touching its state.
+    fn plan_update(
+        &self,
+        _current: &ComponentSpecification,
+        _proposed: &ComponentSpecification,
+    ) -> anyhow::Result<ComponentUpdatePlan> {
+        anyhow::bail!("query constructor does not support configuration updates")
+    }
+
     fn query_descriptor(&self, id: ComponentId) -> anyhow::Result<ComponentDescriptor> {
         Ok(drasi_query_common::query_descriptor(id))
     }
@@ -182,6 +193,7 @@ impl QueryConstruction {
         Ok(Self {
             instance_id: context.instance_id.clone(),
             generation: context.generation,
+            update_directive: context.update_directive().cloned(),
             definition,
             provider: provider.0.clone(),
             execution,

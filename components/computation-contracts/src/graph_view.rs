@@ -881,6 +881,11 @@ mod tests {
     use super::*;
     use crate::{ComponentId, QueryOutputMetadata, ResultNodeProjector, SystemMetadata};
 
+    const FACILITIES: &str = "00000000-0000-4000-8000-000000000001";
+    const ROOMS: &str = "00000000-0000-4000-8000-000000000002";
+    const QUERY: &str = "00000000-0000-4000-8000-000000000003";
+    const OTHER: &str = "00000000-0000-4000-8000-000000000004";
+
     fn stream(name: &str) -> StreamId {
         StreamId::try_new(name).unwrap()
     }
@@ -897,13 +902,7 @@ mod tests {
     }
 
     fn db_output() -> SinkOutputs {
-        SinkOutputs::new(BTreeMap::from([binding(
-            "db",
-            "facilities-db",
-            "out",
-            "db/out",
-        )]))
-        .unwrap()
+        SinkOutputs::new(BTreeMap::from([binding("db", FACILITIES, "out", "db/out")])).unwrap()
     }
 
     fn metadata(id: &str) -> ElementMetadata {
@@ -1005,7 +1004,7 @@ mod tests {
         let body = notifications[0].to_json().unwrap();
         assert_eq!(
             body["output"],
-            json!({"alias":"db","component":"facilities-db","port":"out"})
+            json!({"alias":"db","component":FACILITIES,"port":"out"})
         );
         assert!(body.get("producer").is_none());
         assert_eq!(body["sequence"], 7);
@@ -1050,7 +1049,7 @@ mod tests {
         };
         let annotated = QueryChangeCodec::encode_evaluation(
             None,
-            &ComponentId::try_new("q").unwrap(),
+            &ComponentId::try_new(QUERY).unwrap(),
             SystemMetadata::new(stream("q/out"), 3),
             &projector,
             &[
@@ -1069,7 +1068,7 @@ mod tests {
                 },
             ],
             QueryOutputMetadata {
-                query_id: "q".into(),
+                query_id: QUERY.into(),
                 source_id: None,
                 timestamp: timestamp(),
                 metadata: HashMap::new(),
@@ -1175,36 +1174,36 @@ mod tests {
     #[test]
     fn outputs_come_from_declared_inputs_and_aliases_are_optional() -> Result<(), GraphViewError> {
         let inputs = [
-            input("in", "facilities", "out"),
-            input("in", "rooms", "out"),
-            input("in", "rooms", "errors"),
+            input("in", FACILITIES, "out"),
+            input("in", ROOMS, "out"),
+            input("in", ROOMS, "errors"),
         ];
         let named = SinkOutputs::from_inputs(
             &inputs,
-            &aliases(json!({"ok": {"component": "rooms", "port": "out"},
-                "bad": {"component": "rooms", "port": "errors"}})),
+            &aliases(json!({"ok": {"component": ROOMS, "port": "out"},
+                "bad": {"component": ROOMS, "port": "errors"}})),
         )?;
         assert_eq!(
             named.aliases().collect::<Vec<_>>(),
-            ["bad", "facilities", "ok"]
+            [FACILITIES, "bad", "ok"]
         );
         let ok = named.get("ok").expect("ok");
-        assert_eq!(ok.endpoint().to_string(), "rooms/out");
-        assert_eq!(ok.stream.as_str(), "rooms/out");
+        assert_eq!(ok.endpoint().to_string(), format!("{ROOMS}/out"));
+        assert_eq!(ok.stream.as_str(), format!("{ROOMS}/out"));
         assert_eq!(named.get("bad").expect("bad").port.as_str(), "errors");
         // Several outputs of one component are never guessed between.
         assert!(SinkOutputs::from_inputs(&inputs, &OutputAliases::default()).is_err());
         assert!(SinkOutputs::from_inputs(
             &inputs,
-            &aliases(json!({"rooms": {"component": "rooms"}}))
+            &aliases(json!({"rooms": {"component": ROOMS}}))
         )
         .is_err());
         // An alias must select a declared incoming edge, once.
         for bad in [
-            json!({"x": {"component": "other"}}),
-            json!({"x": {"component": "rooms", "port": "missing"}}),
-            json!({"x": {"component": "facilities"}, "y": {"component": "facilities", "port": "out"}}),
-            json!({"facilities": {"component": "rooms", "port": "out"}}),
+            json!({"x": {"component": OTHER}}),
+            json!({"x": {"component": ROOMS, "port": "missing"}}),
+            json!({"x": {"component": FACILITIES}, "y": {"component": FACILITIES, "port": "out"}}),
+            json!({FACILITIES: {"component": ROOMS, "port": "out"}}),
         ] {
             assert!(
                 SinkOutputs::from_inputs(&inputs, &aliases(bad.clone())).is_err(),
@@ -1219,16 +1218,19 @@ mod tests {
     #[test]
     fn output_bindings_keep_component_and_port_and_reject_ambiguity() {
         let bindings = SinkOutputs::new(BTreeMap::from([
-            binding("rooms-all", "rooms", "out", "rooms/out"),
-            binding("rooms-errors", "rooms", "errors", "rooms/errors"),
-            binding("facilities", "facilities-db", "out", "facilities-db/out"),
+            binding("rooms-all", ROOMS, "out", "rooms/out"),
+            binding("rooms-errors", ROOMS, "errors", "rooms/errors"),
+            binding("facilities", FACILITIES, "out", "facilities-db/out"),
         ]))
         .unwrap();
         let errors = bindings.output_for(&stream("rooms/errors")).unwrap();
         assert_eq!(errors.alias, "rooms-errors");
-        assert_eq!(errors.binding.component.as_str(), "rooms");
+        assert_eq!(errors.binding.component.as_str(), ROOMS);
         assert_eq!(errors.binding.port.as_str(), "errors");
-        assert_eq!(errors.binding.endpoint().to_string(), "rooms/errors");
+        assert_eq!(
+            errors.binding.endpoint().to_string(),
+            format!("{ROOMS}/errors")
+        );
         assert_ne!(
             bindings.get("rooms-all").unwrap().endpoint(),
             bindings.get("rooms-errors").unwrap().endpoint()
@@ -1240,17 +1242,17 @@ mod tests {
         assert!(bindings.contains("facilities"));
         assert!(SinkOutputs::default().validate().is_err());
         assert!(SinkOutputs::new(BTreeMap::from([
-            binding("a", "shared", "out", "shared/out"),
-            binding("b", "other", "out", "shared/out"),
+            binding("a", ROOMS, "out", "shared/out"),
+            binding("b", OTHER, "out", "shared/out"),
         ]))
         .is_err());
         assert!(SinkOutputs::new(BTreeMap::from([
-            binding("a", "shared", "out", "shared/a"),
-            binding("b", "shared", "out", "shared/b"),
+            binding("a", ROOMS, "out", "shared/a"),
+            binding("b", ROOMS, "out", "shared/b"),
         ]))
         .is_err());
         assert!(
-            SinkOutputs::new(BTreeMap::from([binding("bad id", "a", "out", "a/out")])).is_err()
+            SinkOutputs::new(BTreeMap::from([binding("bad id", ROOMS, "out", "a/out")])).is_err()
         );
     }
 }

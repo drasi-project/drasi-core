@@ -189,8 +189,8 @@ impl drasi_lib::Source for TrackedApplication {
     fn supports_replay(&self) -> bool {
         self.source.supports_replay()
     }
-    async fn initialize(&self, context: drasi_lib::SourceRuntimeContext) {
-        self.source.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::SourceRuntimeContext) {
+        self.source.bind_runtime_context(context).await;
     }
     async fn start(&self) -> anyhow::Result<()> {
         self.source.start().await
@@ -278,7 +278,7 @@ async fn scenario() {
         .expect("instance");
     let services = drasi.computation_plugin_services().expect("services");
     let factory = Arc::new(ApplicationFactory::default());
-    let host = SourcePluginHost::recreatable(factory.clone(), services.clone())
+    let host = SourcePluginHost::from_constructor(factory.clone(), services.clone())
         .await
         .expect("real source factory");
     let input = factory
@@ -645,7 +645,7 @@ async fn persistent_shared_source() {
         let services = pipeline.services();
         let catalog = pipeline.catalog();
         let mut output = catalog.subscribe();
-        let host = SourcePluginHost::recreatable(factory.clone(), services.clone())
+        let host = SourcePluginHost::from_constructor(factory.clone(), services.clone())
             .await
             .expect("source");
         let mut pipeline = pipeline
@@ -815,7 +815,7 @@ async fn volatile_restart(subscription_control: bool) {
         subscription_control,
         ..Default::default()
     });
-    let source = SourcePluginHost::recreatable(factory.clone(), pipeline.services())
+    let source = SourcePluginHost::from_constructor(factory.clone(), pipeline.services())
         .await
         .expect("source");
     let catalog = pipeline.catalog();

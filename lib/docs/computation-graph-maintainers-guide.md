@@ -791,7 +791,7 @@ rules:
   output. Envelope logical event/due time remains separate from transport
   counters and local wait clocks. Ordinary result metadata is projected at
   the result API boundary, not duplicated throughout native execution.
-- **One wire.** Native/binary envelope wire is version 1 and ABI layout 1.0. All
+- **One wire.** Native/binary envelope wire is version 2 and ABI layout 2.0. All
   matching hosts and libraries must be rebuilt; there is no reader or migration
   for an earlier wire or for query-row records, so a mismatch is a build error to
   fix rather than data to convert.
@@ -2050,7 +2050,8 @@ custom schemas and several subscribers keep working.
 
 The separate `drasi_computation_plugin_consumer_progress_v1` symbol adds
 producer consumer-progress inspection and an optional retained position
-comparator. Base ABI `1.0.0`, wire `1` and recovery-v1 are unchanged.
+comparator. Current libraries use base ABI `2.0.0`, wire `2` and the separate
+recovery-v1 interface.
 Opt-in source/transformer factories require one `consumer_progress` Checkpoint
 dependency containing the actual `Arc<ConsumerProgressSet>`; it cannot coexist
 with single-owner progress or admission on that producer.
@@ -2155,13 +2156,13 @@ recovery snapshot envelopes.
 
 See the [SDK read and binding contracts](../../components/computation-plugin-sdk/README.md#optional-per-output-snapshot-replay-follow-and-query-readers)
 and [in-process reader model](#reading-state-without-running-another-query).
-All services use the current base ABI 1.0 and envelope wire v1; optional
+All services use the current base ABI 2.0 and envelope wire v2; optional
 negotiation does not imply every loaded library implements every service.
 
 ### Activation credentials preserve per-start identity behavior
 
-`activation_credentials_v1` is an optional extension over the frozen base
-ABI `1.0.0` and envelope wire `1`. An opted-in factory describes its hostname/
+`activation_credentials_v1` is an optional extension over native
+ABI `2.0.0` and envelope wire `2`. An opted-in factory describes its hostname/
 port context without I/O. The Host binds an actual `NativeIdentityResource`
 under `identity`; it keeps ordinary identity-provider traits and provider
 construction outside the native library.

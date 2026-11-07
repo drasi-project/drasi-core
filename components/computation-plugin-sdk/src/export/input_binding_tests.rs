@@ -141,13 +141,14 @@ fn raw_component(factory: TestFactory) -> anyhow::Result<RawComponent> {
     )?)?;
     let metadata = &exported.state.definition.metadata.factories[0];
     let request = wire::encode(&CreateRequest {
-        id: ComponentId::try_new("direct")?,
+        id: ComponentId::try_new("5e5157b1-10c8-4ad3-908e-b30a502ef1b4")?,
         implementation: metadata.implementation.clone(),
         configuration_version: 1,
         configuration: serde_json::json!({}),
         scope: None,
         inputs: Vec::new(),
         activation_credentials_bound: false,
+        update_directive: None,
     })?;
     let mut plugin = abi::PluginHandle::null();
     let mut factory = abi::FactoryHandle::null();
@@ -182,6 +183,9 @@ fn binding(input: &str, producer: &str, stream: &str) -> InputBinding {
     }
 }
 
+const FIRST: &str = "c789ffdd-ea9c-429f-968a-eef534899eae";
+const SECOND: &str = "8454c4a2-d342-4ab8-b2cc-ab381334ed22";
+
 #[tokio::test]
 async fn binding_updates_work_before_start_and_during_processing() -> anyhow::Result<()> {
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -190,24 +194,25 @@ async fn binding_updates_work_before_start_and_during_processing() -> anyhow::Re
         implemented: true,
         seen: seen.clone(),
     })?;
-    let first = vec![binding("in", "first", "first/out")];
-    let second = vec![binding("in", "second", "second/out")];
+    let first = vec![binding("in", FIRST, "first/out")];
+    let second = vec![binding("in", SECOND, "second/out")];
     component
         .run(abi::operation::BIND_INPUTS, &wire::encode(&first)?)
         .await?;
+    component.run(abi::operation::INITIALIZE, &[]).await?;
     component.run(abi::operation::START, &[]).await?;
     for _ in 0..2 {
         component
             .run(abi::operation::BIND_INPUTS, &wire::encode(&second)?)
             .await?;
     }
-    let invalid = vec![binding("missing", "first", "first/out")];
+    let invalid = vec![binding("missing", FIRST, "first/out")];
     let error = component
         .run(abi::operation::BIND_INPUTS, &wire::encode(&invalid)?)
         .await
         .expect_err("undeclared input port must fail");
     assert!(error.message.contains("undeclared input port"));
-    let rejected = vec![binding("in", "first", "reject")];
+    let rejected = vec![binding("in", FIRST, "reject")];
     let error = component
         .run(abi::operation::BIND_INPUTS, &wire::encode(&rejected)?)
         .await
@@ -225,6 +230,7 @@ async fn binding_updates_work_before_start_and_during_processing() -> anyhow::Re
         *seen.lock().unwrap(),
         vec![first.clone(), second.clone(), second, first]
     );
+    component.run(abi::operation::DISPOSE, &[]).await?;
     Ok(())
 }
 

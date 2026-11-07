@@ -31,6 +31,21 @@ pub(super) struct QueryOutput {
 }
 
 impl QueryOutput {
+    pub(super) fn increase_retention(&self, capacity: NonZeroUsize) -> anyhow::Result<()> {
+        let mut state = self
+            .results
+            .state
+            .write()
+            .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
+        anyhow::ensure!(
+            capacity >= state.capacity,
+            "query update cannot discard retained output"
+        );
+        state.follow.increase_envelope_limit(capacity)?;
+        state.capacity = capacity;
+        Ok(())
+    }
+
     pub(super) fn new(
         scope: Option<&Scope>,
         component: ComponentId,
@@ -330,7 +345,14 @@ impl QueryViewProvider for QueryOutput {
         self.reader.query_recovery_view()
     }
     fn description(&self) -> QueryDescription {
-        self.description.clone()
+        let mut description = self.description.clone();
+        description.outbox_capacity = self
+            .results
+            .state
+            .read()
+            .expect("query output state poisoned")
+            .capacity;
+        description
     }
 
     async fn query_observation(

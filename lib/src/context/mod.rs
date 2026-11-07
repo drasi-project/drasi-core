@@ -36,7 +36,7 @@
 //!
 //! async fn initialize_source(base: &SourceBase, context: SourceRuntimeContext) {
 //!     // Called from the source's initialize method.
-//!     base.initialize(context).await;
+//!     base.bind_runtime_context(context).await;
 //! }
 //! ```
 //!
@@ -48,7 +48,7 @@
 //!
 //! async fn initialize_reaction(base: &ReactionBase, context: ReactionRuntimeContext) {
 //!     // Called from the reaction's initialize method.
-//!     base.initialize(context).await;
+//!     base.bind_runtime_context(context).await;
 //! }
 //! ```
 

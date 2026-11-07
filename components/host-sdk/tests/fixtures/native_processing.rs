@@ -38,7 +38,7 @@ impl sdk::Factory for Factory {
             completion: None,
             capabilities: sdk::Capabilities {
                 indexed_processing: true,
-                deprovision: true,
+                delete_owned_resources: true,
                 ..Default::default()
             },
         }
@@ -85,7 +85,7 @@ impl sdk::NativeComponent for Transformer {
     fn configuration(&self) -> anyhow::Result<serde_json::Value> {
         Ok(self.configuration.clone())
     }
-    fn supports_deprovision(&self) -> bool {
+    fn supports_delete_owned_resources(&self) -> bool {
         true
     }
     async fn start(&mut self) -> anyhow::Result<()> {
@@ -94,7 +94,7 @@ impl sdk::NativeComponent for Transformer {
     async fn stop(&mut self) -> anyhow::Result<()> {
         Ok(())
     }
-    async fn deprovision(&mut self) -> anyhow::Result<()> {
+    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
         self.processing
             .run(|context| async move {
                 context

@@ -790,6 +790,7 @@ async fn native_bootstrap_recipe_uses_declared_owners_and_unresolved_secrets() -
         .declare_resource(specification)?
         .provide_resource(id, handle)?
         .component(
+            ComponentName::try_new("owner")?,
             service.specification(ComponentId::try_new("owner")?, json!({}))?,
             service,
         )
@@ -843,6 +844,7 @@ fn bootstrap_recipes_accept_native_query_owners_without_relaxing_scope() -> anyh
             .snapshot()
             .select(GraphSelection::All)?;
         topology.components.push(DesiredComponent {
+            name: ComponentName::try_new("query")?,
             descriptor: specification.descriptor.clone(),
             role: specification.role,
             completion: None,

@@ -178,17 +178,15 @@ pub trait QueryConfigurationSource {
     fn subscription_settings(&self) -> Result<Vec<Self::Subscription>>;
 }
 
+/// Identify the query-owned reader for an actual source UUID.
+/// Editable component names are not valid inputs or part of the helper identity.
 pub fn query_source_component_id(
     query: &str,
     source: &str,
 ) -> std::result::Result<crate::ComponentId, crate::ContractError> {
-    let encoded = |value: &str| {
-        value
-            .bytes()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    };
-    crate::ComponentId::try_new(format!("source/{}/{}", encoded(query), encoded(source)))
+    let query = crate::ComponentId::try_new(query)?;
+    let source = crate::ComponentId::try_new(source)?;
+    crate::ComponentId::derive_owned(&query, &format!("query-input/{source}"))
 }
 
 impl<T> QueryConfigurationSource for T
@@ -216,6 +214,7 @@ impl QueryExecutionSettings {
             input.relations.sort();
             input.relations.dedup();
         }
+
         normalize_query_joins(&mut settings.joins);
         settings
     }
@@ -236,5 +235,35 @@ impl QueryExecutionSettings {
             && self.inputs.is_empty()
             && self.result.is_default()
             && self.source_transactions.is_none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const QUERY: &str = "00112233-4455-4677-8899-aabbccddeeff";
+    const SOURCE: &str = "11223344-5566-4788-99aa-bbccddeeff00";
+
+    #[test]
+    fn component_source_helper_depends_on_actual_uuid_owners() {
+        let reader = query_source_component_id(QUERY, SOURCE).unwrap();
+        assert_eq!(
+            reader,
+            query_source_component_id(&QUERY.to_ascii_uppercase(), SOURCE).unwrap()
+        );
+        assert_ne!(reader.as_str(), QUERY);
+        assert_ne!(reader.as_str(), SOURCE);
+        assert_ne!(reader, query_source_component_id(SOURCE, QUERY).unwrap());
+        assert_ne!(
+            reader,
+            query_source_component_id(QUERY, crate::ComponentId::generate().as_str()).unwrap()
+        );
+    }
+
+    #[test]
+    fn component_source_helper_rejects_names_instead_of_hashing_them() {
+        assert!(query_source_component_id("query", SOURCE).is_err());
+        assert!(query_source_component_id(QUERY, "source").is_err());
     }
 }

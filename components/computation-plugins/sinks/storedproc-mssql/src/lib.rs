@@ -555,6 +555,7 @@ mod tests {
             configuration: serde_json::json!({"settings":config()}),
             scope: None,
             activation_credentials_bound: true,
+            update_directive: None,
         };
         let context = MsSqlStoredProcFactory.activation_credential_context(&request)?;
         assert_eq!(context.hostname, "no-network-at-construction");

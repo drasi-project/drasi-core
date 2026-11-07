@@ -174,7 +174,7 @@ impl ReactionBase {
     /// - `state_store`: Optional persistent state storage
     /// - `update_tx`: mpsc sender for fire-and-forget status updates to the graph
     /// - `resource_observer`: Optional reporting of the actual selected providers
-    pub async fn initialize(&self, context: ReactionRuntimeContext) {
+    pub async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
         // Store context for later use
         *self.context.write().await = Some(context.clone());
 
@@ -527,10 +527,10 @@ impl ReactionBase {
 
     /// Clear the reaction's state store partition.
     ///
-    /// This is called during deprovision to remove all persisted state
-    /// associated with this reaction. Reactions that override `deprovision()`
+    /// This is called during explicit permanent removal to delete persisted state
+    /// associated with this reaction. Reactions that override `delete_owned_resources()`
     /// can call this to clean up their state store.
-    pub async fn deprovision_common(&self) -> Result<()> {
+    pub async fn delete_owned_resources_common(&self) -> Result<()> {
         info!("Deprovisioning reaction '{}'", self.id);
         if let Some(store) = self.state_store().await {
             let count = store.clear_store(&self.id).await.map_err(|e| {
@@ -794,7 +794,7 @@ mod tests {
         // Create context and initialize
         let context =
             ReactionRuntimeContext::new("test-instance", "test-reaction", None, update_tx, None);
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
 
         // Test status transition
         base.set_status(ComponentStatus::Starting, Some("Starting test".to_string()))
@@ -1115,7 +1115,7 @@ mod tests {
 
         let params = ReactionBaseParams::new("r1", vec![]);
         let base = ReactionBase::new(params);
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
 
         let ctx = base.context().await;
         assert!(ctx.is_some());
@@ -1136,7 +1136,7 @@ mod tests {
 
         let params = ReactionBaseParams::new("r1", vec![]);
         let base = ReactionBase::new(params);
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
 
         assert!(base.state_store().await.is_none());
     }
@@ -1175,7 +1175,7 @@ mod tests {
         let params = ReactionBaseParams::new("r1", vec![]);
         let base = ReactionBase::new(params);
         // Should succeed without panicking when no state store is configured
-        let result = base.deprovision_common().await;
+        let result = base.delete_owned_resources_common().await;
         assert!(result.is_ok());
     }
 
@@ -1225,7 +1225,7 @@ mod tests {
             update_tx,
             None,
         );
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
 
         // Initially no checkpoints
         assert!(base.read_checkpoint("q1").await.unwrap().is_none());
@@ -1296,7 +1296,7 @@ mod tests {
             update_tx,
             None,
         );
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
 
         // Initial checkpoints: seq=5 with config_hash=42
         let initial_checkpoints = {
@@ -1392,7 +1392,7 @@ mod tests {
             update_tx,
             None,
         );
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
 
         let initial = ReactionCheckpoint {
             sequence: 5,
@@ -1467,7 +1467,7 @@ mod tests {
             update_tx,
             None,
         );
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
 
         let initial = ReactionCheckpoint {
             sequence: 5,
@@ -1543,7 +1543,7 @@ mod tests {
             update_tx,
             None,
         );
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
 
         let mut initial_checkpoints = std::collections::HashMap::new();
         initial_checkpoints.insert(
@@ -1622,7 +1622,7 @@ mod tests {
             update_tx,
             None,
         );
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
 
         let initial = ReactionCheckpoint {
             sequence: 5,

@@ -4,7 +4,7 @@
 
 `drasi.mssql/storedproc` is a native sink, not a legacy reaction queue or adapter.
 `plugin()` and the gated dynamic entrypoint use the same implementation with
-computation ABI 1.0.0 / wire 1.
+computation ABI 2.0.0 / wire 2.
 
 The required secret-bearing `settings` object contains:
 
@@ -17,7 +17,7 @@ For example:
 
 ```json
 {
-  "outputs": {"all": {"component": "all", "port": "out"}},
+  "outputs": {"all": {"component": "bc769198-8a46-426c-acb5-435b084520d0", "port": "out"}},
   "default_template": {
     "added": {"template":"EXEC dbo.ApplyEffect {{param operation}},{{param after.id}}"},
     "updated": {"template":"EXEC dbo.ApplyEffect {{param operation}},{{param after.id}}"},
@@ -27,7 +27,8 @@ For example:
 ```
 
 Add the connection through a Host secret/configuration reference rather than
-putting literal credentials in a persisted Server definition.
+putting literal credentials in a persisted Server definition. Use the actual
+producer UUID in `component`; `all` is an alias, not a component identity.
 
 ## Preserved behavior and intentional safety changes
 

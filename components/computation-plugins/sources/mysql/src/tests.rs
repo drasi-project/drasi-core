@@ -27,6 +27,7 @@ fn positional_factories_are_explicit_and_do_not_claim_coordinated_loading() -> R
         }),
         scope: None,
         activation_credentials_bound: false,
+        update_directive: None,
     };
     factory.create(&request, ControlSender::default())?;
     assert!(!factory.supports_consumer_progress());

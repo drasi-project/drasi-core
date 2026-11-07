@@ -12,6 +12,19 @@ pub(super) struct ResetPlan {
     pub(super) emission: u64,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct ResetIntent<'a> {
+    pub(super) policy: QueryRecoveryPolicy,
+    pub(super) bootstrap_configured: bool,
+    pub(super) force: bool,
+    pub(super) reset_configuration: bool,
+    pub(super) update_operation: Option<&'a str>,
+}
+
+fn update_needs_reset(operation: Option<&str>, previous: Option<&str>, complete: bool) -> bool {
+    operation.is_some_and(|operation| previous != Some(operation) || !complete)
+}
+
 pub(super) async fn baseline(
     context: &NativeProcessingContext,
 ) -> Result<Option<drasi_query_common::QueryResetMarker>> {
@@ -94,21 +107,9 @@ pub(super) async fn reset_if_required(
     context: &NativeProcessingContext,
     configuration: &[u8],
     candidate: &GraphProducerIdentity,
-    policy: QueryRecoveryPolicy,
-    bootstrap_configured: bool,
-    force: bool,
-    reset_configuration: bool,
+    intent: ResetIntent<'_>,
 ) -> Result<Option<ResetPlan>> {
-    let plan = reset_required(
-        context,
-        configuration,
-        candidate,
-        policy,
-        bootstrap_configured,
-        force,
-        reset_configuration,
-    )
-    .await?;
+    let plan = reset_required(context, configuration, candidate, intent).await?;
     if plan.is_some() {
         if context.state_info().await?.non_atomic_publication {
             context.reset_non_atomic_state(true).await?;
@@ -123,11 +124,33 @@ pub(super) async fn reset_required(
     context: &NativeProcessingContext,
     configuration: &[u8],
     candidate: &GraphProducerIdentity,
-    policy: QueryRecoveryPolicy,
-    bootstrap_configured: bool,
-    force: bool,
-    reset_configuration: bool,
+    intent: ResetIntent<'_>,
 ) -> Result<Option<ResetPlan>> {
+    let ResetIntent {
+        policy,
+        bootstrap_configured,
+        force,
+        reset_configuration,
+        update_operation,
+    } = intent;
+    let previous_update = context.read_checkpoint(UPDATE_OPERATION).await?;
+    let previous_update = previous_update
+        .as_ref()
+        .map(|checkpoint| -> Result<&str> {
+            anyhow::ensure!(
+                checkpoint.sequence == 1,
+                "invalid query update checkpoint version"
+            );
+            let operation = std::str::from_utf8(
+                checkpoint
+                    .source_position
+                    .as_deref()
+                    .context("missing query update operation")?,
+            )?;
+            drasi_computation_contracts::validate_identifier("stored query update", operation)?;
+            Ok(operation)
+        })
+        .transpose()?;
     let pending_checkpoint = context
         .read_checkpoint(drasi_query_common::PENDING_QUERY_OUTPUT)
         .await?;
@@ -139,6 +162,10 @@ pub(super) async fn reset_required(
         .non_atomic_reset
         .is_some_and(|marker| marker.in_progress);
     let Some(saved) = context.read_checkpoint(CONFIGURATION).await? else {
+        anyhow::ensure!(
+            previous_update.is_none(),
+            "query update checkpoint has no matching configuration"
+        );
         anyhow::ensure!(!force, "cannot reset an unidentified query");
         anyhow::ensure!(!pending, QueryRecoveryError::PendingPublication);
         anyhow::ensure!(!resetting, QueryRecoveryError::IncompleteReset);
@@ -152,10 +179,15 @@ pub(super) async fn reset_required(
         != configuration;
     let complete = number(context, BOOTSTRAP_COMPLETE_CHECKPOINT).await?;
     anyhow::ensure!(complete <= 1, "invalid query bootstrap marker");
-    if !changed && complete == 1 && !force && !pending && !resetting {
+    anyhow::ensure!(
+        !changed || update_operation.is_none() || update_operation != previous_update,
+        "query update operation was reused for a different configuration"
+    );
+    let updating = update_needs_reset(update_operation, previous_update, complete == 1);
+    if !changed && complete == 1 && !force && !pending && !resetting && !updating {
         return Ok(None);
     }
-    if policy == QueryRecoveryPolicy::Strict && !(changed && reset_configuration) {
+    if policy == QueryRecoveryPolicy::Strict && !(changed && reset_configuration || updating) {
         if changed {
             anyhow::bail!("indexed query configuration changed; retained state cannot be reused");
         }
@@ -195,6 +227,20 @@ pub(super) async fn reset_required(
         sequence,
         emission: emission.max(sequence),
     }))
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+
+    #[test]
+    fn accepted_reset_is_once_per_operation_and_can_resume_incomplete_bootstrap() {
+        assert!(update_needs_reset(Some("new"), None, true));
+        assert!(update_needs_reset(Some("new"), Some("old"), true));
+        assert!(update_needs_reset(Some("new"), Some("new"), false));
+        assert!(!update_needs_reset(Some("new"), Some("new"), true));
+        assert!(!update_needs_reset(None, Some("old"), false));
+    }
 }
 
 async fn validate_reset_ownership(

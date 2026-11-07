@@ -4,7 +4,10 @@
 //! Native ComputationGraph SDK. See the crate README for the ownership, scheduling
 //! and capability contracts. No legacy Source/Reaction interfaces are involved.
 
-pub use drasi_computation_contracts::{PortFormatAlternative, PortFormatCatalogue, SinkBatching};
+pub use drasi_computation_contracts::{
+    ComponentUpdateData, ComponentUpdateMode, ComponentUpdatePlan, PortFormatAlternative,
+    PortFormatCatalogue, SinkBatching,
+};
 pub use drasi_computation_plugin_abi as abi;
 pub mod activation_credentials;
 pub mod admission;
@@ -54,7 +57,7 @@ pub use processing::{NativeProcessing, NativeProcessingContext};
 pub use progress::NativeSourceProgress;
 pub use scheduling::NativeScheduling;
 pub use transaction::{NativeTransactionContext, TransactionalComponent};
-pub use wire::{CreateRequest, Scope};
+pub use wire::{ApplyUpdateRequest, CreateRequest, Scope, UpdateDirective, UpdateRequest};
 
 /// Export only under a plugin crate's `dynamic-plugin` feature. The expression is
 /// evaluated once and must return `anyhow::Result<PluginDefinition>`. It must be

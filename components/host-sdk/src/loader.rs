@@ -629,14 +629,14 @@ fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
 fn supported_legacy_abi(version: &str) -> bool {
     semver::Version::parse(version)
         .ok()
-        .is_some_and(|version| version.major == 0 && matches!(version.minor, 16 | 17))
+        .is_some_and(|version| version.major == 0 && version.minor == 18)
 }
 
 /// Validate plugin metadata against the host SDK version.
 ///
 /// Checks that the plugin's SDK version is compatible with the host.
-/// ABI 0.17 and the explicitly compatible ABI 0.16 prefix are supported.
-/// Patch differences are allowed; arbitrary older/newer contracts are not.
+/// Only ABI 0.18 component layouts are supported. Patch differences are allowed;
+/// the old 0.16/0.17 lifecycle tables cannot safely be called by this host.
 ///
 /// Metadata is mandatory: an unknown ABI cannot safely use the current vtables.
 /// On success returns the plugin's reported `sdk_version` string.
@@ -668,7 +668,7 @@ fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<Option
     if !supported_legacy_abi(&plugin_sdk_version) {
         anyhow::bail!(
             "Plugin '{}' SDK version mismatch: plugin={}, host={}. \
-             Supported legacy contracts are 0.16.x and 0.17.x; older or unknown ABIs require an upgrade.",
+             Only ordinary ABI 0.18.x is supported; rebuild older plugins with the current SDK.",
             path.display(),
             plugin_sdk_version,
             host_sdk_version,
@@ -930,14 +930,18 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn only_current_and_explicitly_compatible_legacy_abis_are_accepted() {
+    fn only_current_ordinary_component_layout_is_accepted() {
         assert!(supported_legacy_abi(drasi_plugin_sdk::ffi::FFI_SDK_VERSION));
-        for version in ["0.16.0", "0.16.99", "0.17.0", "0.17.3"] {
+        for version in ["0.18.0", "0.18.3", "0.18.99"] {
             assert!(supported_legacy_abi(version), "{version}");
         }
         for version in [
             "0.15.0",
-            "0.18.0",
+            "0.16.0",
+            "0.16.99",
+            "0.17.0",
+            "0.17.99",
+            "0.19.0",
             "1.0.0",
             "0.16",
             "0.16.invalid",
@@ -985,10 +989,12 @@ mod tests {
                 metadata("0.15.0", target),
                 "SDK version mismatch",
             ),
-            ("future", metadata("0.18.0", target), "SDK version mismatch"),
+            ("old_016", metadata("0.16.0", target), "SDK version mismatch"),
+            ("old_017", metadata("0.17.0", target), "SDK version mismatch"),
+            ("future", metadata("0.19.0", target), "SDK version mismatch"),
             ("malformed", metadata("0.16.invalid", target), "SDK version mismatch"),
             ("oversized", metadata("4294967296.16.0", target), "SDK version mismatch"),
-            ("wrong_target", metadata("0.16.0", "incompatible-target"), "target mismatch"),
+            ("wrong_target", metadata("0.18.0", "incompatible-target"), "target mismatch"),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let input = dir.path().join("fixture.rs");

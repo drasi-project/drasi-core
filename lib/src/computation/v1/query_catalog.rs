@@ -253,7 +253,7 @@ impl QueryResultsCatalog {
     }
     pub(super) fn configure_delivery(
         &self,
-        config: &crate::config::QueryConfig,
+        config: &crate::config::AssignedQueryConfig,
         metrics: Arc<crate::metrics::QueryOutputMetrics>,
         default_capacity: usize,
     ) -> anyhow::Result<()> {
@@ -1024,17 +1024,19 @@ mod tests {
         for mode in [crate::DispatchMode::Channel, crate::DispatchMode::Broadcast] {
             let catalog = QueryResultsCatalog::new("subscription-head")?;
             let stream = StreamId::try_new("query/out")?;
+            let query_id = ComponentId::generate();
             let config = crate::Query::cypher("query")
                 .query("MATCH (n:Person) RETURN n.name AS name")
                 .with_outbox_capacity(8)
                 .enable_bootstrap(false)
-                .build();
+                .build()?
+                .with_assigned_id(query_id.clone());
             let mut config = config;
             config.dispatch_mode = Some(mode);
             let mut query = ContinuousQueryTransformer::new(
                 ContinuousQueryDefinition {
                     graph_id: "subscription-head".into(),
-                    id: ComponentId::try_new("query")?,
+                    id: query_id,
                     query: config.query.clone(),
                     language: ComputationQueryLanguage::Cypher,
                     output_stream: stream.clone(),
@@ -1098,17 +1100,19 @@ mod tests {
     #[tokio::test]
     async fn query_replacement_refreshes_identity_and_delivery_without_resetting_transport() {
         let catalog = QueryResultsCatalog::new("delivery").unwrap();
-        let id = ComponentId::try_new("query").unwrap();
+        let id = ComponentId::generate();
         let stream = StreamId::try_new("query/out").unwrap();
         let open = |text: &'static str, capacity| {
             let catalog = catalog.clone();
             let id = id.clone();
             let stream = stream.clone();
             async move {
-                let mut config = crate::Query::cypher(id.as_str())
+                let mut config = crate::Query::cypher("query")
                     .query(text)
                     .with_outbox_capacity(8)
-                    .build();
+                    .build()
+                    .unwrap()
+                    .with_assigned_id(id.clone());
                 config.dispatch_buffer_capacity = Some(capacity);
                 ContinuousQueryTransformer::new(
                     ContinuousQueryDefinition {

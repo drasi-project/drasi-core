@@ -693,11 +693,14 @@ async fn graph(
             binding: "pipe".into(),
         })?
         .provide_resource(resource.clone(), channel.resource())?
-        .source(Box::new(Source {
-            descriptor: descriptor("producer", "out", PortDirection::Output)?,
-            batch,
-        }))
-        .sink(sink)
+        .source(
+            super::super::ComponentName::try_new("producer")?,
+            Box::new(Source {
+                descriptor: descriptor("producer", "out", PortDirection::Output)?,
+                batch,
+            }),
+        )
+        .sink(super::super::ComponentName::try_new("sink")?, sink)
         .bind_stream(source.clone(), definition.stream.clone())
         .connect(
             EdgeDefinition::new(

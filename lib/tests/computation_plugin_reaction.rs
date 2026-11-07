@@ -331,7 +331,7 @@ impl Reaction for FailingBootstrap {
     fn default_recovery_policy(&self) -> drasi_lib::ReactionRecoveryPolicy {
         drasi_lib::ReactionRecoveryPolicy::AutoReset
     }
-    async fn initialize(&self, _: drasi_lib::ReactionRuntimeContext) {}
+    async fn bind_runtime_context(&self, _: drasi_lib::ReactionRuntimeContext) {}
     async fn start(&self) -> anyhow::Result<()> {
         Ok(())
     }
@@ -533,7 +533,7 @@ impl Reaction for MaterializedReaction {
     fn default_recovery_policy(&self) -> drasi_lib::ReactionRecoveryPolicy {
         drasi_lib::ReactionRecoveryPolicy::AutoReset
     }
-    async fn initialize(&self, _: drasi_lib::ReactionRuntimeContext) {}
+    async fn bind_runtime_context(&self, _: drasi_lib::ReactionRuntimeContext) {}
     async fn start(&self) -> anyhow::Result<()> {
         Ok(())
     }

@@ -63,6 +63,8 @@ use crate::state_store::{MemoryStateStoreProvider, StateStoreProvider};
 pub struct SourceRuntime {
     /// Unique identifier for the source
     pub id: String,
+    /// Current graph-owned name.
+    pub name: String,
     /// Type of source (e.g., "postgres", "http", "mock", "platform")
     pub source_type: String,
     /// Current status of the source
@@ -112,6 +114,8 @@ pub struct SourceRuntime {
 pub struct QueryRuntime {
     /// Unique identifier for the query
     pub id: String,
+    /// Current graph-owned name.
+    pub name: String,
     /// Cypher or GQL query string
     pub query: String,
     /// Current status of the query
@@ -120,7 +124,7 @@ pub struct QueryRuntime {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
     /// Upstream component inputs with middleware pipelines
-    pub inputs: Vec<super::schema::QueryInputConfig>,
+    pub inputs: Vec<super::QueryInputConfig>,
     /// Optional synthetic joins for the query
     #[serde(skip_serializing_if = "Option::is_none")]
     pub joins: Option<Vec<super::schema::QueryJoinConfig>>,
@@ -167,6 +171,8 @@ pub struct QueryRuntime {
 pub struct ReactionRuntime {
     /// Unique identifier for the reaction
     pub id: String,
+    /// Current graph-owned name.
+    pub name: String,
     /// Type of reaction (e.g., "log", "http", "grpc", "sse", "platform")
     pub reaction_type: String,
     /// Current status of the reaction
@@ -175,15 +181,16 @@ pub struct ReactionRuntime {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
     /// IDs of queries this reaction subscribes to
-    pub queries: Vec<String>,
+    pub queries: Vec<super::ComponentReference>,
     /// Reaction-specific configuration properties
     pub properties: HashMap<String, serde_json::Value>,
 }
 
-impl From<QueryConfig> for QueryRuntime {
-    fn from(config: QueryConfig) -> Self {
+impl From<super::AssignedQueryConfig> for QueryRuntime {
+    fn from(config: super::AssignedQueryConfig) -> Self {
         Self {
             id: config.id,
+            name: config.name,
             query: config.query,
             status: ComponentStatus::Stopped,
             error_message: None,
@@ -236,6 +243,8 @@ impl From<QueryConfig> for QueryRuntime {
 pub struct RuntimeConfig {
     /// Unique identifier for this DrasiLib instance
     pub id: String,
+    /// Immutable component identity-admission policy.
+    pub allow_external_component_ids: bool,
     /// Index factory for creating storage backend indexes for queries
     pub index_factory: Arc<IndexFactory>,
     /// State store provider for plugin state persistence
@@ -377,6 +386,7 @@ impl RuntimeConfig {
 
         Self {
             id: config.id,
+            allow_external_component_ids: config.allow_external_component_ids,
             index_factory,
             state_store_provider,
             identity_provider,

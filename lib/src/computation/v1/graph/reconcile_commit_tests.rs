@@ -48,8 +48,8 @@ impl crate::computation::v1::EnvelopeSink for Sink {
         Ok(())
     }
 }
-fn id(value: &str) -> ComponentId {
-    ComponentId::try_new(value).unwrap()
+fn id(value: u128) -> ComponentId {
+    ComponentId::from_uuid(uuid::Uuid::from_u128(value))
 }
 
 struct StartingService {
@@ -87,12 +87,15 @@ async fn activation_deadline_is_local_and_every_attempted_owner_is_cleaned_up() 
     let stops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut builder = ComputationGraph::builder("bounded-activation")
         .activation_timeout(std::time::Duration::from_secs(2));
-    for (name, hang) in [("held", true), ("healthy", false)] {
-        builder = builder.service(Box::new(StartingService {
-            descriptor: ComponentDescriptor::try_new(id(name), Vec::new()).unwrap(),
-            hang,
-            stops: stops.clone(),
-        }));
+    for (number, name, hang) in [(3, "held", true), (4, "healthy", false)] {
+        builder = builder.service(
+            ComponentName::try_new(name).unwrap(),
+            Box::new(StartingService {
+                descriptor: ComponentDescriptor::try_new(id(number), Vec::new()).unwrap(),
+                hang,
+                stops: stops.clone(),
+            }),
+        );
     }
     let mut graph = builder.build().unwrap();
     let run = graph.run().unwrap();
@@ -105,12 +108,12 @@ async fn activation_deadline_is_local_and_every_attempted_owner_is_cleaned_up() 
             .await
             .unwrap();
         assert_eq!(report.summary, OperationSummary::CompletedWithFailures);
-        let StartOutcome::StartFailed(failure) = &report.components[&id("held")] else {
+        let StartOutcome::StartFailed(failure) = &report.components[&id(3)] else {
             panic!("hung activation must have a per-component failure");
         };
         assert!(failure.cause.to_string().contains("activation timeout"));
         assert_eq!(
-            control.observed().components[&id("healthy")].lifecycle,
+            control.observed().components[&id(4)].lifecycle,
             ComponentLifecycle::Running
         );
         assert_eq!(started.elapsed(), std::time::Duration::from_secs(2));
@@ -120,7 +123,7 @@ async fn activation_deadline_is_local_and_every_attempted_owner_is_cleaned_up() 
     assert_eq!(stops.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
-fn descriptor(value: &str, output: bool) -> ComponentDescriptor {
+fn descriptor(value: u128, output: bool) -> ComponentDescriptor {
     ComponentDescriptor::try_new(
         id(value),
         vec![crate::computation::v1::PortDescriptor::new(
@@ -142,11 +145,11 @@ fn descriptor(value: &str, output: bool) -> ComponentDescriptor {
 #[tokio::test]
 async fn busy_start_group_does_not_drop_unrelated_start_requests() {
     let (graph, mut operations, _, _, _) = fixture().await;
-    let source = graph.ids[&id("source")];
-    let sink = graph.ids[&id("sink")];
+    let source = graph.ids[&id(1)];
+    let sink = graph.ids[&id(2)];
     update(&graph, |state| {
-        state.components.get_mut(&id("source")).unwrap().lifecycle = ComponentLifecycle::Failed;
-        state.components.get_mut(&id("sink")).unwrap().lifecycle = ComponentLifecycle::Running;
+        state.components.get_mut(&id(1)).unwrap().lifecycle = ComponentLifecycle::Failed;
+        state.components.get_mut(&id(2)).unwrap().lifecycle = ComponentLifecycle::Running;
     });
     let mut held = graph.components[source].take().unwrap();
     held.attempted = true;
@@ -176,7 +179,7 @@ async fn deferred_binding_waits_for_a_busy_endpoint_without_failing_the_controll
     update(&graph, |state| {
         state.relationships.get_mut(&edge).unwrap().binding = BindingState::Declared;
     });
-    let held = graph.components[graph.ids[&id("source")]].take().unwrap();
+    let held = graph.components[graph.ids[&id(1)]].take().unwrap();
     let (_cancel, mut cancel) = watch::channel(false);
     let (_sender, mut commands) = command_channel();
     bind_ready_dependencies(
@@ -209,7 +212,7 @@ async fn deferred_binding_waits_for_a_busy_endpoint_without_failing_the_controll
 #[tokio::test]
 async fn stale_completion_keeps_the_current_operation_and_controller_alive() {
     let (graph, mut operations, controls, _, _) = fixture().await;
-    let index = graph.ids[&id("source")];
+    let index = graph.ids[&id(1)];
     let generation = graph.components[index].generation;
     operations
         .complete(
@@ -233,6 +236,7 @@ async fn stale_completion_keeps_the_current_operation_and_controller_alive() {
             operation: Operation::Start,
             abort,
             quiesce: watch::channel(false).0,
+            pause_component: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             outputs: Vec::new(),
             reply: None,
         },
@@ -256,11 +260,11 @@ async fn stale_completion_keeps_the_current_operation_and_controller_alive() {
 #[tokio::test]
 async fn reconciliation_rejects_changed_impact_without_changing_revision() {
     let (mut graph, mut operations, mut controls, _, _) = fixture().await;
-    let changes = vec![DesiredMutation::Restart(GraphSelection::Exact(vec![id("source")]))];
+    let changes = vec![DesiredMutation::Restart(GraphSelection::Exact(vec![id(1)]))];
     let supplied = preview(&graph, changes.clone()).unwrap();
     assert!(supplied.rebind.is_empty());
     update(&graph, |state| {
-        state.components.get_mut(&id("source")).unwrap().exhausted = true;
+        state.components.get_mut(&id(1)).unwrap().exhausted = true;
     });
     assert!(!preview(&graph, changes).unwrap().rebind.is_empty());
     let previous = graph.desired.borrow().clone();
@@ -288,7 +292,8 @@ async fn all_declaration_paths_reject_invalid_streams_and_subscription_cycles() 
     let original = graph.desired.borrow().clone();
     for port in ["out", "undeclared"] {
         let mut addition = super::super::super::addition::ComponentAddition::new(
-            ConstructedComponent::source(Box::new(Source(descriptor("duplicate", true)))),
+            ComponentName::try_new("duplicate").unwrap(),
+            ConstructedComponent::source(Box::new(Source(descriptor(5, true)))),
         );
         addition.definition.streams.insert(
             crate::computation::v1::PortId::try_new(port).unwrap(),
@@ -303,10 +308,10 @@ async fn all_declaration_paths_reject_invalid_streams_and_subscription_cycles() 
         assert!(Arc::ptr_eq(&original, &graph.desired.borrow()));
     }
     let mut desired = graph.snapshot.select(GraphSelection::All).unwrap();
-    desired.subscriptions.push((id("sink"), id("source")));
+    desired.subscriptions.push((id(2), id(1)));
     assert!(desired.validate_structure().is_err());
     assert!(preview(&graph, vec![DesiredMutation::SetTopology(desired)]).is_err());
-    for pair in [(id("source"), id("source")), (id("missing"), id("sink"))] {
+    for pair in [(id(1), id(1)), (id(6), id(2))] {
         let mut desired = graph.snapshot.select(GraphSelection::All).unwrap();
         desired.control_connections.push(pair);
         assert!(preview(&graph, vec![DesiredMutation::SetTopology(desired)]).is_err());
@@ -328,8 +333,9 @@ async fn rejected_control_refresh_preserves_the_live_configuration() {
         &mut controls,
         &mut cancel,
         Command::ControlConnections {
-            connections: vec![(id("sink"), id("source"))],
+            connections: vec![(id(2), id(1))],
             subscriptions: false,
+            consumer: None,
             management_access: false,
             reply,
         },
@@ -346,10 +352,10 @@ async fn rejected_control_refresh_preserves_the_live_configuration() {
 #[tokio::test]
 async fn failed_reconciliation_retains_boundary_and_resume_failures() {
     let (mut graph, mut operations, mut controls, _, _) = fixture().await;
-    let source = graph.ids[&id("source")];
+    let source = graph.ids[&id(1)];
     operations.paused.insert(source);
     update(&graph, |state| {
-        let source = state.components.get_mut(&id("source")).unwrap();
+        let source = state.components.get_mut(&id(1)).unwrap();
         source.lifecycle = ComponentLifecycle::Quiesced;
     });
     let edge = graph.snapshot.edges[0].definition.clone();
@@ -463,17 +469,23 @@ async fn fixture() -> (
 ) {
     let edge = EdgeDefinition::new(
         Endpoint::new(
-            id("source"),
+            id(1),
             crate::computation::v1::PortId::try_new("out").unwrap(),
         ),
         Endpoint::new(
-            id("sink"),
+            id(2),
             crate::computation::v1::PortId::try_new("in").unwrap(),
         ),
     );
     let mut graph = ComputationGraph::builder("commit-faults")
-        .source(Box::new(Source(descriptor("source", true))))
-        .sink(Box::new(Sink(descriptor("sink", false))))
+        .source(
+            ComponentName::try_new("source").unwrap(),
+            Box::new(Source(descriptor(1, true))),
+        )
+        .sink(
+            ComponentName::try_new("sink").unwrap(),
+            Box::new(Sink(descriptor(2, false))),
+        )
         .bind_stream(
             edge.from.clone(),
             crate::computation::v1::StreamId::try_new("source/out").unwrap(),
@@ -499,7 +511,7 @@ async fn fixture() -> (
         .unwrap()
         .components
         .into_iter()
-        .find(|node| node.descriptor.id() == &id("sink"))
+        .find(|node| node.descriptor.id() == &id(2))
         .unwrap();
     let mut bindings = TopologyBindings::default();
     let ComponentConstruction::External { binding } = &desired.construction else {
@@ -507,7 +519,7 @@ async fn fixture() -> (
     };
     bindings.components.insert(
         binding.clone(),
-        ConstructedComponent::sink(Box::new(Sink(descriptor("sink", false)))),
+        ConstructedComponent::sink(Box::new(Sink(descriptor(2, false)))),
     );
     let plan = preview(
         &graph,
@@ -540,15 +552,12 @@ async fn failed_commit_preflight_preserves_slots_bindings_counters_and_publicati
             }
             _ => {}
         }
-        let sink_index = graph.ids[&id("sink")];
+        let sink_index = graph.ids[&id(2)];
         let held = (fault == 4).then(|| graph.components[sink_index].take().unwrap());
         let old_slot = graph.components[sink_index].clone();
         let peer = operations.peer_controls[&sink_index].clone();
         if fault == 5 {
-            graph
-                .peers
-                .remove(&id("sink"), old_slot.generation)
-                .unwrap();
+            graph.peers.remove(&id(2), old_slot.generation).unwrap();
         }
         let desired = graph.desired.borrow().clone();
         let observed = graph.observed();
@@ -611,8 +620,8 @@ async fn failed_commit_preflight_preserves_slots_bindings_counters_and_publicati
 #[tokio::test]
 async fn commit_publishes_one_coherent_revision_and_fences_replaced_control() {
     let (mut graph, mut operations, mut controls, plan, mut prepared) = fixture().await;
-    let old_slot = graph.components[graph.ids[&id("sink")]].clone();
-    let old_control = operations.peer_controls[&graph.ids[&id("sink")]].clone();
+    let old_slot = graph.components[graph.ids[&id(2)]].clone();
+    let old_control = operations.peer_controls[&graph.ids[&id(2)]].clone();
     let previous = graph.inspector.snapshot();
     commit_desired(
         &mut graph,
@@ -626,7 +635,7 @@ async fn commit_publishes_one_coherent_revision_and_fences_replaced_control() {
     assert_eq!(next.sequence, previous.sequence + 1);
     assert_eq!(next.desired.revision, next.observed.revision);
     assert_eq!(next.desired.revision, plan.desired.revision);
-    assert!(next.observed.components[&id("sink")].generation > old_slot.generation);
+    assert!(next.observed.components[&id(2)].generation > old_slot.generation);
     assert!(matches!(
         old_control.not_ready(),
         Err(crate::computation::v1::ControlError::StaleComponent { .. })
@@ -636,7 +645,7 @@ async fn commit_publishes_one_coherent_revision_and_fences_replaced_control() {
         operations.attach_control(&graph, index).unwrap();
     }
     operations.refresh_connections(&graph).unwrap();
-    operations.peer_controls[&graph.ids[&id("sink")]]
+    operations.peer_controls[&graph.ids[&id(2)]]
         .not_ready()
         .unwrap();
 }
@@ -644,8 +653,8 @@ async fn commit_publishes_one_coherent_revision_and_fences_replaced_control() {
 #[tokio::test]
 async fn draining_stop_keeps_suspended_start_members_in_their_original_report() {
     let (graph, mut operations, controls, _, _) = fixture().await;
-    let source = graph.ids[&id("source")];
-    let sink = graph.ids[&id("sink")];
+    let source = graph.ids[&id(1)];
+    let sink = graph.ids[&id(2)];
     operations.launch(&graph, sink, Operation::Process).unwrap();
     let (reply, mut started) = oneshot::channel();
     operations.begin_start(&graph, BTreeSet::from([source]), Some(reply), true);
@@ -672,17 +681,17 @@ async fn draining_stop_keeps_suspended_start_members_in_their_original_report() 
     operations.advance_start(&graph).unwrap();
     let report = started.await.unwrap().unwrap();
     assert!(matches!(
-        report.components[&id("source")],
+        report.components[&id(1)],
         StartOutcome::NotRequested
     ));
-    assert!(!graph.observed().components[&id("source")].started);
+    assert!(!graph.observed().components[&id(1)].started);
 }
 
 #[tokio::test]
 async fn resume_collects_all_failures_and_still_restarts_later_members() {
     for failed_ids in [vec!["sink"], vec!["sink", "source"]] {
         let (graph, mut operations, _controls, _, _) = fixture().await;
-        let selected = BTreeSet::from([id("sink"), id("source")]);
+        let selected = BTreeSet::from([id(2), id(1)]);
         for id in &selected {
             operations.paused.insert(graph.ids[id]);
         }

@@ -439,8 +439,8 @@ transactional-registry and configuration-resolver recipes. Applications supply
 additional `ManagementResourceResolver` implementations for their providers.
 No opaque provider object is inferred from its type or serialized as a pointer.
 Existing descriptor-backed plugin factories and adapters remain available through
-Host SDK / Plugin SDK; supported legacy loading remains independent (ABI 0.17,
-with 0.16 fast-mode compatibility).
+Host SDK / Plugin SDK; ordinary loading remains independent (ABI 0.18;
+older layouts are rejected).
 
 Native source/reaction recipe declarations use `add_source_from_factory` and
 `add_reaction_from_factory`; the existing legacy object APIs remain available.

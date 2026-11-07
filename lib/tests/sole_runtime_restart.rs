@@ -102,7 +102,7 @@ impl Source for OptionalSnapshotSource {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-    async fn initialize(&self, context: SourceRuntimeContext) {
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
         self.status.wire(context.update_tx).await;
     }
     async fn start(&self) -> Result<()> {
@@ -169,8 +169,8 @@ impl Reaction for RecordingReaction {
     fn properties(&self) -> HashMap<String, serde_json::Value> {
         HashMap::new()
     }
-    async fn initialize(&self, context: ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
     async fn start(&self) -> Result<()> {
         self.base.set_status(ComponentStatus::Running, None).await;

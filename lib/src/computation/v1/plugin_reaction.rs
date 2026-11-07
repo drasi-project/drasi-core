@@ -75,7 +75,7 @@ pub(super) fn snapshot_response_parts(
         &snapshot.projector,
         query_id,
         snapshot,
-        &ComponentId::try_new("snapshot-bridge")?,
+        &ComponentId::derive_owned(&ComponentId::try_new(query_id)?, "snapshot-bridge")?,
         SystemMetadata::new(
             StreamId::try_new("snapshot-bridge/out")?,
             snapshot.as_of_sequence,
@@ -271,8 +271,9 @@ struct ReactionLife {
     initialization_complete: bool,
     needs_stop: bool,
     running: bool,
-    replace_on_start: bool,
     closed: bool,
+    disposed: bool,
+    paused: bool,
     accepted: BTreeMap<String, (u64, u64)>,
     query_generations: BTreeMap<String, u64>,
 }
@@ -281,7 +282,6 @@ pub struct ReactionPluginHost {
     id: String,
     query_ids: Vec<String>,
     reaction: Mutex<Arc<dyn Reaction>>,
-    constructor: Option<Arc<dyn ReactionPluginConstructor>>,
     services: LegacyPluginServices,
     catalog: QueryResultsCatalog,
     options: ReactionPluginOptions,
@@ -306,15 +306,7 @@ impl ReactionPluginHost {
         catalog: QueryResultsCatalog,
         options: ReactionPluginOptions,
     ) -> anyhow::Result<Arc<Self>> {
-        Self::new(
-            reaction.into(),
-            services,
-            catalog,
-            options,
-            true,
-            None,
-            false,
-        )
+        Self::new(reaction.into(), services, catalog, options, true, false)
     }
     pub fn borrowed(
         reaction: Arc<dyn Reaction>,
@@ -326,26 +318,17 @@ impl ReactionPluginHost {
             catalog,
             ReactionPluginOptions::default(),
             false,
-            None,
             false,
         )
     }
-    pub async fn recreatable(
+    pub async fn from_constructor(
         constructor: Arc<dyn ReactionPluginConstructor>,
         services: LegacyPluginServices,
         catalog: QueryResultsCatalog,
         options: ReactionPluginOptions,
     ) -> anyhow::Result<Arc<Self>> {
         let reaction = constructor.create().await?;
-        Self::new(
-            reaction.into(),
-            services,
-            catalog,
-            options,
-            true,
-            Some(constructor),
-            false,
-        )
+        Self::new(reaction.into(), services, catalog, options, true, false)
     }
     pub(crate) fn for_runtime(
         reaction: Arc<dyn Reaction>,
@@ -354,7 +337,7 @@ impl ReactionPluginHost {
         options: ReactionPluginOptions,
         metrics: RuntimeReactionMetrics,
     ) -> anyhow::Result<Arc<Self>> {
-        let mut host = Self::new(reaction, services, catalog, options, true, None, true)?;
+        let mut host = Self::new(reaction, services, catalog, options, true, true)?;
         Arc::get_mut(&mut host).expect("new host").runtime_metrics = Some(metrics);
         Ok(host)
     }
@@ -364,7 +347,6 @@ impl ReactionPluginHost {
         catalog: QueryResultsCatalog,
         options: ReactionPluginOptions,
         owned: bool,
-        constructor: Option<Arc<dyn ReactionPluginConstructor>>,
         deferred_validation: bool,
     ) -> anyhow::Result<Arc<Self>> {
         if options.bootstrap_timeout_secs == 0 {
@@ -411,7 +393,6 @@ impl ReactionPluginHost {
             id,
             query_ids,
             reaction: Mutex::new(reaction),
-            constructor,
             services,
             catalog,
             options,
@@ -690,33 +671,11 @@ impl ReactionPluginHost {
             return Ok(());
         }
         self.validate_startup(self.reaction()?.as_ref()).await?;
-        if life.replace_on_start {
-            let reaction = self
-                .constructor
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("missing reaction reconstruction factory"))?
-                .create()
-                .await?;
-            if reaction.id() != self.id || reaction.query_ids() != self.query_ids {
-                anyhow::bail!("reaction reconstruction changed identity or query bindings");
-            }
-            let previous = self.reaction()?;
-            if reaction.is_durable() != previous.is_durable()
-                || reaction.needs_snapshot_on_fresh_start()
-                    != previous.needs_snapshot_on_fresh_start()
-                || reaction.default_recovery_policy() != previous.default_recovery_policy()
-            {
-                anyhow::bail!("reaction reconstruction changed its recovery contract");
-            }
-            *self
-                .reaction
-                .lock()
-                .map_err(|_| anyhow::anyhow!("reaction ownership poisoned"))? = reaction.into();
-            life.initialized = false;
-            life.initialization_complete = false;
-            life.replace_on_start = false;
-        }
-        let reaction = self.initialize_locked(&mut life).await?;
+        anyhow::ensure!(
+            life.initialization_complete,
+            "reaction must be initialized before start"
+        );
+        let reaction = self.reaction()?;
         self.observations.reset().await?;
         let mut heads = BTreeMap::new();
         for query_id in &self.query_ids {
@@ -889,9 +848,9 @@ impl ReactionPluginHost {
                 .drive(self.reaction()?.stop(), true)
                 .await?;
             life.needs_stop = false;
-            life.replace_on_start = self.constructor.is_some();
         }
         life.running = false;
+        life.paused = false;
         if self.owned {
             life.accepted.clear();
             life.query_generations.clear();
@@ -900,10 +859,31 @@ impl ReactionPluginHost {
     }
     pub(crate) async fn initialize_component(&self) -> anyhow::Result<()> {
         if !self.owned {
-            anyhow::bail!("borrowed reactions cannot be initialized");
+            return Ok(());
         }
         let mut life = self.life.lock().await;
+        anyhow::ensure!(!life.closed, "reaction host is closed");
         self.initialize_locked(&mut life).await?;
+        Ok(())
+    }
+    pub(crate) async fn pause_processing(&self) -> anyhow::Result<()> {
+        let mut life = self.life.lock().await;
+        if self.owned && life.running && !life.paused {
+            self.observations
+                .drive(self.reaction()?.pause_processing(), false)
+                .await?;
+            life.paused = true;
+        }
+        Ok(())
+    }
+    pub(crate) async fn resume_processing(&self) -> anyhow::Result<()> {
+        let mut life = self.life.lock().await;
+        if self.owned && life.paused {
+            self.observations
+                .drive(self.reaction()?.resume_processing(), false)
+                .await?;
+            life.paused = false;
+        }
         Ok(())
     }
     pub(crate) async fn wait_running(&self) -> anyhow::Result<()> {
@@ -933,7 +913,6 @@ impl ReactionPluginHost {
         }
         if !life.initialized {
             life.initialized = true;
-            life.needs_stop = true;
             let mut context = ReactionRuntimeContext::new(
                 self.services.scope.as_ref(),
                 &self.id,
@@ -954,7 +933,8 @@ impl ReactionPluginHost {
             self.observations
                 .drive(
                     async {
-                        reaction.initialize(context).await;
+                        reaction.bind_runtime_context(context).await;
+                        reaction.initialize().await?;
                         Ok(())
                     },
                     false,
@@ -1042,12 +1022,16 @@ impl ReactionPluginHost {
         );
         Ok(())
     }
-    pub async fn deprovision_owned(&self) -> anyhow::Result<()> {
+    pub async fn delete_owned_resources(&self) -> anyhow::Result<()> {
         if !self.owned {
-            anyhow::bail!("cannot deprovision a borrowed reaction");
+            anyhow::bail!("cannot delete a borrowed reaction's resources");
         }
-        self.shutdown().await?;
-        self.reaction()?.deprovision().await
+        let life = self.life.lock().await;
+        anyhow::ensure!(
+            !life.disposed && !life.needs_stop,
+            "reaction resource deletion requires a stopped, undisposed owner"
+        );
+        self.reaction()?.delete_owned_resources().await
     }
     pub(crate) async fn start_component(&self) -> anyhow::Result<()> {
         self.start().await
@@ -1172,7 +1156,14 @@ impl ReactionPluginHost {
 impl ResourceCleanup for ReactionPluginHost {
     async fn shutdown(&self) -> anyhow::Result<()> {
         self.stop().await?;
-        self.life.lock().await.closed = true;
+        let mut life = self.life.lock().await;
+        life.closed = true;
+        if self.owned && !life.disposed {
+            self.observations
+                .drive(self.reaction()?.dispose(), true)
+                .await?;
+            life.disposed = true;
+        }
         self.observations.close().await;
         Ok(())
     }
@@ -1211,12 +1202,24 @@ impl ComputationComponent for ReactionPluginAdapter {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn deprovision(&mut self) -> anyhow::Result<()> {
+    async fn initialize(&mut self) -> anyhow::Result<()> {
+        self.host.initialize_component().await
+    }
+    async fn dispose(&mut self) -> anyhow::Result<()> {
+        self.host.shutdown().await
+    }
+    async fn pause_processing(&mut self) -> anyhow::Result<()> {
+        self.host.pause_processing().await
+    }
+    async fn resume_processing(&mut self) -> anyhow::Result<()> {
+        self.host.resume_processing().await
+    }
+    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.host.owned,
             "borrowed reaction state must be removed by its owner"
         );
-        self.host.reaction()?.deprovision().await
+        self.host.reaction()?.delete_owned_resources().await
     }
     async fn start(&mut self) -> anyhow::Result<()> {
         self.host.start_component().await

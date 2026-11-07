@@ -542,6 +542,10 @@ mod tests {
     use crate::{computation::v1::*, management::DesiredInstance};
     use std::collections::BTreeMap;
 
+    fn component(number: u128) -> ComponentId {
+        ComponentId::from_uuid(uuid::Uuid::from_u128(number))
+    }
+
     fn definition() -> DesiredTopology {
         let mut topology = DesiredInstance::default().topology;
         let resource = ResourceId::try_new("storage").unwrap();
@@ -554,10 +558,11 @@ mod tests {
         topology
             .resource_configurations
             .insert(resource.clone(), serde_json::json!({"path": "old"}));
-        for name in ["owner", "reader", "independent"] {
-            let id = ComponentId::try_new(name).unwrap();
+        for (number, name) in [(1, "owner"), (2, "reader"), (3, "independent")] {
+            let id = component(number);
             let descriptor = ComponentDescriptor::try_new(id, vec![]).unwrap();
             topology.components.push(DesiredComponent {
+                name: ComponentName::try_new(name).unwrap(),
                 descriptor: descriptor.clone(),
                 role: ComponentRole::Service,
                 completion: None,
@@ -580,8 +585,8 @@ mod tests {
             });
         }
         topology.control_connections.push((
-            ComponentId::try_new("owner").unwrap(),
-            ComponentId::try_new("reader").unwrap(),
+            component(1),
+            component(2),
         ));
         topology.validate_structure().unwrap();
         topology
@@ -634,7 +639,7 @@ mod tests {
                 2 => {
                     invalid
                         .components
-                        .insert(ComponentId::try_new("independent").unwrap());
+                        .insert(component(3));
                 }
                 _ => {
                     invalid
@@ -679,7 +684,7 @@ mod tests {
             .resource_configurations
             .insert(independent.clone(), serde_json::json!({"path": "other"}));
         previous.component_resources.insert(
-            ComponentId::try_new("independent").unwrap(),
+            component(3),
             BTreeSet::from([independent.clone()]),
         );
         let mut desired = previous.clone();
@@ -695,7 +700,7 @@ mod tests {
         assert_eq!(selected.resources, BTreeSet::from([changed]));
         assert!(!selected
             .components
-            .contains(&ComponentId::try_new("independent").unwrap()));
+            .contains(&component(3)));
     }
 
     #[test]
@@ -708,7 +713,7 @@ mod tests {
             .is::<RecoveryTransitionRequired>());
         let mut next = previous.clone();
         next.components
-            .retain(|node| node.descriptor.id().as_str() != "reader");
+            .retain(|node| node.descriptor.id() != &component(2));
         next.control_connections.clear();
         assert!(validate(&previous, &next).is_err());
         let mut next = previous.clone();
@@ -756,8 +761,8 @@ mod tests {
         assert!(validate(&previous, &next).is_err());
         let mut next = previous.clone();
         next.control_connections.push((
-            ComponentId::try_new("owner").unwrap(),
-            ComponentId::try_new("independent").unwrap(),
+            component(1),
+            component(3),
         ));
         assert!(validate(&previous, &next).is_err());
         let mut next = previous.clone();

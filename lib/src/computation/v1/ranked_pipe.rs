@@ -929,7 +929,9 @@ mod tests {
         let config = crate::Query::cypher("query")
             .query("MATCH (n) RETURN n")
             .from_input(future)
-            .build();
+            .build()
+            .unwrap()
+            .with_assigned_id(ComponentId::generate());
         let settings = QueryExecutionSettings::from_legacy_config(&config);
         settings.validate(None).unwrap();
 

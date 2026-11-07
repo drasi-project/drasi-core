@@ -160,6 +160,9 @@ impl From<ReplayRejection> for crate::PipeError {
 mod dataset_tests {
     use super::*;
 
+    const QUERY: &str = "00112233-4455-4677-8899-aabbccddeeff";
+    const OTHER_QUERY: &str = "11223344-5566-4788-99aa-bbccddeeff00";
+
     #[test]
     fn dataset_identity_is_stable_and_scoped_to_every_output_dimension() {
         let namespace = |scope: &str, graph: &str, component: &str, port: &str| {
@@ -171,26 +174,26 @@ mod dataset_tests {
             )
             .unwrap()
         };
-        let first = namespace("instance", "graph", "query", "out");
-        assert_eq!(first, namespace("instance", "graph", "query", "out"));
+        let first = namespace("instance", "graph", QUERY, "out");
+        assert_eq!(first, namespace("instance", "graph", QUERY, "out"));
         for other in [
-            namespace("another-instance", "graph", "query", "out"),
-            namespace("instance", "another-graph", "query", "out"),
-            namespace("instance", "graph", "another-query", "out"),
-            namespace("instance", "graph", "query", "another-out"),
+            namespace("another-instance", "graph", QUERY, "out"),
+            namespace("instance", "another-graph", QUERY, "out"),
+            namespace("instance", "graph", OTHER_QUERY, "out"),
+            namespace("instance", "graph", QUERY, "another-out"),
         ] {
             assert_ne!(first, other);
         }
         assert_ne!(
-            namespace("a/b", "c", "query", "out"),
-            namespace("a", "b/c", "query", "out")
+            namespace("a/b", "c", QUERY, "out"),
+            namespace("a", "b/c", QUERY, "out")
         );
         assert_eq!(first.len(), "drasi.output/".len() + 64);
     }
 
     #[test]
     fn missing_output_scope_is_not_replaced_with_a_default() {
-        let component = ComponentId::try_new("query").unwrap();
+        let component = ComponentId::try_new(QUERY).unwrap();
         let port = PortId::try_new("out").unwrap();
         assert!(dataset_namespace("", "graph", &component, &port).is_err());
         assert!(dataset_namespace("instance", "", &component, &port).is_err());

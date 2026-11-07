@@ -45,7 +45,7 @@ impl ProgressIdentity {
             self.version == VERSION,
             "unsupported source progress version"
         );
-        ComponentId::try_new(self.graph_id.as_str())?;
+        drasi_computation_contracts::validate_identifier("graph", &self.graph_id)?;
         Ok(())
     }
 }
@@ -69,7 +69,7 @@ impl Key {
     pub(crate) fn into_key(self) -> anyhow::Result<SourceProgressKey> {
         Ok(match self {
             Self::Source(source) => {
-                ComponentId::try_new(source.as_str())?;
+                drasi_computation_contracts::validate_identifier("source progress key", &source)?;
                 SourceProgressKey::Source(source)
             }
             Self::Stream(stream) => SourceProgressKey::Stream(stream),
@@ -403,7 +403,7 @@ mod tests {
         let mut identity = ProgressIdentity {
             version: VERSION,
             graph_id: "graph".into(),
-            component_id: ComponentId::try_new("query")?,
+            component_id: ComponentId::try_new("bf812052-a31d-4c76-83a4-4d6f7133bbee")?,
         };
         identity.validate()?;
         identity.graph_id.clear();
@@ -493,7 +493,7 @@ mod tests {
             encode(&ProgressIdentity {
                 version: VERSION,
                 graph_id: "graph".into(),
-                component_id: ComponentId::try_new("query").unwrap(),
+                component_id: ComponentId::try_new("bf812052-a31d-4c76-83a4-4d6f7133bbee").unwrap(),
             })
             .map_err(Failure::from)
         })

@@ -32,6 +32,8 @@ use tokio::sync::{mpsc, Notify};
 
 #[derive(Default)]
 struct Calls {
+    initializes: AtomicUsize,
+    disposes: AtomicUsize,
     starts: AtomicUsize,
     stops: AtomicUsize,
     updates: AtomicUsize,
@@ -72,6 +74,14 @@ impl ComputationComponent for Source {
         self.calls.starts.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
+    async fn initialize(&mut self) -> anyhow::Result<()> {
+        self.calls.initializes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    async fn dispose(&mut self) -> anyhow::Result<()> {
+        self.calls.disposes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
     async fn stop(&mut self) -> anyhow::Result<()> {
         self.calls.stops.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -86,6 +96,7 @@ impl EnvelopeSource for Source {
 
 struct Sink {
     descriptor: ComponentDescriptor,
+    fixture_name: String,
     calls: Arc<Calls>,
     received: mpsc::Sender<(String, u64)>,
     label: String,
@@ -104,6 +115,14 @@ impl Drop for Sink {
 }
 #[async_trait]
 impl ComputationComponent for Sink {
+    async fn initialize(&mut self) -> anyhow::Result<()> {
+        self.calls.initializes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    async fn dispose(&mut self) -> anyhow::Result<()> {
+        self.calls.disposes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         if self.calls.panic_update_metadata.load(Ordering::SeqCst)
             && self.calls.updates.load(Ordering::SeqCst) > 0
@@ -142,7 +161,17 @@ impl ComputationComponent for Sink {
         }
         Ok(())
     }
-    async fn reconfigure(&mut self, context: ConstructionContext) -> anyhow::Result<()> {
+    async fn apply_update(&mut self, context: ComponentUpdateContext) -> anyhow::Result<()> {
+        assert_eq!(
+            context.plan,
+            ComponentUpdatePlan {
+                mode: ComponentUpdateMode::InPlace,
+                data: ComponentUpdateData::Preserve,
+            }
+        );
+        assert!(!context.operation_id.is_empty());
+        assert_eq!(context.current.descriptor.id(), self.descriptor.id());
+        assert_eq!(context.proposed.component_id, *self.descriptor.id());
         let gate = self.calls.update_gate.lock().expect("update gate").take();
         if let Some(gate) = gate {
             gate.entered.notify_one();
@@ -152,7 +181,7 @@ impl ComputationComponent for Sink {
             !self.calls.panic_update.load(Ordering::SeqCst),
             "reconfiguration fault"
         );
-        self.label = context.configuration()["label"]
+        self.label = context.proposed.configuration()["label"]
             .as_str()
             .expect("validated")
             .into();
@@ -195,6 +224,7 @@ fn source(calls: Arc<Calls>) -> (Box<dyn EnvelopeSource>, mpsc::Sender<OutputEnv
 fn sink(id: &str, label: &str, calls: Arc<Calls>, received: mpsc::Sender<(String, u64)>) -> Sink {
     Sink {
         descriptor: descriptor(id, &["in"], &[]),
+        fixture_name: id.to_owned(),
         calls,
         received,
         label: label.into(),
@@ -205,6 +235,7 @@ fn sink(id: &str, label: &str, calls: Arc<Calls>, received: mpsc::Sender<(String
 }
 fn definition(id: &str) -> DesiredComponent {
     DesiredComponent {
+        name: name(id),
         descriptor: descriptor(id, &["in"], &[]),
         role: ComponentRole::Sink,
         completion: Some(SinkCompletion::Handled),
@@ -224,7 +255,7 @@ fn relationship(to: &str) -> DesiredRelationship {
 fn bind_sink(sink: Sink) -> TopologyBindings {
     let mut bindings = TopologyBindings::default();
     bindings.components.insert(
-        sink.descriptor.id().to_string(),
+        sink.fixture_name.clone(),
         ConstructedComponent::sink(Box::new(sink)),
     );
     bindings
@@ -238,7 +269,7 @@ async fn activate(control: &GraphControl) {
     assert_eq!(report.summary, OperationSummary::Completed);
 }
 fn cancelled(result: GraphResult<()>) {
-    assert!(matches!(result, Err(GraphError::Cancelled)));
+    assert!(matches!(result, Err(GraphError::Cancelled)), "{result:?}");
 }
 
 macro_rules! both_tokio_flavors {
@@ -267,11 +298,17 @@ async fn replace_sink_at_safe_boundary() {
     let (source, input) = source(upstream.clone());
     let (received, mut output_rx) = mpsc::channel(16);
     let gate = Arc::new(Gate::default());
-    let mut original = sink("sink", "old", old.clone(), received.clone());
+    let mut original = SinkVariant::new(old.clone());
     original.gate = Some(gate.clone());
+    let factory = Arc::new(Factory::with_variants(
+        "sink",
+        "1",
+        received,
+        [("old", original), ("new", SinkVariant::new(new.clone()))],
+    ));
     let mut graph = ComputationGraph::builder("replace")
-        .source(source)
-        .sink(Box::new(original))
+        .source(name("source"), source)
+        .component(name("sink"), factory.specification("old"), factory.clone())
         .bind_stream(endpoint("source", "out"), stream("source"))
         .connect(
             edge("source", "sink"),
@@ -292,7 +329,7 @@ async fn replace_sink_at_safe_boundary() {
         let preview = control
             .preview(
                 GraphRevision(1),
-                vec![DesiredMutation::ReplaceComponent(definition("sink"))],
+                vec![DesiredMutation::ReplaceComponent(factory.desired("new"))],
             )
             .await
             .expect("preview");
@@ -300,10 +337,7 @@ async fn replace_sink_at_safe_boundary() {
         assert!(preview.restarted().is_empty());
         assert!(!preview.paused().contains(&component("source")));
         let stale = preview.clone();
-        let replacement = control.reconcile(
-            preview,
-            bind_sink(sink("sink", "new", new.clone(), received)),
-        );
+        let replacement = control.reconcile(preview, TopologyBindings::default());
         tokio::pin!(replacement);
         tokio::select! {
             result = &mut replacement => panic!("replacement interrupted admitted handling: {result:?}"),
@@ -362,21 +396,22 @@ async fn sustained_multihop_fanout_churn() {
     let (source, input) = source(upstream.clone());
     let (received, mut outputs) = mpsc::channel(8);
     let mut graph = ComputationGraph::builder("sustained-fanout")
-        .source(source)
-        .transformer(Box::new(NativeTransform::new("middle", |input| {
-            Ok(vec![output(derived(
-                &input.envelope,
-                "middle",
-                input.envelope.system().sequence(),
-                input.envelope.changes().clone(),
-            ))])
-        })))
-        .sink(Box::new(sink(
-            "stable",
-            "stable",
-            stable.clone(),
-            received.clone(),
-        )))
+        .source(name("source"), source)
+        .transformer(
+            name("middle"),
+            Box::new(NativeTransform::new("middle", |input| {
+                Ok(vec![output(derived(
+                    &input.envelope,
+                    "middle",
+                    input.envelope.system().sequence(),
+                    input.envelope.changes().clone(),
+                ))])
+            })),
+        )
+        .sink(
+            name("stable"),
+            Box::new(sink("stable", "stable", stable.clone(), received.clone())),
+        )
         .bind_stream(endpoint("source", "out"), stream("source"))
         .bind_stream(endpoint("middle", "out"), stream("middle"))
         .connect(
@@ -398,13 +433,19 @@ async fn sustained_multihop_fanout_churn() {
             let old = Arc::new(Calls::default());
             let new = Arc::new(Calls::default());
             let gate = Arc::new(Gate::default());
-            let mut consumer = sink("transient", "old", old.clone(), received.clone());
+            let mut consumer = SinkVariant::new(old.clone());
             consumer.gate = Some(gate.clone());
+            let factory = Arc::new(Factory::with_variants(
+                "transient",
+                &cycle.to_string(),
+                received.clone(),
+                [("old", consumer), ("new", SinkVariant::new(new.clone()))],
+            ));
             let preview = control
                 .preview(
                     revision,
                     vec![
-                        DesiredMutation::PutComponent(definition("transient")),
+                        DesiredMutation::PutComponent(factory.desired("old")),
                         DesiredMutation::Bind(DesiredRelationship {
                             definition: edge("middle", "transient"),
                             policy: RelationshipPolicy::default(),
@@ -414,10 +455,12 @@ async fn sustained_multihop_fanout_churn() {
                 )
                 .await
                 .expect("add preview");
-            let added = control
-                .reconcile(preview, bind_sink(consumer))
-                .await
-                .expect("add");
+            let mut bindings = TopologyBindings::default();
+            bindings
+                .factories
+                .register(factory.clone())
+                .expect("fixture factory");
+            let added = control.reconcile(preview, bindings).await.expect("add");
             assert_eq!(added.summary, OperationSummary::Completed);
             revision = added.revision;
             let first = cycle * 2 + 1;
@@ -432,14 +475,11 @@ async fn sustained_multihop_fanout_churn() {
             let preview = control
                 .preview(
                     revision,
-                    vec![DesiredMutation::ReplaceComponent(definition("transient"))],
+                    vec![DesiredMutation::ReplaceComponent(factory.desired("new"))],
                 )
                 .await
                 .expect("replace preview");
-            let replacement = control.reconcile(
-                preview,
-                bind_sink(sink("transient", "new", new.clone(), received.clone())),
-            );
+            let replacement = control.reconcile(preview, TopologyBindings::default());
             let (report, ()) = tokio::join!(replacement, async {
                 let mut observed = control.subscribe_observed();
                 observed
@@ -534,13 +574,16 @@ async fn add_remove_preserves_stable_indices() {
     let (source, input) = source(upstream.clone());
     let (received, mut output_rx) = mpsc::channel(16);
     let mut graph = ComputationGraph::builder("live-topology")
-        .source(source)
-        .sink(Box::new(sink(
-            "original",
-            "original",
-            original.clone(),
-            received.clone(),
-        )))
+        .source(name("source"), source)
+        .sink(
+            name("original"),
+            Box::new(sink(
+                "original",
+                "original",
+                original.clone(),
+                received.clone(),
+            )),
+        )
         .bind_stream(endpoint("source", "out"), stream("source"))
         .connect(
             edge("source", "original"),
@@ -644,8 +687,11 @@ async fn rebind_revokes_old_sender_after_handling_admitted_work_without_restarti
     let (received, mut output_rx) = mpsc::channel(8);
     let senders = Arc::new(Mutex::new(Vec::new()));
     let mut graph = ComputationGraph::builder("rebind")
-        .source(source)
-        .sink(Box::new(sink("sink", "sink", downstream.clone(), received)))
+        .source(name("source"), source)
+        .sink(
+            name("sink"),
+            Box::new(sink("sink", "sink", downstream.clone(), received)),
+        )
         .bind_stream(endpoint("source", "out"), stream("source"))
         .connect(
             edge("source", "sink"),
@@ -707,13 +753,11 @@ async fn permissible_orphan_is_visible_exportable_and_can_be_rebound() {
         ..RelationshipPolicy::default()
     };
     let mut graph = ComputationGraph::builder("orphan")
-        .source(source)
-        .sink(Box::new(sink(
-            "sink",
-            "sink",
-            Arc::new(Calls::default()),
-            received,
-        )))
+        .source(name("source"), source)
+        .sink(
+            name("sink"),
+            Box::new(sink("sink", "sink", Arc::new(Calls::default()), received)),
+        )
         .bind_stream(endpoint("source", "out"), stream("source"))
         .connect(
             edge("source", "sink"),
@@ -798,8 +842,8 @@ async fn drain_waits_for_handling_and_failed_cleanup_retains_desired_ownership_f
     let mut consumer = sink("sink", "sink", downstream.clone(), received);
     consumer.gate = Some(gate.clone());
     let mut graph = ComputationGraph::builder("drain")
-        .source(source)
-        .sink(Box::new(consumer))
+        .source(name("source"), source)
+        .sink(name("sink"), Box::new(consumer))
         .bind_stream(endpoint("source", "out"), stream("source"))
         .connect(
             edge("source", "sink"),
@@ -882,8 +926,8 @@ async fn acceptance_only_sink_rejects_handled_drain_before_any_lifecycle_change(
     let mut consumer = sink("sink", "sink", calls.clone(), received);
     consumer.accepted = true;
     let mut graph = ComputationGraph::builder("accepted")
-        .source(source)
-        .sink(Box::new(consumer))
+        .source(name("source"), source)
+        .sink(name("sink"), Box::new(consumer))
         .bind_stream(endpoint("source", "out"), stream("source"))
         .connect(
             edge("source", "sink"),
@@ -913,11 +957,30 @@ async fn acceptance_only_sink_rejects_handled_drain_before_any_lifecycle_change(
     cancelled(result);
 }
 
+#[derive(Clone)]
+struct SinkVariant {
+    calls: Arc<Calls>,
+    gate: Option<Arc<Gate>>,
+    start_gate: Option<Arc<Gate>>,
+}
+
+impl SinkVariant {
+    fn new(calls: Arc<Calls>) -> Self {
+        Self {
+            calls,
+            gate: None,
+            start_gate: None,
+        }
+    }
+}
+
 struct Factory {
     descriptor: FactoryDescriptor,
     calls: Arc<Calls>,
     received: mpsc::Sender<(String, u64)>,
     binds: bool,
+    component_label: String,
+    variants: BTreeMap<String, SinkVariant>,
 }
 impl Factory {
     fn binding(mut self) -> Self {
@@ -932,14 +995,19 @@ impl Factory {
                 role: ComponentRole::Sink,
                 configuration_version: 1,
                 configuration: ConfigurationSchema {
-                    fields: BTreeMap::from([(
-                        Arc::from("label"),
-                        ConfigurationField {
-                            value_type: ConfigurationType::String,
-                            required: true,
-                            secret: false,
-                        },
-                    )]),
+                    fields: ["label", "strategy"]
+                        .into_iter()
+                        .map(|field| {
+                            (
+                                Arc::from(field),
+                                ConfigurationField {
+                                    value_type: ConfigurationType::String,
+                                    required: true,
+                                    secret: false,
+                                },
+                            )
+                        })
+                        .collect(),
                     allow_additional: false,
                 },
                 dependencies: BTreeMap::new(),
@@ -947,21 +1015,60 @@ impl Factory {
             calls,
             received,
             binds: false,
+            component_label: "sink".into(),
+            variants: BTreeMap::new(),
         }
+    }
+    fn with_variants(
+        component_label: &str,
+        version: &str,
+        received: mpsc::Sender<(String, u64)>,
+        variants: impl IntoIterator<Item = (&'static str, SinkVariant)>,
+    ) -> Self {
+        let mut factory = Self::new(Arc::default(), received);
+        factory.component_label = component_label.into();
+        factory.descriptor.implementation =
+            ImplementationIdentity::try_new(format!("test-sink/{component_label}"), version)
+                .expect("fixture implementation");
+        factory.variants = variants
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect();
+        factory
     }
     fn specification(&self, label: &str) -> ComponentSpecification {
         ComponentSpecification {
-            descriptor: descriptor("sink", &["in"], &[]),
+            descriptor: descriptor(&self.component_label, &["in"], &[]),
             role: ComponentRole::Sink,
             completion: Some(SinkCompletion::Handled),
             implementation: self.descriptor.implementation.clone(),
             configuration_version: 1,
-            configuration: BTreeMap::from([(
-                Arc::from("label"),
-                ConfigurationValue::Literal(label.into()),
-            )]),
+            configuration: BTreeMap::from([
+                (
+                    Arc::from("label"),
+                    ConfigurationValue::Literal(label.into()),
+                ),
+                (
+                    Arc::from("strategy"),
+                    ConfigurationValue::Literal("inPlace".into()),
+                ),
+            ]),
             dependencies: BTreeMap::new(),
         }
+    }
+    fn replacement_specification(&self, label: &str) -> ComponentSpecification {
+        let mut specification = self.specification(label);
+        specification.configuration.insert(
+            "strategy".into(),
+            ConfigurationValue::Literal("recreate".into()),
+        );
+        specification
+    }
+    fn desired(&self, label: &str) -> DesiredComponent {
+        let mut desired = definition(&self.component_label);
+        desired.construction =
+            ComponentConstruction::Factory(self.replacement_specification(label));
+        desired
     }
 }
 #[async_trait]
@@ -969,8 +1076,40 @@ impl ComponentFactory for Factory {
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }
-    fn supports_reconfiguration(&self) -> bool {
-        true
+    fn plan_update(
+        &self,
+        current: &ComponentSpecification,
+        proposed: &ComponentSpecification,
+    ) -> anyhow::Result<ComponentUpdatePlan> {
+        anyhow::ensure!(
+            current.descriptor == proposed.descriptor
+                && current.implementation == proposed.implementation
+                && current.role == proposed.role,
+            "fixture update changed its immutable interface"
+        );
+        let mode = match proposed.configuration.get("strategy") {
+            Some(ConfigurationValue::Literal(value)) if value == "inPlace" => {
+                ComponentUpdateMode::InPlace
+            }
+            Some(ConfigurationValue::Literal(value)) if value == "recreate" => {
+                ComponentUpdateMode::Recreate
+            }
+            _ => anyhow::bail!("unsupported fixture update strategy"),
+        };
+        if !self.variants.is_empty() {
+            for specification in [current, proposed] {
+                anyhow::ensure!(
+                    matches!(specification.configuration.get("label"),
+                    Some(ConfigurationValue::Literal(value))
+                        if value.as_str().is_some_and(|label| self.variants.contains_key(label))),
+                    "fixture has no constructor for this version"
+                );
+            }
+        }
+        Ok(ComponentUpdatePlan {
+            mode,
+            data: ComponentUpdateData::Preserve,
+        })
     }
     fn binds_inputs(&self) -> bool {
         self.binds
@@ -991,14 +1130,17 @@ impl ComponentFactory for Factory {
         &self,
         context: ConstructionContext,
     ) -> Result<ConstructedComponent, ComponentCreationError> {
-        self.calls.creates.fetch_add(1, Ordering::SeqCst);
-        self.calls
+        let label = context.configuration()["label"].as_str().expect("label");
+        let variant = self.variants.get(label);
+        let calls = variant.map_or_else(|| self.calls.clone(), |variant| variant.calls.clone());
+        calls.creates.fetch_add(1, Ordering::SeqCst);
+        calls
             .bound
             .lock()
             .expect("bound")
             .push(context.input_bindings().to_vec());
-        if self.calls.fail_create.swap(false, Ordering::SeqCst) {
-            return Err(if self.calls.terminal.load(Ordering::SeqCst) {
+        if calls.fail_create.swap(false, Ordering::SeqCst) {
+            return Err(if calls.terminal.load(Ordering::SeqCst) {
                 ComponentCreationError::terminal(anyhow::anyhow!("invalid runtime configuration"))
             } else {
                 ComponentCreationError::retryable(anyhow::anyhow!(
@@ -1006,12 +1148,13 @@ impl ComponentFactory for Factory {
                 ))
             });
         }
-        Ok(ConstructedComponent::sink(Box::new(sink(
-            "sink",
-            context.configuration()["label"].as_str().expect("label"),
-            self.calls.clone(),
-            self.received.clone(),
-        ))))
+        let mut component = sink(&self.component_label, label, calls, self.received.clone());
+        assert_eq!(component.descriptor, context.specification.descriptor);
+        if let Some(variant) = variant {
+            component.gate = variant.gate.clone();
+            component.start_gate = variant.start_gate.clone();
+        }
+        Ok(ConstructedComponent::sink(Box::new(component)))
     }
 }
 
@@ -1025,8 +1168,12 @@ async fn retryable_creation_is_reconstructed_but_terminal_failure_requires_spec_
         let factory = Arc::new(Factory::new(calls.clone(), received));
         let (source, input) = source(Arc::new(Calls::default()));
         let mut graph = ComputationGraph::builder("creation-retry")
-            .source(source)
-            .component(factory.specification("first"), factory.clone())
+            .source(name("source"), source)
+            .component(
+                name("sink"),
+                factory.specification("first"),
+                factory.clone(),
+            )
             .bind_stream(endpoint("source", "out"), stream("source"))
             .connect(
                 edge("source", "sink"),
@@ -1090,8 +1237,12 @@ async fn supported_in_place_update_changes_behavior_without_reconstruction_or_up
     let factory = Arc::new(Factory::new(calls.clone(), received));
     let (source, input) = source(upstream.clone());
     let mut graph = ComputationGraph::builder("in-place")
-        .source(source)
-        .component(factory.specification("before"), factory.clone())
+        .source(name("source"), source)
+        .component(
+            name("sink"),
+            factory.specification("before"),
+            factory.clone(),
+        )
         .bind_stream(endpoint("source", "out"), stream("source"))
         .connect(
             edge("source", "sink"),
@@ -1131,6 +1282,8 @@ async fn supported_in_place_update_changes_behavior_without_reconstruction_or_up
         assert_eq!(calls.starts.load(Ordering::SeqCst), 1);
         assert_eq!(calls.stops.load(Ordering::SeqCst), 0);
         assert_eq!(calls.updates.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.initializes.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.disposes.load(Ordering::SeqCst), 0);
         assert_eq!(upstream.starts.load(Ordering::SeqCst), 1);
         control.cancel();
     });
@@ -1146,14 +1299,16 @@ async fn pending_reconfiguration_keeps_disjoint_lifecycle_and_caller_cancellatio
     let factory = Arc::new(Factory::new(calls.clone(), received.clone()));
     let (source, input) = source(Arc::new(Calls::default()));
     let mut graph = ComputationGraph::builder("owned-reconfiguration")
-        .source(source)
-        .component(factory.specification("before"), factory.clone())
-        .sink(Box::new(sink(
-            "healthy",
-            "healthy",
-            healthy.clone(),
-            received,
-        )))
+        .source(name("source"), source)
+        .component(
+            name("sink"),
+            factory.specification("before"),
+            factory.clone(),
+        )
+        .sink(
+            name("healthy"),
+            Box::new(sink("healthy", "healthy", healthy.clone(), received)),
+        )
         .bind_stream(endpoint("source", "out"), stream("source"))
         .connect(
             edge("source", "sink"),
@@ -1294,8 +1449,12 @@ async fn force_cancellation_joins_owned_reconfiguration_and_defers_reactivation(
     let factory = Arc::new(Factory::new(calls.clone(), received));
     let (source, _input) = source(Arc::default());
     let mut graph = ComputationGraph::builder("forced-reconfiguration")
-        .source(source)
-        .component(factory.specification("before"), factory.clone())
+        .source(name("source"), source)
+        .component(
+            name("sink"),
+            factory.specification("before"),
+            factory.clone(),
+        )
         .bind_stream(endpoint("source", "out"), stream("source"))
         .connect(
             edge("source", "sink"),
@@ -1352,7 +1511,8 @@ async fn force_cancellation_joins_owned_reconfiguration_and_defers_reactivation(
             .await
             .unwrap();
         assert_eq!(restart.summary, OperationSummary::CompletedWithFailures);
-        desired.construction = ComponentConstruction::Factory(factory.specification("repaired"));
+        desired.construction =
+            ComponentConstruction::Factory(factory.replacement_specification("repaired"));
         let repair = control
             .preview(
                 control.desired_snapshot().revision,
@@ -1390,14 +1550,16 @@ async fn retired_component_faults_fence_only_the_affected_replacement() {
     let factory = Arc::new(Factory::new(calls.clone(), received.clone()));
     let (source, input) = source(Arc::new(Calls::default()));
     let mut graph = ComputationGraph::builder("owned-retirement")
-        .source(source)
-        .component(factory.specification("before"), factory.clone())
-        .sink(Box::new(sink(
-            "healthy",
-            "healthy",
-            Arc::default(),
-            received,
-        )))
+        .source(name("source"), source)
+        .component(
+            name("sink"),
+            factory.specification("before"),
+            factory.clone(),
+        )
+        .sink(
+            name("healthy"),
+            Box::new(sink("healthy", "healthy", Arc::default(), received)),
+        )
         .bind_stream(endpoint("source", "out"), stream("source"))
         .connect(
             edge("source", "sink"),
@@ -1415,7 +1577,8 @@ async fn retired_component_faults_fence_only_the_affected_replacement() {
         activate(&control).await;
         calls.panic_drop.store(true, Ordering::SeqCst);
         let mut desired = definition("sink");
-        desired.construction = ComponentConstruction::Factory(factory.specification("after"));
+        desired.construction =
+            ComponentConstruction::Factory(factory.replacement_specification("after"));
         let preview = control
             .preview(
                 control.desired_snapshot().revision,
@@ -1497,14 +1660,12 @@ async fn resource_metadata_destruction_is_owned_and_quarantines_its_generation()
     let (source, input) = source(Arc::default());
     let tasks = Arc::new(Mutex::new(Vec::new()));
     let mut graph = ComputationGraph::builder("owned-metadata-retirement")
-        .source(source)
-        .component(factory.specification("bad"), factory)
-        .sink(Box::new(sink(
-            "healthy",
-            "healthy",
-            Arc::default(),
-            received,
-        )))
+        .source(name("source"), source)
+        .component(name("sink"), factory.specification("bad"), factory)
+        .sink(
+            name("healthy"),
+            Box::new(sink("healthy", "healthy", Arc::default(), received)),
+        )
         .bind_stream(endpoint("source", "out"), stream("source"))
         .connect(
             edge("source", "sink"),
@@ -1590,7 +1751,25 @@ async fn resource_metadata_destruction_is_owned_and_quarantines_its_generation()
         assert_eq!(output_rx.recv().await, Some(("healthy".into(), 1)));
         control.cancel();
     });
-    cancelled(result);
+    let Err(GraphError::Cleanup { primary, errors }) = result else {
+        panic!("metadata retirement failure must remain visible during cleanup: {result:?}");
+    };
+    assert!(matches!(primary.as_deref(), Some(GraphError::Cancelled)));
+    assert_eq!(errors.len(), 1);
+    let GraphError::Component {
+        component: failed,
+        operation,
+        source,
+    } = errors[0].underlying()
+    else {
+        panic!("expected the retained metadata retirement failure: {errors:?}");
+    };
+    assert_eq!(failed, &component("sink"));
+    assert_eq!(*operation, "retire resource metadata");
+    assert!(source.downcast_ref::<ComponentPanic>().is_some());
+    assert!(source
+        .to_string()
+        .contains("retired metadata provider fault"));
 }
 both_tokio_flavors!(
     owned_metadata_retirement,
@@ -1604,14 +1783,21 @@ async fn reconfiguration_and_metadata_panics_quarantine_only_the_changed_generat
         let factory = Arc::new(Factory::new(calls.clone(), received.clone()));
         let (source, input) = source(Arc::new(Calls::default()));
         let mut graph = ComputationGraph::builder("reconfiguration-fault")
-            .source(source)
-            .component(factory.specification("before"), factory.clone())
-            .sink(Box::new(sink(
-                "healthy",
-                "healthy",
-                Arc::new(Calls::default()),
-                received,
-            )))
+            .source(name("source"), source)
+            .component(
+                name("sink"),
+                factory.specification("before"),
+                factory.clone(),
+            )
+            .sink(
+                name("healthy"),
+                Box::new(sink(
+                    "healthy",
+                    "healthy",
+                    Arc::new(Calls::default()),
+                    received,
+                )),
+            )
             .bind_stream(endpoint("source", "out"), stream("source"))
             .connect(
                 edge("source", "sink"),
@@ -1702,8 +1888,12 @@ async fn owned_preflight_panics_leave_the_previous_topology_and_traffic_usable()
     let factory = Arc::new(Factory::new(calls.clone(), received));
     let (source, input) = source(Arc::new(Calls::default()));
     let mut graph = ComputationGraph::builder("owned-preflight")
-        .source(source)
-        .component(factory.specification("before"), factory.clone())
+        .source(name("source"), source)
+        .component(
+            name("sink"),
+            factory.specification("before"),
+            factory.clone(),
+        )
         .bind_stream(endpoint("source", "out"), stream("source"))
         .connect(
             edge("source", "sink"),
@@ -1792,19 +1982,20 @@ async fn owned_pipe_faults_do_not_terminate_disjoint_lifecycle_work() {
     let (received, _output) = mpsc::channel(8);
     let healthy = Arc::new(Calls::default());
     let mut graph = ComputationGraph::builder("owned-pipe")
-        .source(source)
-        .sink(Box::new(sink(
-            "sink",
-            "sink",
-            Arc::new(Calls::default()),
-            received.clone(),
-        )))
-        .sink(Box::new(sink(
-            "healthy",
-            "healthy",
-            healthy.clone(),
-            received,
-        )))
+        .source(name("source"), source)
+        .sink(
+            name("sink"),
+            Box::new(sink(
+                "sink",
+                "sink",
+                Arc::new(Calls::default()),
+                received.clone(),
+            )),
+        )
+        .sink(
+            name("healthy"),
+            Box::new(sink("healthy", "healthy", healthy.clone(), received)),
+        )
         .bind_stream(endpoint("source", "out"), stream("source"))
         .connect(
             edge("source", "sink"),
@@ -1908,8 +2099,8 @@ async fn retained_backlog_boundaries() {
             consumer.gate = Some(gate.clone());
         }
         let mut graph = ComputationGraph::builder("retained-boundary")
-            .source(source)
-            .sink(Box::new(consumer))
+            .source(name("source"), source)
+            .sink(name("sink"), Box::new(consumer))
             .bind_stream(endpoint("source", "out"), stream("source"))
             .connect(edge("source", "sink"), Box::new(retained_config("store")))
             .declare_resource(ResourceSpecification {
@@ -2037,18 +2228,19 @@ async fn drain_multi_hop_backlog() {
     let (received, mut output_rx) = mpsc::channel(8);
     let gate = Arc::new(Gate::default());
     let mut graph = ComputationGraph::builder("multi-hop-drain")
-        .source(source)
-        .transformer(Box::new(GatedTransform {
-            descriptor: descriptor("transform", &["in"], &["out"]),
-            gate: Some(gate.clone()),
-            sequence: 0,
-        }))
-        .sink(Box::new(sink(
-            "sink",
-            "sink",
-            Arc::new(Calls::default()),
-            received,
-        )))
+        .source(name("source"), source)
+        .transformer(
+            name("transform"),
+            Box::new(GatedTransform {
+                descriptor: descriptor("transform", &["in"], &["out"]),
+                gate: Some(gate.clone()),
+                sequence: 0,
+            }),
+        )
+        .sink(
+            name("sink"),
+            Box::new(sink("sink", "sink", Arc::new(Calls::default()), received)),
+        )
         .bind_stream(endpoint("source", "out"), stream("source"))
         .bind_stream(endpoint("transform", "out"), stream("transform"))
         .connect(
@@ -2152,19 +2344,15 @@ async fn partial_resource_cleanup_keeps_revoked_bindings_quiesced_until_explicit
     let clean_a = Arc::new(AtomicUsize::new(0));
     let clean_b = Arc::new(AtomicUsize::new(0));
     let mut builder = ComputationGraph::builder("resource-replacement")
-        .source(source)
-        .sink(Box::new(sink(
-            "a",
-            "a",
-            Arc::new(Calls::default()),
-            received.clone(),
-        )))
-        .sink(Box::new(sink(
-            "b",
-            "b",
-            Arc::new(Calls::default()),
-            received,
-        )))
+        .source(name("source"), source)
+        .sink(
+            name("a"),
+            Box::new(sink("a", "a", Arc::new(Calls::default()), received.clone())),
+        )
+        .sink(
+            name("b"),
+            Box::new(sink("b", "b", Arc::new(Calls::default()), received)),
+        )
         .bind_stream(endpoint("source", "out"), stream("source"));
     for (id, fail, calls) in [("a", false, clean_a.clone()), ("b", true, clean_b.clone())] {
         builder = builder
@@ -2242,6 +2430,155 @@ async fn partial_resource_cleanup_keeps_revoked_bindings_quiesced_until_explicit
     graph.dispose().await.expect("release remaining resources");
 }
 
+enum ProducerConstruction {
+    Finite,
+    Channel(Mutex<Option<mpsc::Receiver<OutputEnvelope>>>),
+}
+
+struct ProducerRecipe {
+    calls: Arc<Calls>,
+    stream: StreamId,
+    construction: ProducerConstruction,
+}
+
+impl ProducerRecipe {
+    fn channel(stream: StreamId) -> (Self, mpsc::Sender<OutputEnvelope>) {
+        let (sender, receiver) = mpsc::channel(16);
+        (
+            Self {
+                calls: Arc::default(),
+                stream,
+                construction: ProducerConstruction::Channel(Mutex::new(Some(receiver))),
+            },
+            sender,
+        )
+    }
+}
+
+struct ProducerFactory {
+    descriptor: FactoryDescriptor,
+    recipes: BTreeMap<&'static str, ProducerRecipe>,
+}
+
+impl ProducerFactory {
+    fn new(recipes: impl IntoIterator<Item = (&'static str, ProducerRecipe)>) -> Self {
+        Self {
+            descriptor: FactoryDescriptor {
+                implementation: ImplementationIdentity::try_new("test/recreating-source", "1")
+                    .unwrap(),
+                role: ComponentRole::Source,
+                configuration_version: 1,
+                configuration: ConfigurationSchema {
+                    fields: BTreeMap::from([(
+                        Arc::from("variant"),
+                        ConfigurationField {
+                            value_type: ConfigurationType::String,
+                            required: true,
+                            secret: false,
+                        },
+                    )]),
+                    allow_additional: false,
+                },
+                dependencies: BTreeMap::new(),
+            },
+            recipes: recipes.into_iter().collect(),
+        }
+    }
+
+    fn specification(&self, variant: &str) -> ComponentSpecification {
+        ComponentSpecification {
+            descriptor: descriptor("source", &[], &["out"]),
+            role: ComponentRole::Source,
+            completion: None,
+            implementation: self.descriptor.implementation.clone(),
+            configuration_version: 1,
+            configuration: BTreeMap::from([(
+                Arc::from("variant"),
+                ConfigurationValue::Literal(variant.into()),
+            )]),
+            dependencies: BTreeMap::new(),
+        }
+    }
+
+    fn desired(&self, variant: &str) -> DesiredComponent {
+        let mut desired = source_definition("source");
+        desired
+            .streams
+            .insert(port("out"), self.recipes[variant].stream.clone());
+        desired.construction = ComponentConstruction::Factory(self.specification(variant));
+        desired
+    }
+
+    fn recipe(&self, specification: &ComponentSpecification) -> anyhow::Result<&ProducerRecipe> {
+        let Some(ConfigurationValue::Literal(variant)) = specification.configuration.get("variant")
+        else {
+            anyhow::bail!("missing producer variant");
+        };
+        self.recipes
+            .get(
+                variant
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("invalid variant"))?,
+            )
+            .ok_or_else(|| anyhow::anyhow!("unknown producer variant"))
+    }
+}
+
+#[async_trait]
+impl ComponentFactory for ProducerFactory {
+    fn descriptor(&self) -> &FactoryDescriptor {
+        &self.descriptor
+    }
+    fn validate(&self, specification: &ComponentSpecification) -> anyhow::Result<()> {
+        self.recipe(specification)?;
+        Ok(())
+    }
+    fn plan_update(
+        &self,
+        current: &ComponentSpecification,
+        proposed: &ComponentSpecification,
+    ) -> anyhow::Result<ComponentUpdatePlan> {
+        anyhow::ensure!(
+            current.descriptor == proposed.descriptor
+                && current.implementation == proposed.implementation,
+            "producer interface changed"
+        );
+        self.recipe(current)?;
+        self.recipe(proposed)?;
+        Ok(ComponentUpdatePlan {
+            mode: ComponentUpdateMode::Recreate,
+            data: ComponentUpdateData::Preserve,
+        })
+    }
+    async fn create(
+        &self,
+        context: ConstructionContext,
+    ) -> Result<ConstructedComponent, ComponentCreationError> {
+        let recipe = self
+            .recipe(&context.specification)
+            .map_err(ComponentCreationError::terminal)?;
+        let source: Box<dyn EnvelopeSource> = match &recipe.construction {
+            ProducerConstruction::Finite => Box::new(FiniteSource {
+                descriptor: context.specification.descriptor.clone(),
+                calls: recipe.calls.clone(),
+                sequence: 0,
+                emit: false,
+            }),
+            ProducerConstruction::Channel(receiver) => Box::new(Source {
+                descriptor: context.specification.descriptor.clone(),
+                calls: recipe.calls.clone(),
+                events: receiver.lock().unwrap().take().ok_or_else(|| {
+                    ComponentCreationError::terminal(anyhow::anyhow!(
+                        "fixture producer input has already transferred"
+                    ))
+                })?,
+            }),
+        };
+        recipe.calls.creates.fetch_add(1, Ordering::SeqCst);
+        Ok(ConstructedComponent::source(source))
+    }
+}
+
 struct FiniteSource {
     descriptor: ComponentDescriptor,
     calls: Arc<Calls>,
@@ -2279,14 +2616,28 @@ async fn exhausted_source_restart_and_replacement_resume_its_consumer_and_closed
     let source_calls = Arc::new(Calls::default());
     let sink_calls = Arc::new(Calls::default());
     let (received, mut output_rx) = mpsc::channel(8);
+    let (live, new_input) = ProducerRecipe::channel(stream("source"));
+    let factory = Arc::new(ProducerFactory::new([
+        (
+            "finite",
+            ProducerRecipe {
+                calls: source_calls.clone(),
+                stream: stream("source"),
+                construction: ProducerConstruction::Finite,
+            },
+        ),
+        ("live", live),
+    ]));
     let mut graph = ComputationGraph::builder("restart-exhausted")
-        .source(Box::new(FiniteSource {
-            descriptor: descriptor("source", &[], &["out"]),
-            calls: source_calls.clone(),
-            sequence: 0,
-            emit: false,
-        }))
-        .sink(Box::new(sink("sink", "sink", sink_calls.clone(), received)))
+        .component(
+            name("source"),
+            factory.specification("finite"),
+            factory.clone(),
+        )
+        .sink(
+            name("sink"),
+            Box::new(sink("sink", "sink", sink_calls.clone(), received)),
+        )
         .bind_stream(endpoint("source", "out"), stream("source"))
         .connect(
             edge("source", "sink"),
@@ -2330,23 +2681,13 @@ async fn exhausted_source_restart_and_replacement_resume_its_consumer_and_closed
             2,
             "implicit consumer resumption does not call start again"
         );
-        let (new_source, new_input) = source(Arc::new(Calls::default()));
-        let desired = control
-            .desired_snapshot()
-            .select(GraphSelection::Exact(vec![component("source")]))
-            .expect("source spec")
-            .components
-            .remove(0);
+        let desired = factory.desired("live");
         let preview = control
             .preview(revision, vec![DesiredMutation::ReplaceComponent(desired)])
             .await
             .expect("replacement");
-        let mut bindings = TopologyBindings::default();
-        bindings
-            .components
-            .insert("source".into(), ConstructedComponent::source(new_source));
         let report = control
-            .reconcile(preview, bindings)
+            .reconcile(preview, TopologyBindings::default())
             .await
             .expect("replace exhausted source");
         assert_eq!(report.summary, OperationSummary::Completed);
@@ -2363,16 +2704,23 @@ async fn exhausted_source_restart_and_replacement_resume_its_consumer_and_closed
 
 #[tokio::test]
 async fn replacing_a_producer_with_a_new_stream_starts_an_independent_sequence() {
-    let (original, input) = source(Arc::new(Calls::default()));
+    let (original, input) = ProducerRecipe::channel(stream("source"));
+    let (replacement, new_input) = ProducerRecipe::channel(stream("fresh"));
+    let factory = Arc::new(ProducerFactory::new([
+        ("original", original),
+        ("fresh", replacement),
+    ]));
     let (received, mut output_rx) = mpsc::channel(8);
     let mut graph = ComputationGraph::builder("new-stream")
-        .source(original)
-        .sink(Box::new(sink(
-            "sink",
-            "sink",
-            Arc::new(Calls::default()),
-            received,
-        )))
+        .component(
+            name("source"),
+            factory.specification("original"),
+            factory.clone(),
+        )
+        .sink(
+            name("sink"),
+            Box::new(sink("sink", "sink", Arc::new(Calls::default()), received)),
+        )
         .bind_stream(endpoint("source", "out"), stream("source"))
         .connect(
             edge("source", "sink"),
@@ -2389,13 +2737,7 @@ async fn replacing_a_producer_with_a_new_stream_starts_an_independent_sequence()
             .await
             .expect("old stream");
         assert_eq!(output_rx.recv().await, Some(("sink".into(), 10)));
-        let mut desired = control
-            .desired_snapshot()
-            .select(GraphSelection::Exact(vec![component("source")]))
-            .expect("source")
-            .components
-            .remove(0);
-        desired.streams.insert(port("out"), stream("fresh"));
+        let desired = factory.desired("fresh");
         let preview = control
             .preview(
                 GraphRevision(1),
@@ -2403,14 +2745,9 @@ async fn replacing_a_producer_with_a_new_stream_starts_an_independent_sequence()
             )
             .await
             .expect("new stream preview");
-        let (source, new_input) = source(Arc::new(Calls::default()));
-        let mut bindings = TopologyBindings::default();
-        bindings
-            .components
-            .insert("source".into(), ConstructedComponent::source(source));
         assert_eq!(
             control
-                .reconcile(preview, bindings)
+                .reconcile(preview, TopologyBindings::default())
                 .await
                 .expect("replace")
                 .summary,
@@ -2431,13 +2768,11 @@ async fn binding_generations_do_not_regress_after_live_rebinds_and_a_new_run() {
     let (source, input) = source(Arc::new(Calls::default()));
     let (received, _output) = mpsc::channel(1);
     let mut graph = ComputationGraph::builder("binding-generations")
-        .source(source)
-        .sink(Box::new(sink(
-            "sink",
-            "sink",
-            Arc::new(Calls::default()),
-            received,
-        )))
+        .source(name("source"), source)
+        .sink(
+            name("sink"),
+            Box::new(sink("sink", "sink", Arc::new(Calls::default()), received)),
+        )
         .bind_stream(endpoint("source", "out"), stream("source"))
         .connect(
             edge("source", "sink"),
@@ -2496,14 +2831,18 @@ async fn startup_timeout_after_commit_returns_the_committed_report() {
     let new = Arc::new(Calls::default());
     let (source, input) = source(Arc::new(Calls::default()));
     let (received, mut output_rx) = mpsc::channel(16);
+    let start = Arc::new(Gate::default());
+    let mut replacement = SinkVariant::new(new.clone());
+    replacement.start_gate = Some(start.clone());
+    let factory = Arc::new(Factory::with_variants(
+        "sink",
+        "1",
+        received,
+        [("old", SinkVariant::new(Arc::default())), ("new", replacement)],
+    ));
     let mut graph = ComputationGraph::builder("committed-startup")
-        .source(source)
-        .sink(Box::new(sink(
-            "sink",
-            "old",
-            Arc::new(Calls::default()),
-            received.clone(),
-        )))
+        .source(name("source"), source)
+        .component(name("sink"), factory.specification("old"), factory.clone())
         .bind_stream(endpoint("source", "out"), stream("source"))
         .connect(
             edge("source", "sink"),
@@ -2516,18 +2855,15 @@ async fn startup_timeout_after_commit_returns_the_committed_report() {
     let control = run.control();
     let (result, ()) = tokio::join!(run, async {
         activate(&control).await;
-        let start = Arc::new(Gate::default());
-        let mut replacement = sink("sink", "new", new.clone(), received);
-        replacement.start_gate = Some(start.clone());
         let preview = control
             .preview(
                 GraphRevision(1),
-                vec![DesiredMutation::ReplaceComponent(definition("sink"))],
+                vec![DesiredMutation::ReplaceComponent(factory.desired("new"))],
             )
             .await
             .expect("preview");
         let report = control
-            .reconcile(preview, bind_sink(replacement))
+            .reconcile(preview, TopologyBindings::default())
             .await
             .expect("a committed reconciliation returns its report");
         assert_timed_out_after_commit(&report);
@@ -2646,13 +2982,11 @@ async fn committed_reconciliation_ignores_disjoint_pending_start() {
         received: received.clone(),
     });
     let mut graph = ComputationGraph::builder("committed-settle")
-        .source(source)
-        .sink(Box::new(sink(
-            "sink",
-            "sink",
-            Arc::new(Calls::default()),
-            received,
-        )))
+        .source(name("source"), source)
+        .sink(
+            name("sink"),
+            Box::new(sink("sink", "sink", Arc::new(Calls::default()), received)),
+        )
         .bind_stream(endpoint("source", "out"), stream("source"))
         .connect(
             edge("source", "sink"),
@@ -2690,12 +3024,13 @@ async fn committed_reconciliation_ignores_disjoint_pending_start() {
         let (report, stalled) = tokio::join!(control.reconcile(preview, bindings), async {
             construction.entered.notified().await;
             let stalled = control
-                .add_component(ComponentAddition::new(ConstructedComponent::service(
-                    Box::new(StallingService {
+                .add_component(ComponentAddition::new(
+                    name("stalled"),
+                    ConstructedComponent::service(Box::new(StallingService {
                         descriptor: descriptor("stalled", &[], &[]),
                         gate: start.clone(),
-                    }),
-                )))
+                    })),
+                ))
                 .await
                 .expect("addition during construction");
             start.entered.notified().await;
@@ -2756,6 +3091,7 @@ fn declared_input(producer: &str) -> InputBinding {
 
 fn source_definition(id: &str) -> DesiredComponent {
     DesiredComponent {
+        name: name(id),
         descriptor: descriptor(id, &[], &["out"]),
         role: ComponentRole::Source,
         completion: None,
@@ -2774,8 +3110,11 @@ async fn supplied_component_receives_declared_bindings_only_when_opted_in() {
         let (source, input) = source(Arc::new(Calls::default()));
         let (received, mut output_rx) = mpsc::channel(8);
         let mut graph = ComputationGraph::builder("supplied-bindings")
-            .source(source)
-            .sink(Box::new(sink("sink", "sink", calls.clone(), received)))
+            .source(name("source"), source)
+            .sink(
+                name("sink"),
+                Box::new(sink("sink", "sink", calls.clone(), received)),
+            )
             .bind_stream(endpoint("source", "out"), stream("source"))
             .connect(
                 edge("source", "sink"),
@@ -2815,8 +3154,11 @@ async fn failed_input_binding_fails_the_operation_instead_of_being_ignored() {
     let (source, _input) = source(Arc::new(Calls::default()));
     let (received, _output_rx) = mpsc::channel(8);
     let mut graph = ComputationGraph::builder("failed-bindings")
-        .source(source)
-        .sink(Box::new(sink("sink", "sink", calls.clone(), received)))
+        .source(name("source"), source)
+        .sink(
+            name("sink"),
+            Box::new(sink("sink", "sink", calls.clone(), received)),
+        )
         .bind_stream(endpoint("source", "out"), stream("source"))
         .connect(
             edge("source", "sink"),
@@ -2850,8 +3192,8 @@ async fn binding_factory_gets_declared_inputs_and_is_replaced_when_they_change()
         let factory = Arc::new(if binds { factory.binding() } else { factory });
         let (source, _input) = source(Arc::new(Calls::default()));
         let mut graph = ComputationGraph::builder("factory-bindings")
-            .source(source)
-            .component(factory.specification("sink"), factory.clone())
+            .source(name("source"), source)
+            .component(name("sink"), factory.specification("sink"), factory.clone())
             .bind_stream(endpoint("source", "out"), stream("source"))
             .connect(
                 edge("source", "sink"),
@@ -2899,8 +3241,8 @@ async fn binding_factory_waits_for_its_input_declaration() {
     let factory = Arc::new(Factory::new(calls.clone(), received).binding());
     let (source, _input) = source(Arc::new(Calls::default()));
     let mut graph = ComputationGraph::builder("pending-factory-input")
-        .source(source)
-        .component(factory.specification("sink"), factory)
+        .source(name("source"), source)
+        .component(name("sink"), factory.specification("sink"), factory)
         .bind_stream(endpoint("source", "out"), stream("source"))
         .build()
         .expect("unconnected declarations");

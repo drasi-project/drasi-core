@@ -111,7 +111,10 @@ async fn instance(component: Service) -> DrasiLib {
         )
         .with_components(
             ComponentBatch::builder()
-                .service(Box::new(component))
+                .service(
+                    ComponentName::try_new("service").unwrap(),
+                    Box::new(component),
+                )
                 .build()
                 .unwrap()
                 .auto_start(false),
@@ -306,8 +309,8 @@ async fn stop_during_failure_cleanup() {
     sink.stop_gate = Some(stop_gate.clone());
     let edge = EdgeDefinition::new(from.clone(), to);
     let batch = ComponentBatch::builder()
-        .source(Box::new(source))
-        .sink(Box::new(sink))
+        .source(ComponentName::try_new("source").unwrap(), Box::new(source))
+        .sink(ComponentName::try_new("sink").unwrap(), Box::new(sink))
         .bind_stream(from, StreamId::try_new("source/out").unwrap())
         .connect(edge.clone(), Box::new(BoundedPipeConfig { capacity: 1 }))
         .relationship_policy(

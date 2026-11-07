@@ -377,7 +377,7 @@ mod tests {
         GraphProducerIdentity::new(
             "scope".into(),
             "graph".into(),
-            ComponentId::try_new("component").unwrap(),
+            ComponentId::try_new("49a5d640-ec80-4c62-9cdb-1baab036e8be").unwrap(),
             StreamId::try_new("component/out").unwrap(),
             true,
         )
@@ -386,7 +386,7 @@ mod tests {
 
     fn endpoint() -> OutputEndpoint {
         OutputEndpoint::new(
-            ComponentId::try_new("component").unwrap(),
+            ComponentId::try_new("49a5d640-ec80-4c62-9cdb-1baab036e8be").unwrap(),
             PortId::try_new("out").unwrap(),
         )
     }

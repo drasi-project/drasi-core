@@ -389,10 +389,11 @@ group membership, not matching database paths. Separate persistent journals use
 retained output and replay receipts instead. Both paths preserve pending fanout
 across process exit; neither promises exactly-once external effects.
 
-Explicit deprovision after stop removes owned indexes, results, checkpoints,
+Explicit `delete_owned_resources` after stop removes owned indexes, results, checkpoints,
 outbox and provider handover state. Durable destinations must first be drained
 and unbound. Failed deletion retains cleanup and can be retried; a deleted
-instance cannot reactivate. A recreated instance receives a new producer epoch.
+instance cannot reactivate. Disposal alone does not delete persistent state.
+A recreated instance receives a new producer epoch.
 Scheduled-work processing remains separate work.
 
 ### Explicit non-atomic publication

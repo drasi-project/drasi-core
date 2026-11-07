@@ -14,7 +14,7 @@
 
 use super::*;
 use crate::{
-    config::{QueryConfig, QueryLanguage},
+    config::{AssignedQueryConfig as QueryConfig, QueryLanguage},
     indexes::{IndexFactory, StorageBackendRef, StorageBackendSpec},
     RecoveryPolicy,
 };
@@ -226,7 +226,7 @@ pub struct ComputationPipelineBuilder {
     output_catalogue: Option<(String, OutputCatalogue)>,
     bootstraps: BTreeMap<String, Arc<dyn ComputationBootstrapProvider>>,
     queries: Vec<QueryConfig>,
-    reactions: Vec<(Arc<ReactionPluginHost>, bool)>,
+    reactions: Vec<(ComponentName, Arc<ReactionPluginHost>, bool)>,
     overrides: BTreeMap<String, (Arc<dyn ComputationIndexProvider>, QueryPublicationMode)>,
     #[cfg(feature = "test-support")]
     test_control: Option<crate::test_support::QueryTestControl>,
@@ -247,6 +247,18 @@ fn builtin_factory<T: ComponentFactory + Default>() -> Arc<dyn ComponentFactory>
         .get(&T::default().descriptor().implementation)
         .expect("pipeline factory is registered")
         .clone()
+}
+
+fn authorize_helper(
+    ids: &mut Option<&mut ComponentIds>,
+    owner: &ComponentId,
+    helper: ComponentId,
+) -> GraphResult<ComponentId> {
+    if let Some(ids) = ids.as_deref_mut() {
+        ids.authorize_derived(owner, helper)
+    } else {
+        Ok(helper)
+    }
 }
 
 impl ComputationPipelineBuilder {
@@ -302,7 +314,7 @@ impl ComputationPipelineBuilder {
         drasi_computation_contracts::query_source_component_id(query, source)
     }
     pub fn reaction_component_id(reaction: &str) -> Result<ComponentId> {
-        ComponentId::try_new(format!("reaction/{}", encoded(reaction)))
+        ComponentId::try_new(reaction)
     }
     pub(crate) fn source_resource_id(source: &str) -> GraphResult<ResourceId> {
         resource("source-host", source)
@@ -348,11 +360,10 @@ impl ComputationPipelineBuilder {
     pub(crate) fn pending_native_endpoint(query: &str, input: &str) -> GraphResult<Endpoint> {
         // An internal construction dependency, never a claimed producer port.
         Ok(endpoint(
-            ComponentId::try_new(format!(
-                "pending-native-input/{}/{}",
-                encoded(query),
-                encoded(input)
-            ))?,
+            ComponentId::derive_owned(
+                &ComponentId::try_new(query)?,
+                &format!("pending-native-input/{}", ComponentId::try_new(input)?),
+            )?,
             "unresolved-primary",
         ))
     }
@@ -372,8 +383,12 @@ impl ComputationPipelineBuilder {
         query: &str,
         bootstrap: Arc<dyn ComputationBootstrapProvider>,
     ) -> GraphResult<Self> {
-        super::data::validate_identifier("query", query)?;
-        if self.bootstraps.insert(query.into(), bootstrap).is_some() {
+        let query = ComponentId::try_new(query)?;
+        if self
+            .bootstraps
+            .insert(query.to_string(), bootstrap)
+            .is_some()
+        {
             return Err(GraphError::Topology {
                 reason: "duplicate query bootstrap".into(),
             });
@@ -387,7 +402,8 @@ impl ComputationPipelineBuilder {
         host: Option<Arc<SourcePluginHost>>,
         options: SourceSubscriptionOptions,
     ) -> GraphResult<Self> {
-        super::data::validate_identifier("source", id)?;
+        let id = ComponentId::try_new(id)?;
+        let id = id.as_str();
         if self.native_sources.contains_key(id) {
             return Err(GraphError::Topology {
                 reason: "duplicate source".into(),
@@ -413,8 +429,13 @@ impl ComputationPipelineBuilder {
         self.queries.push(config);
         self
     }
-    pub fn reaction(mut self, host: Arc<ReactionPluginHost>, auto_start: bool) -> Self {
-        self.reactions.push((host, auto_start));
+    pub fn reaction(
+        mut self,
+        name: ComponentName,
+        host: Arc<ReactionPluginHost>,
+        auto_start: bool,
+    ) -> Self {
+        self.reactions.push((name, host, auto_start));
         self
     }
     pub fn middleware_registry(mut self, registry: Arc<MiddlewareTypeRegistry>) -> Self {
@@ -433,9 +454,10 @@ impl ComputationPipelineBuilder {
         provider: Arc<dyn ComputationIndexProvider>,
         publication: QueryPublicationMode,
     ) -> GraphResult<Self> {
+        let query = ComponentId::try_new(query)?;
         if self
             .overrides
-            .insert(query.to_owned(), (provider, publication))
+            .insert(query.to_string(), (provider, publication))
             .is_some()
         {
             return Err(GraphError::Topology {
@@ -445,6 +467,23 @@ impl ComputationPipelineBuilder {
         Ok(self)
     }
     pub fn build(self) -> GraphResult<ComponentBatch> {
+        self.build_inner(None)
+    }
+
+    /// Assemble inside `DrasiLib::create_components`. Primary component UUIDs
+    /// must come from this allocation scope. Only this pipeline's actual
+    /// owner-derived helpers gain admission alongside those fresh owners.
+    pub fn build_owned(self, ids: &mut ComponentIds) -> GraphResult<ComponentBatch> {
+        for query in &self.queries {
+            ids.require_owned(&ComponentId::try_new(query.id.as_str())?)?;
+        }
+        for (_, host, _) in &self.reactions {
+            ids.require_owned(&ComponentId::try_new(host.id())?)?;
+        }
+        self.build_inner(Some(ids))
+    }
+
+    fn build_inner(self, mut ids: Option<&mut ComponentIds>) -> GraphResult<ComponentBatch> {
         let invalid = |reason: String| GraphError::Topology { reason };
         let query_authoring = self
             .query_factory
@@ -471,6 +510,9 @@ impl ComputationPipelineBuilder {
             }
         }
         for query in &self.queries {
+            for input in &query.inputs {
+                input.id().map_err(|error| invalid(error.to_string()))?;
+            }
             let id = ComponentId::try_new(query.id.as_str())?;
             if !query_ids.insert(query.id.clone()) {
                 return Err(invalid("duplicate query".into()));
@@ -491,7 +533,12 @@ impl ComputationPipelineBuilder {
                     let configured = query
                         .inputs
                         .iter()
-                        .find(|input| input.component == setting.source_id)
+                        .find(|input| {
+                            input
+                                .component
+                                .as_id()
+                                .is_some_and(|id| id.as_str() == setting.source_id)
+                        })
                         .expect("subscription belongs to this query");
                     if !configured.nodes.is_empty() || !configured.relations.is_empty() {
                         return Err(invalid(
@@ -525,10 +572,12 @@ impl ComputationPipelineBuilder {
                 .find(|query| &query.id == id)
                 .ok_or_else(|| invalid(format!("bootstrap names unknown query {id}")))?;
             if !query.enable_bootstrap
-                || query
-                    .inputs
-                    .iter()
-                    .any(|input| !self.native_sources.contains_key(&input.component))
+                || query.inputs.iter().any(|input| {
+                    input
+                        .component
+                        .as_id()
+                        .is_none_or(|id| !self.native_sources.contains_key(id.as_str()))
+                })
             {
                 return Err(invalid(
                     "explicit query bootstrap requires enabled bootstrap and native input bindings"
@@ -537,7 +586,7 @@ impl ComputationPipelineBuilder {
             }
         }
         let mut reaction_ids = BTreeSet::new();
-        for (host, _) in &self.reactions {
+        for (_, host, _) in &self.reactions {
             if !reaction_ids.insert(host.id()) {
                 return Err(invalid("duplicate reaction".into()));
             }
@@ -635,13 +684,28 @@ impl ComputationPipelineBuilder {
         }
         let source_factory = builtin_factory::<SourcePluginAdapterFactory>();
         let query_factory = self.query_factory.clone();
-        let outlet_id = ComponentId::try_new(match assembly {
-            Some(query) => format!("query-results/{}", encoded(query)),
-            None => "__computation_results__".into(),
-        })?;
+        let outlet_owner = self
+            .queries
+            .first()
+            .map(|query| ComponentId::try_new(query.id.as_str()))
+            .transpose()?;
+        let outlet_id = if let Some(owner) = &outlet_owner {
+            authorize_helper(
+                &mut ids,
+                owner,
+                ComponentId::derive_owned(owner, "query-results")?,
+            )?
+        } else {
+            match ids.as_deref_mut() {
+                Some(ids) => ids.allocate()?,
+                None => ComponentId::generate(),
+            }
+        };
+        let outlet_owner = outlet_owner.as_ref().unwrap_or(&outlet_id);
         let outlet_factory = builtin_factory::<QueryResultsOutletFactory>();
         builder = builder
             .component(
+                ComponentName::try_new(format!("__internal/{outlet_owner}/results"))?,
                 ComponentSpecification {
                     descriptor: QueryResultsOutlet::new(outlet_id.clone(), self.catalog.clone())
                         .descriptor()
@@ -691,7 +755,7 @@ impl ComputationPipelineBuilder {
                 builder = builder.unbound(DesiredRelationship {
                     definition: EdgeDefinition::new(
                         endpoint(
-                            ComponentId::try_new(format!("unbound-input/{}", encoded(&config.id)))?,
+                            ComponentId::derive_owned(&query_id, "unbound-input")?,
                             "out",
                         ),
                         endpoint(query_id.clone(), "in"),
@@ -726,7 +790,6 @@ impl ComputationPipelineBuilder {
                         Arc::new(QuerySourceProgressResource(progress.clone())),
                     ),
                 )?;
-            let mut subscriptions = Vec::new();
             let mut subscription_ids = Vec::new();
             for (source_rank, setting) in settings.into_iter().enumerate() {
                 if let Some(output) = self.native_sources.get(&setting.source_id) {
@@ -762,7 +825,11 @@ impl ComputationPipelineBuilder {
                 let options = declaration
                     .map(|(_, options)| options.clone())
                     .unwrap_or_default();
-                let source_id = Self::source_component_id(&config.id, &setting.source_id)?;
+                let source_id = authorize_helper(
+                    &mut ids,
+                    &query_id,
+                    Self::source_component_id(&config.id, &setting.source_id)?,
+                )?;
                 let stream = StreamId::try_new(format!("{source_id}/out"))?;
                 let options = SourceSubscriptionOptions {
                     enable_bootstrap: setting.enable_bootstrap,
@@ -771,18 +838,6 @@ impl ComputationPipelineBuilder {
                     bootstrap_timeout_secs: config.bootstrap_timeout_secs,
                     ..options
                 };
-                let subscription = supplied
-                    .map(|host| {
-                        LegacySourceSubscription::new(
-                            host.clone(),
-                            options.clone(),
-                            stream.clone(),
-                            Some(progress.clone()),
-                            &config.id,
-                        )
-                    })
-                    .transpose()
-                    .map_err(|error| invalid(format!("{error:#}")))?;
                 let subscription_id = ResourceId::try_new(format!(
                     "subscription/{}/{}",
                     encoded(&config.id),
@@ -805,24 +860,16 @@ impl ComputationPipelineBuilder {
                         progress_id.clone(),
                         ResourceRole::Checkpoint,
                     )?;
-                if let Some(subscription) = &subscription {
-                    builder = builder.provide_resource(
-                        subscription_id.clone(),
-                        ResourceHandle::new(ResourceRole::SourceSubscription, subscription.clone())
-                            .with_cleanup(subscription.clone()),
-                    )?;
-                } else {
-                    builder = builder.construct_resource(
-                        subscription_id.clone(),
-                        Arc::new(SubscriptionRecipe {
-                            source: Self::source_resource_id(&setting.source_id)?,
-                            progress: progress_id.clone(),
-                            options,
-                            stream: stream.clone(),
-                            query_id: config.id.clone(),
-                        }),
-                    )?;
-                }
+                builder = builder.construct_resource(
+                    subscription_id.clone(),
+                    Arc::new(SubscriptionRecipe {
+                        source: Self::source_resource_id(&setting.source_id)?,
+                        progress: progress_id.clone(),
+                        options,
+                        stream: stream.clone(),
+                        query_id: config.id.clone(),
+                    }),
+                )?;
                 subscription_ids.push(subscription_id.clone());
                 let descriptor = ComponentDescriptor::try_new(
                     source_id.clone(),
@@ -863,6 +910,9 @@ impl ComputationPipelineBuilder {
                 }
                 builder = builder
                     .component(
+                        ComponentName::try_new(format!(
+                            "__internal/{query_id}/input/{source_rank}"
+                        ))?,
                         ComponentSpecification {
                             descriptor,
                             role: ComponentRole::Source,
@@ -902,17 +952,8 @@ impl ComputationPipelineBuilder {
                             capacity: input_capacity,
                             source_rank,
                             source_id: Some(setting.source_id.clone()),
-                            source_dispatch: supplied
-                                .is_none()
-                                .then(|| Self::source_resource_id(&setting.source_id))
-                                .transpose()?,
-                            drop_when_full: supplied
-                                .map(|host| host.source())
-                                .transpose()
-                                .map_err(|error| invalid(error.to_string()))?
-                                .is_some_and(|source| {
-                                    source.dispatch_mode() == crate::DispatchMode::Broadcast
-                                }),
+                            source_dispatch: Some(Self::source_resource_id(&setting.source_id)?),
+                            drop_when_full: false,
                         }),
                     )
                     .relationship_policy(
@@ -925,11 +966,12 @@ impl ComputationPipelineBuilder {
                             ..Default::default()
                         },
                     );
-                if let Some(subscription) = subscription {
-                    subscriptions.push(subscription);
-                }
             }
-            let scheduled = ComponentId::try_new(format!("scheduled/{}", encoded(&config.id)))?;
+            let scheduled = authorize_helper(
+                &mut ids,
+                &query_id,
+                ComponentId::derive_owned(&query_id, "query-scheduled")?,
+            )?;
             let scheduled_stream = StreamId::try_new(format!("{scheduled}/out"))?;
             let scheduled_factory = builtin_factory::<QueryScheduledSourceFactory>();
             let scheduled_edge = EdgeDefinition::new(
@@ -938,6 +980,7 @@ impl ComputationPipelineBuilder {
             );
             builder = builder
                 .component(
+                    ComponentName::try_new(format!("__internal/{query_id}/scheduled"))?,
                     ComponentSpecification {
                         descriptor: ComponentDescriptor::try_new(
                             scheduled.clone(),
@@ -997,7 +1040,7 @@ impl ComputationPipelineBuilder {
                 .iter()
                 .filter_map(|input| {
                     self.native_sources
-                        .get(&input.component)
+                        .get(input.component.as_id()?.as_str())
                         .and_then(Option::as_ref)
                 })
                 .map(|output| OutputEndpoint::new(output.component.clone(), output.port.clone()))
@@ -1061,21 +1104,7 @@ impl ComputationPipelineBuilder {
                     graph: self.graph_id.clone(),
                     query: query_id.clone(),
                 };
-                if subscriptions.len() == recipe.subscriptions.len() {
-                    builder = builder.provide_resource(
-                        bootstrap_id.clone(),
-                        ResourceHandle::new(
-                            ResourceRole::Bootstrap,
-                            Arc::new(QueryBootstrapResource(
-                                recipe
-                                    .provider(subscriptions)
-                                    .map_err(|error| invalid(format!("{error:#}")))?,
-                            )),
-                        ),
-                    )?;
-                } else {
-                    builder = builder.construct_resource(bootstrap_id.clone(), Arc::new(recipe))?;
-                }
+                builder = builder.construct_resource(bootstrap_id.clone(), Arc::new(recipe))?;
             }
             let indexes_id = Self::index_resource_id(&config.id)?;
             let (handle, publication, ownership) =
@@ -1157,13 +1186,20 @@ impl ComputationPipelineBuilder {
                 .expect("bounded capacity"),
             };
             let recovery = config.recovery_policy.unwrap_or(self.default_recovery);
+            let descriptor = query_authoring
+                .expect("query authoring was required")
+                .query_descriptor(query_id.clone())
+                .map_err(|error| invalid(format!("{error:#}")))?;
+            if descriptor.id() != &query_id {
+                return Err(invalid(
+                    "query factory substituted its assigned UUID".into(),
+                ));
+            }
             builder = builder
                 .component(
+                    ComponentName::try_new(config.name.as_str())?,
                     ComponentSpecification {
-                        descriptor: query_authoring
-                            .expect("query authoring was required")
-                            .query_descriptor(query_id.clone())
-                            .map_err(|error| invalid(format!("{error:#}")))?,
+                        descriptor,
                         role: ComponentRole::Transformer,
                         completion: None,
                         implementation: query_factory
@@ -1276,7 +1312,7 @@ impl ComputationPipelineBuilder {
                 );
         }
         let reaction_factory = builtin_factory::<ReactionPluginAdapterFactory>();
-        for (host, auto_start) in self.reactions {
+        for (name, host, auto_start) in self.reactions {
             let id = Self::reaction_component_id(host.id())?;
             let host_id = resource("reaction-host", host.id())?;
             builder = builder
@@ -1293,6 +1329,7 @@ impl ComputationPipelineBuilder {
                 .provide_resource(host_id.clone(), host.resource())?;
             builder = builder
                 .component(
+                    name,
                     ComponentSpecification {
                         descriptor: ComponentDescriptor::try_new(
                             id.clone(),

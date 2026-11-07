@@ -86,7 +86,7 @@ impl NativeComponent for View {
         Ok(serde_json::to_value(&self.configuration)?)
     }
 
-    fn supports_deprovision(&self) -> bool {
+    fn supports_delete_owned_resources(&self) -> bool {
         true
     }
 
@@ -112,7 +112,7 @@ impl NativeComponent for View {
         Ok(())
     }
 
-    async fn deprovision(&mut self) -> Result<()> {
+    async fn delete_owned_resources(&mut self) -> Result<()> {
         anyhow::ensure!(!self.running, "stop the view before removing its state");
         self.output.retire()?;
         self.state = State::default();

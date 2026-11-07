@@ -38,7 +38,7 @@ async fn forwarded_profiling_records_reaction_work_without_changing_payload() {
     let (reaction, handle) = ApplicationReaction::new("profiled", vec!["query".into()]);
     let (updates, _events) = mpsc::channel(16);
     reaction
-        .initialize(ReactionRuntimeContext::new(
+        .bind_runtime_context(ReactionRuntimeContext::new(
             "instance", "profiled", None, updates, None,
         ))
         .await;
@@ -91,7 +91,7 @@ async fn completion_timestamp_includes_application_channel_backpressure() {
     let (reaction, handle) = ApplicationReaction::new("backpressured", vec!["query".into()]);
     let (updates, _events) = mpsc::channel(16);
     reaction
-        .initialize(ReactionRuntimeContext::new(
+        .bind_runtime_context(ReactionRuntimeContext::new(
             "instance",
             "backpressured",
             None,

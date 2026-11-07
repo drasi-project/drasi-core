@@ -541,7 +541,7 @@ mod tests {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
-        async fn initialize(&self, _context: drasi_lib::SourceRuntimeContext) {}
+        async fn bind_runtime_context(&self, _context: drasi_lib::SourceRuntimeContext) {}
     }
 
     struct TestSourceDescriptor;

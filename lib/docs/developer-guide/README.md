@@ -2463,7 +2463,6 @@ Install the host subscriber before constructing `DrasiLib`; otherwise Drasi may
 install its default, and a later infallible subscriber `.init()` can panic.
 Stockroom defaults diagnostic logs to warnings on stderr and includes
 `ComponentLogLayer`. Result lines on stdout are application output, not INFO logs.
-At INFO level, `__component_graph__` is the runtime's internal inspection source.
 
 Stockroom already includes `tracing-subscriber` with its `env-filter` feature.
 Its setup is:
@@ -4396,10 +4395,19 @@ The graph captures it at construction and reconfiguration boundaries.
 Keep configuration stable during processing. Report a missing getter as
 unavailable so the host retains the external binding.
 
-In-place reconfiguration requires the factory to opt into
-`supports_reconfiguration` and the component to implement `reconfigure`.
-The descriptor must remain unchanged. Replacing the component is a different
-operation and creates a new generation.
+A registered factory's pure `plan_update(current, proposed)` chooses an explicit
+`ComponentUpdatePlan`, or rejects the change. `InPlace` pauses processing;
+`Restart` stops and later restarts the same initialized object. Both execute
+`apply_update` and retain the descriptor and construction generation. `Recreate`
+disposes the old object and constructs and initializes a new generation under the
+same UUID. Creation support does not imply any update support.
+
+Native lifecycle hooks are zero-argument async fallible methods: `initialize`,
+`start`, `stop`, `dispose`, `pause_processing`, and `resume_processing`. Ordinary
+Source/Reaction context wiring is the separate required
+`bind_runtime_context(context)` hook. Explicit permanent removal alone calls
+`delete_owned_resources`; disposal and updates do not imply deletion. See the
+[accepted update and recovery contract](../computation-graph-configuration.md#object-lifecycle-and-assessed-updates).
 
 The managed lesson's `FileFactory` reads a saved path setting and constructs
 the file source; `AlertFactory` constructs the in-memory view sink.
@@ -5041,7 +5049,7 @@ ensure!(
 );
 ```
 
-This requests a restart, not replacement or deprovision. Another accepted
+This requests a restart, not replacement or owned-resource deletion. Another accepted
 change can invalidate the preview's revision. Observed lifecycle/resource changes
 can also alter its impact without advancing that revision; `StalePreview` requires
 a new preview and inspection of its affected sets before execution. New implementations and resources
@@ -5052,8 +5060,8 @@ For managed members, submit the corresponding desired definition through the
 configuration API from Chapter 16. That API preserves accepted managed ownership.
 
 Selections can name exact members, dependencies, dependents, or the whole graph.
-Updates require supported in-place reconfiguration. Replacement reconstructs
-an owner even when its visible description is unchanged. Retry concerns a
+Updates require an author-provided plan with graph-validated data guarantees.
+An opaque replacement object or one-off callback is not such a plan. Retry concerns a
 retained failed operation, not permission to start a second owner of resources
 whose cleanup is unfinished.
 
@@ -5409,8 +5417,8 @@ storage ownership:
 | Activation credentials | Host resolves the actual identity provider for each start and supplies ephemeral credentials; no provider trait or acquired secret enters saved configuration |
 
 Consumer progress and its optional position policy use the separate
-`drasi_computation_plugin_consumer_progress_v1` extension. Base ABI `1.0.0`,
-wire `1` and the existing recovery interface are unchanged. Opt-in producer
+`drasi_computation_plugin_consumer_progress_v1` extension. Current libraries use
+base ABI `2.0.0`, wire `2` and the separate recovery-v1 interface. Opt-in producer
 factories require the actual `consumer_progress` resource and cannot mix it
 with single-owner progress or source admission. Constructors retain the
 capability without reading/subscribing until start. Stop fences new work but
@@ -5467,8 +5475,9 @@ trait objects, `Arc` values, and runtime internals do not cross the C boundary.
 Use the SDK rather than designing ad hoc cross-library ownership.
 
 Libraries are pinned for process lifetime. There is no general hot-unload
-contract, arbitrary dynamic query-role hosting, unrestricted resource injection,
-or in-place dynamic reconfiguration. A native plugin is trusted in-process code,
+contract or unrestricted resource injection. Live updates require the declared
+factory planner and instance capabilities; unsupported changes are rejected.
+A native plugin is trusted in-process code,
 not a sandbox. A contained panic still requires a fresh component generation;
 native aborts and memory faults can terminate the process.
 
@@ -5678,7 +5687,7 @@ own. The final application must still identify who owns every unfinished action.
 | Recovery domain | Actual owners whose state and progress must remain consistent |
 | Desired / observed | Accepted intent / the realized and running state |
 | Factory / resource | A reconstructible constructor / an actual supplied service |
-| Quiesce / deprovision | Park processing with ownership retained / permanently remove owned state |
+| Quiesce / delete owned resources | Park processing with ownership retained / explicitly remove owned state; disposal alone is not persistent deletion |
 | Fence | Prevent further use of an owner whose state or operation outcome cannot yet be trusted |
 | Frontier | An accepted progress boundary, such as an element's latest effective time or a merger's emitted time |
 | Watermark | A source boundary known to be covered by a coordinated snapshot |

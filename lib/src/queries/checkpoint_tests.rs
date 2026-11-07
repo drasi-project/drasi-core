@@ -69,7 +69,16 @@ mod tests {
     }
 
     impl CheckpointTestSource {
-        fn new(id: &str) -> anyhow::Result<Self> {
+        fn new(name: &str) -> anyhow::Result<crate::test_helpers::creation::SourceFixture<Self>> {
+            crate::config::ComponentName::try_new(name)?;
+            Ok(crate::test_helpers::creation::SourceFixture::new(
+                name,
+                true,
+                |id| Self::from_id(id.as_str()),
+            ))
+        }
+
+        fn from_id(id: &str) -> anyhow::Result<Self> {
             let base = SourceBase::new(SourceBaseParams::new(id))?;
             Ok(Self {
                 base,
@@ -111,6 +120,12 @@ mod tests {
         fn get_position_handle_value(&self) -> u64 {
             self.position_handle
                 .load(std::sync::atomic::Ordering::Acquire)
+        }
+    }
+
+    impl crate::test_helpers::creation::SourceFixture<CheckpointTestSource> {
+        fn with_position_handle(self) -> Self {
+            self.map(CheckpointTestSource::with_position_handle)
         }
     }
 
@@ -185,8 +200,8 @@ mod tests {
             self
         }
 
-        async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
-            self.base.initialize(context).await;
+        async fn bind_runtime_context(&self, context: crate::context::SourceRuntimeContext) {
+            self.base.bind_runtime_context(context).await;
         }
     }
 
@@ -196,7 +211,8 @@ mod tests {
 
     fn create_query_config(id: &str, sources: Vec<String>) -> QueryConfig {
         QueryConfig {
-            id: id.to_string(),
+            id: None,
+            name: id.to_string(),
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
@@ -205,7 +221,7 @@ mod tests {
                 .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    component: source_id,
+                    component: crate::config::ComponentReference::by_name(source_id).unwrap(),
                     pipeline: vec![],
                     port: None,
                 })
@@ -247,7 +263,7 @@ mod tests {
     async fn add_source(
         source_manager: &crate::test_helpers::managers::SourceManager,
         _graph: &crate::component_graph::ComponentGraphView,
-        source: impl Source + 'static,
+        source: crate::test_helpers::creation::SourceFixture<impl Source + 'static>,
     ) -> anyhow::Result<()> {
         source_manager.add(source).await
     }
@@ -275,7 +291,10 @@ mod tests {
             let source = CheckpointTestSource::new(source_id)
                 .unwrap()
                 .with_position_handle();
-            source.base.set_next_sequence(100_000);
+            let source = source.map(|source| {
+                source.base.set_next_sequence(100_000);
+                source
+            });
             add_source(&source_manager, &graph, source).await.unwrap();
             source_manager
                 .start_source(source_id.to_string())
@@ -371,10 +390,11 @@ mod tests {
     /// to events dispatched through SourceBase, independent of source_position.
     #[tokio::test]
     async fn test_sequence_assignment_monotonic() {
-        let source = CheckpointTestSource::new("seq-src").unwrap();
+        let source =
+            CheckpointTestSource::from_id(crate::config::ComponentId::generate().as_str()).unwrap();
         let (update_tx, _update_rx) = tokio::sync::mpsc::channel(16);
         source
-            .initialize(crate::context::SourceRuntimeContext {
+            .bind_runtime_context(crate::context::SourceRuntimeContext {
                 instance_id: "test".to_string(),
                 source_id: "seq-src".to_string(),
                 update_tx: update_tx.into(),
@@ -439,10 +459,11 @@ mod tests {
     /// full dispatch pipeline and are accessible on the receiving end.
     #[tokio::test]
     async fn test_source_position_preserved_through_dispatch() {
-        let source = CheckpointTestSource::new("pos-src").unwrap();
+        let source =
+            CheckpointTestSource::from_id(crate::config::ComponentId::generate().as_str()).unwrap();
         let (update_tx, _update_rx) = tokio::sync::mpsc::channel(16);
         source
-            .initialize(crate::context::SourceRuntimeContext {
+            .bind_runtime_context(crate::context::SourceRuntimeContext {
                 instance_id: "test".to_string(),
                 source_id: "pos-src".to_string(),
                 update_tx: update_tx.into(),
@@ -956,10 +977,11 @@ mod tests {
     /// Positions at or above MAX_SOURCE_POSITION_BYTES (65536) should be stripped.
     #[tokio::test]
     async fn test_source_position_size_validation() {
-        let source = CheckpointTestSource::new("size-src").unwrap();
+        let source =
+            CheckpointTestSource::from_id(crate::config::ComponentId::generate().as_str()).unwrap();
         let (update_tx, _update_rx) = tokio::sync::mpsc::channel(16);
         source
-            .initialize(crate::context::SourceRuntimeContext {
+            .bind_runtime_context(crate::context::SourceRuntimeContext {
                 instance_id: "test".to_string(),
                 source_id: "size-src".to_string(),
                 update_tx: update_tx.into(),
@@ -1605,7 +1627,8 @@ mod tests {
     fn create_persistent_query_config(id: &str, sources: Vec<String>) -> QueryConfig {
         use crate::indexes::config::StorageBackendRef;
         QueryConfig {
-            id: id.to_string(),
+            id: None,
+            name: id.to_string(),
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
@@ -1614,7 +1637,7 @@ mod tests {
                 .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    component: source_id,
+                    component: crate::config::ComponentReference::by_name(source_id).unwrap(),
                     pipeline: vec![],
                     port: None,
                 })
@@ -1644,6 +1667,7 @@ mod tests {
             output_stream: StreamId::try_new(format!("{query}/out")).unwrap(),
             outbox_capacity: std::num::NonZeroUsize::new(config.outbox_capacity).unwrap(),
         };
+        let config = config.with_assigned_id(definition.id.clone());
         let bytes = definition
             .configuration_bytes(&QueryExecutionSettings::from_legacy_config(&config))
             .unwrap();
@@ -1920,14 +1944,16 @@ mod tests {
             .update_query(
                 "mismatch-query".to_string(),
                 QueryConfig {
-                    id: "mismatch-query".to_string(),
+                    id: None,
+                    name: "mismatch-query".to_string(),
                     query: "MATCH (n:Person) RETURN n.name, n.age".to_string(),
                     query_language: QueryLanguage::Cypher,
                     middleware: vec![],
                     inputs: vec![QueryInputConfig {
                         nodes: vec![],
                         relations: vec![],
-                        component: "mismatch-src".to_string(),
+                        component: crate::config::ComponentReference::by_name("mismatch-src")
+                            .unwrap(),
                         pipeline: vec![],
                         port: None,
                     }],
@@ -3257,10 +3283,17 @@ mod orchestration_tests {
     }
 
     impl VolatileTestSource {
-        fn new(id: &str) -> anyhow::Result<Self> {
-            Ok(Self {
-                base: SourceBase::new(SourceBaseParams::new(id))?,
-            })
+        fn new(name: &str) -> anyhow::Result<crate::test_helpers::creation::SourceFixture<Self>> {
+            crate::config::ComponentName::try_new(name)?;
+            Ok(crate::test_helpers::creation::SourceFixture::new(
+                name,
+                true,
+                |id| {
+                    Ok(Self {
+                        base: SourceBase::new(SourceBaseParams::new(id.to_string()))?,
+                    })
+                },
+            ))
         }
     }
 
@@ -3316,8 +3349,8 @@ mod orchestration_tests {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
-        async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
-            self.base.initialize(context).await;
+        async fn bind_runtime_context(&self, context: crate::context::SourceRuntimeContext) {
+            self.base.bind_runtime_context(context).await;
         }
     }
 
@@ -3329,10 +3362,31 @@ mod orchestration_tests {
         subscribe_count: Arc<std::sync::atomic::AtomicU32>,
     }
 
-    impl DurableTestSource {
-        fn new(id: &str) -> anyhow::Result<Self> {
+    struct DurableSourceFixture {
+        name: String,
+        remaining_failures: Arc<std::sync::atomic::AtomicU32>,
+        subscribe_count: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl From<DurableSourceFixture>
+        for crate::test_helpers::creation::SourceFixture<DurableTestSource>
+    {
+        fn from(fixture: DurableSourceFixture) -> Self {
+            Self::new(fixture.name, true, move |id| {
+                Ok(DurableTestSource {
+                    base: SourceBase::new(SourceBaseParams::new(id.to_string()))?,
+                    remaining_failures: fixture.remaining_failures,
+                    subscribe_count: fixture.subscribe_count,
+                })
+            })
+        }
+    }
+
+    impl DurableSourceFixture {
+        fn new(name: &str) -> anyhow::Result<Self> {
+            crate::config::ComponentName::try_new(name)?;
             Ok(Self {
-                base: SourceBase::new(SourceBaseParams::new(id))?,
+                name: name.into(),
                 remaining_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 subscribe_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             })
@@ -3420,8 +3474,8 @@ mod orchestration_tests {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
-        async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
-            self.base.initialize(context).await;
+        async fn bind_runtime_context(&self, context: crate::context::SourceRuntimeContext) {
+            self.base.bind_runtime_context(context).await;
         }
         async fn remove_position_handle(&self, query_id: &str) {
             self.base.remove_position_handle(query_id).await;
@@ -3434,7 +3488,8 @@ mod orchestration_tests {
 
     fn create_volatile_query_config(id: &str, sources: Vec<String>) -> QueryConfig {
         QueryConfig {
-            id: id.to_string(),
+            id: None,
+            name: id.to_string(),
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
@@ -3443,7 +3498,7 @@ mod orchestration_tests {
                 .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    component: source_id,
+                    component: crate::config::ComponentReference::by_name(source_id).unwrap(),
                     pipeline: vec![],
                     port: None,
                 })
@@ -3469,7 +3524,8 @@ mod orchestration_tests {
     ) -> QueryConfig {
         use crate::indexes::config::StorageBackendRef;
         QueryConfig {
-            id: id.to_string(),
+            id: None,
+            name: id.to_string(),
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
@@ -3478,7 +3534,7 @@ mod orchestration_tests {
                 .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    component: source_id,
+                    component: crate::config::ComponentReference::by_name(source_id).unwrap(),
                     pipeline: vec![],
                     port: None,
                 })
@@ -3497,13 +3553,15 @@ mod orchestration_tests {
         }
     }
 
-    async fn add_source(
+    async fn add_source<S: Source + 'static>(
         source_manager: &crate::test_helpers::managers::SourceManager,
         _graph: &crate::component_graph::ComponentGraphView,
-        source: impl Source + 'static,
+        source: impl Into<crate::test_helpers::creation::SourceFixture<S>>,
     ) -> anyhow::Result<()> {
-        let source_id = source.id().to_string();
+        let source = source.into();
+        let name = source.name().to_owned();
         source_manager.add(source).await?;
+        let source_id = source_manager.0.component_by_name(&name)?.id().to_string();
         source_manager.start_source(source_id).await
     }
 
@@ -3594,7 +3652,7 @@ mod orchestration_tests {
         let (query_manager, source_manager, graph) = create_test_env(Some(plugin), None).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = DurableTestSource::new("dur-src").unwrap();
+        let source = DurableSourceFixture::new("dur-src").unwrap();
         add_source(&source_manager, &graph, source).await.unwrap();
         wait_for_component_status(
             &mut event_rx,
@@ -3675,7 +3733,7 @@ mod orchestration_tests {
         let (query_manager, source_manager, graph) = create_test_env(Some(plugin), None).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = DurableTestSource::new("strict-src").unwrap();
+        let source = DurableSourceFixture::new("strict-src").unwrap();
         source.set_fail_count(u32::MAX);
         add_source(&source_manager, &graph, source).await.unwrap();
         wait_for_component_status(
@@ -3718,7 +3776,7 @@ mod orchestration_tests {
         let (query_manager, source_manager, graph) = create_test_env(Some(plugin), None).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = DurableTestSource::new("reset-src").unwrap();
+        let source = DurableSourceFixture::new("reset-src").unwrap();
         source.set_fail_count(1); // fail once, succeed on retry
         let sub_count = source.subscribe_count_handle();
         add_source(&source_manager, &graph, source).await.unwrap();
@@ -3769,7 +3827,7 @@ mod orchestration_tests {
         let (query_manager, source_manager, graph) = create_test_env(Some(plugin), None).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = DurableTestSource::new("default-src").unwrap();
+        let source = DurableSourceFixture::new("default-src").unwrap();
         source.set_fail_count(u32::MAX);
         add_source(&source_manager, &graph, source).await.unwrap();
         wait_for_component_status(
@@ -3804,7 +3862,7 @@ mod orchestration_tests {
             create_test_env(Some(plugin), Some(RecoveryPolicy::AutoReset)).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = DurableTestSource::new("global-src").unwrap();
+        let source = DurableSourceFixture::new("global-src").unwrap();
         source.set_fail_count(1); // fail once, succeed on retry
         let sub_count = source.subscribe_count_handle();
         add_source(&source_manager, &graph, source).await.unwrap();
@@ -3854,7 +3912,7 @@ mod orchestration_tests {
             create_test_env(Some(plugin), Some(RecoveryPolicy::AutoReset)).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = DurableTestSource::new("override-src").unwrap();
+        let source = DurableSourceFixture::new("override-src").unwrap();
         source.set_fail_count(u32::MAX);
         add_source(&source_manager, &graph, source).await.unwrap();
         wait_for_component_status(
@@ -3888,7 +3946,7 @@ mod orchestration_tests {
         let (query_manager, source_manager, graph) = create_test_env(Some(plugin), None).await;
         let mut event_rx = graph.subscribe().unwrap();
 
-        let source = DurableTestSource::new("double-fail-src").unwrap();
+        let source = DurableSourceFixture::new("double-fail-src").unwrap();
         source.set_fail_count(u32::MAX);
         let sub_count = source.subscribe_count_handle();
         add_source(&source_manager, &graph, source).await.unwrap();

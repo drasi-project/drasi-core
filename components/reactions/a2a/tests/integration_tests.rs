@@ -63,7 +63,7 @@ async fn initialize_with_store(reaction: &A2AReaction, store: Arc<MemoryStateSto
     let (update_tx, _rx) = tokio::sync::mpsc::channel(16);
     let context =
         ReactionRuntimeContext::new("a2a-it", reaction.id(), Some(store), update_tx, None);
-    reaction.initialize(context).await;
+    reaction.bind_runtime_context(context).await;
 }
 
 fn memory_store() -> Arc<MemoryStateStoreProvider> {
@@ -740,7 +740,10 @@ async fn deprovision_clears_activation_state() {
 
     let key = "activation:2:q1:5:INV-8";
     assert!(store.get("a2a-it", key).await.expect("get").is_some());
-    reaction.deprovision().await.expect("deprovision");
+    reaction
+        .delete_owned_resources()
+        .await
+        .expect("deprovision");
     assert!(store.get("a2a-it", key).await.expect("get after").is_none());
 }
 

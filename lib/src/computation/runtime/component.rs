@@ -27,6 +27,22 @@ use tracing::Instrument;
 pub(super) trait RuntimeComponent: Send + Sync {
     fn id(&self) -> &str;
     fn kind(&self) -> &'static str;
+    fn metadata(&self) -> Option<std::collections::HashMap<String, String>> {
+        None
+    }
+    fn configuration_available(&self) -> bool {
+        true
+    }
+    async fn construct(&self, _generation: ComponentGeneration) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn dependency_waits(
+        &self,
+        _desired: &GraphSnapshot,
+        _observed: &ObservedGraph,
+    ) -> Vec<DependencyWait> {
+        Vec::new()
+    }
     fn bind_control(&self, _control: ComponentControl) {}
     fn control_handler(&self) -> Option<Arc<dyn ControlHandler>> {
         None
@@ -35,29 +51,49 @@ pub(super) trait RuntimeComponent: Send + Sync {
     async fn start(&self) -> anyhow::Result<()>;
     async fn stop(&self) -> anyhow::Result<()>;
     async fn run(&self) -> anyhow::Result<()>;
-    async fn quiesce(&self) -> anyhow::Result<()> {
+    async fn pause_processing(&self) -> anyhow::Result<()> {
         Ok(())
+    }
+    async fn resume_processing(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn apply_update(
+        &self,
+        _context: crate::management::OrdinaryComponentUpdateContext,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("runtime component does not support retained-object updates")
     }
     async fn wait_ready(&self) -> anyhow::Result<()> {
         Ok(())
     }
     async fn shutdown(&self) -> anyhow::Result<()>;
-    async fn deprovision(&self) -> anyhow::Result<()>;
+    async fn delete_owned_resources(&self) -> anyhow::Result<()>;
 }
 
-pub(super) struct RuntimeInstance {
-    pub component: Arc<dyn RuntimeComponent>,
-    pub token: u64,
-    pub installed: AtomicBool,
-    pub rejection_owned: AtomicBool,
+pub(crate) struct RuntimeInstance {
+    pub(super) component: Arc<dyn RuntimeComponent>,
+    pub(super) token: u64,
     remove_data: AtomicBool,
     cleanup_started: AtomicBool,
     shutdown_complete: AtomicBool,
+    stop_complete: AtomicBool,
     deprovision_complete: AtomicBool,
     span: tracing::Span,
     record: OnceLock<super::RecordData>,
 }
 impl RuntimeInstance {
+    pub(super) fn cleanup_started(&self) -> bool {
+        self.cleanup_started.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn dependency_waits(
+        &self,
+        desired: &GraphSnapshot,
+        observed: &ObservedGraph,
+    ) -> Vec<DependencyWait> {
+        self.component.dependency_waits(desired, observed)
+    }
+
     pub(super) fn new(component: Arc<dyn RuntimeComponent>, token: u64, instance: &str) -> Self {
         let span = tracing::info_span!(
             "native_runtime_component",
@@ -68,11 +104,10 @@ impl RuntimeInstance {
         Self {
             component,
             token,
-            installed: AtomicBool::new(false),
-            rejection_owned: AtomicBool::new(false),
             remove_data: AtomicBool::new(false),
             cleanup_started: AtomicBool::new(false),
             shutdown_complete: AtomicBool::new(false),
+            stop_complete: AtomicBool::new(false),
             deprovision_complete: AtomicBool::new(false),
             span,
             record: OnceLock::new(),
@@ -92,31 +127,30 @@ impl RuntimeInstance {
             .map(|record| record.record(self.clone()))
             .ok_or_else(|| anyhow::anyhow!("component instance has no graph record"))
     }
-    pub(super) fn cancel_unstarted_removal(&self) {
-        if !self.cleanup_started.load(Ordering::Acquire) {
-            self.remove_data.store(false, Ordering::Release);
-        }
-    }
 }
 #[async_trait]
 impl ResourceCleanup for RuntimeInstance {
     async fn shutdown(&self) -> anyhow::Result<()> {
         self.cleanup_started.store(true, Ordering::Release);
+        if !self.stop_complete.load(Ordering::Acquire) {
+            self.component.stop().instrument(self.span.clone()).await?;
+            self.stop_complete.store(true, Ordering::Release);
+        }
+        if self.remove_data.load(Ordering::Acquire)
+            && !self.deprovision_complete.load(Ordering::Acquire)
+        {
+            self.component
+                .delete_owned_resources()
+                .instrument(self.span.clone())
+                .await?;
+            self.deprovision_complete.store(true, Ordering::Release);
+        }
         if !self.shutdown_complete.load(Ordering::Acquire) {
             self.component
                 .shutdown()
                 .instrument(self.span.clone())
                 .await?;
             self.shutdown_complete.store(true, Ordering::Release);
-        }
-        if self.remove_data.load(Ordering::Acquire)
-            && !self.deprovision_complete.load(Ordering::Acquire)
-        {
-            self.component
-                .deprovision()
-                .instrument(self.span.clone())
-                .await?;
-            self.deprovision_complete.store(true, Ordering::Release);
         }
         Ok(())
     }
@@ -126,6 +160,7 @@ struct Service {
     descriptor: ComponentDescriptor,
     instance: Arc<RuntimeInstance>,
     control: Option<ComponentControl>,
+    generation: ComponentGeneration,
 }
 #[async_trait]
 impl ComputationComponent for Service {
@@ -142,6 +177,60 @@ impl ComputationComponent for Service {
     fn requires_readiness_confirmation(&self) -> bool {
         true
     }
+    async fn initialize(&mut self) -> anyhow::Result<()> {
+        self.instance
+            .component
+            .construct(self.generation)
+            .instrument(self.instance.span.clone())
+            .await?;
+        self.instance
+            .component
+            .initialize(self.generation)
+            .instrument(self.instance.span.clone())
+            .await
+    }
+    async fn dispose(&mut self) -> anyhow::Result<()> {
+        self.instance.shutdown().await
+    }
+    async fn pause_processing(&mut self) -> anyhow::Result<()> {
+        self.instance
+            .component
+            .pause_processing()
+            .instrument(self.instance.span.clone())
+            .await
+    }
+    async fn resume_processing(&mut self) -> anyhow::Result<()> {
+        self.instance
+            .component
+            .resume_processing()
+            .instrument(self.instance.span.clone())
+            .await
+    }
+    async fn apply_update(&mut self, context: ComponentUpdateContext) -> anyhow::Result<()> {
+        let current = match context.current.configuration.get("definition") {
+            Some(ConfigurationValue::Literal(value)) => serde_json::from_value(value.clone())?,
+            _ => anyhow::bail!("runtime update has no registered current definition"),
+        };
+        let proposed = serde_json::from_value(
+            context
+                .proposed
+                .configuration()
+                .get("definition")
+                .ok_or_else(|| anyhow::anyhow!("runtime update has no proposed definition"))?
+                .clone(),
+        )?;
+        self.instance
+            .component
+            .apply_update(crate::management::OrdinaryComponentUpdateContext {
+                operation_id: context.operation_id,
+                instance_id: context.proposed.instance_id.clone(),
+                plan: context.plan,
+                current: Arc::new(current),
+                proposed: Arc::new(proposed),
+            })
+            .instrument(self.instance.span.clone())
+            .await
+    }
     async fn start(&mut self) -> anyhow::Result<()> {
         self.instance
             .component
@@ -156,17 +245,13 @@ impl ComputationComponent for Service {
             .instrument(self.instance.span.clone())
             .await
     }
+    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
+        self.instance.remove_data();
+        Ok(())
+    }
 }
 #[async_trait]
 impl ComputationService for Service {
-    async fn quiesce(&mut self) -> anyhow::Result<()> {
-        self.instance
-            .component
-            .quiesce()
-            .instrument(self.instance.span.clone())
-            .await
-    }
-
     async fn run(&mut self) -> anyhow::Result<()> {
         let run = self
             .instance
@@ -227,6 +312,15 @@ impl RuntimeFactory {
                     ResourceRequirement::exactly_one::<RuntimeInstance>(ResourceRole::Component),
                 )]
                 .into_iter()
+                .chain([(
+                    Arc::from("source_host"),
+                    ResourceRequirement {
+                        minimum: 0,
+                        ..ResourceRequirement::exactly_one::<SourcePluginHost>(
+                            ResourceRole::LegacySource,
+                        )
+                    },
+                )])
                 .chain(LegacyPluginServices::requirements())
                 .collect(),
             },
@@ -321,16 +415,11 @@ impl ComponentFactory for RuntimeFactory {
             .ok_or_else(|| {
                 ComponentCreationError::terminal(anyhow::anyhow!("missing runtime instance"))
             })?;
-        instance
-            .component
-            .initialize(context.generation)
-            .instrument(instance.span.clone())
-            .await
-            .map_err(ComponentCreationError::retryable)?;
         Ok(ConstructedComponent::service(Box::new(Service {
             descriptor: context.specification.descriptor.clone(),
             instance,
             control: None,
+            generation: context.generation,
         })))
     }
 }

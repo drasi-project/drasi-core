@@ -42,6 +42,7 @@ async fn activation_credentials_are_explicit_transient_and_not_constructor_io() 
         configuration: json!({"settings":settings}),
         scope: None,
         activation_credentials_bound: false,
+        update_directive: None,
     };
     assert!(factory.create(&request, ControlSender::default()).is_err());
     request.activation_credentials_bound = true;
