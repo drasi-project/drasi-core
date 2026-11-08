@@ -6,7 +6,7 @@
 RUSTFLAGS := -Dwarnings
 
 .PHONY: clippy clippy-fix help build-test-plugins test-host-sdk check-native-dependencies \
-       build-native-context-fixtures test-native-context observability-demo observability-demo-smoke \
+       build-native-context-fixtures test-native-context observability-demo observability-demo-smoke observability-demo-suite-smoke \
        build-native-telemetry-fixtures test-native-telemetry \
        build-native-plugins build-native-standard-plugins build-native-network-plugins build-native-mysql-plugins build-native-postgres-plugins build-native-sqlite-plugins test-native-network test-native-mysql test-native-sqlite \
        build-plugins build-plugins-release list-plugins \
@@ -24,6 +24,7 @@ help:
 	@echo "  test-native-telemetry     - Build real SDK libraries and qualify shared telemetry"
 	@echo "  observability-demo        - Run native telemetry demo with dashboard/Jaeger; Ctrl-C cleans up"
 	@echo "  observability-demo-smoke  - Verify demo traces/metrics/logs and clean up automatically"
+	@echo "  observability-demo-suite-smoke - Verify all three scenarios and the signal-policy matrix"
 	@echo "  build-native-plugins      - Build all native plugin libraries (host-loaded, no query engine dependency)"
 	@echo "  build-native-standard-plugins - Build native counter, middleware, capture and arithmetic libraries"
 	@echo "  build-native-network-plugins - Build native HTTP/gRPC/SSE and HTTP bootstrap libraries"
@@ -152,6 +153,9 @@ observability-demo:
 
 observability-demo-smoke:
 	bash lib/examples/observability/demo.sh --smoke
+
+observability-demo-suite-smoke:
+	bash lib/examples/observability/demo.sh --suite-smoke
 
 build-native-network-plugins:
 	cargo build --lib $(foreach package,$(NATIVE_NETWORK_PACKAGES),-p $(package)) --features dynamic-plugin

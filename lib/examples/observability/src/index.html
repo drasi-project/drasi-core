@@ -2,7 +2,7 @@
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Drasi native telemetry demo</title>
+<title>Drasi observability demo suite</title>
 <style>
   :root { color-scheme: light; font-family: system-ui, sans-serif; color: #2C3D45; background: #f5f6f3; }
   body { max-width: 1150px; margin: 2rem auto; padding: 0 1.25rem 3rem; }
@@ -15,13 +15,50 @@
   td:last-child { overflow-wrap: anywhere; } .pill { display: inline-block; padding: .25rem .6rem; border-radius: 1rem; background: #e4ede8; }
   #traces { display: flex; flex-wrap: wrap; gap: .75rem; } .warning { background: #f2e8df; color: #624c35; }
   details { margin-top: 1rem; } label { display: block; margin: .5rem 0; } small { overflow-wrap: anywhere; }
+  button, select { font: inherit; padding: .45rem .65rem; border: 1px solid #A68D73; border-radius: 4px; }
+  button { background: #658780; color: white; cursor: pointer; margin: .25rem; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .controls { display: flex; flex-wrap: wrap; gap: .75rem; }
 </style>
-<h1>Drasi native telemetry</h1>
+<h1>Drasi observability demo suite</h1>
 <p class="muted">Real HTTP and PostgreSQL sources, continuous queries, and a separately loaded native plugin.</p>
 <p id="error" hidden></p>
 <section>
+  <h2 id="scenario-title">Loading scenario...</h2>
+  <p id="story"></p>
+  <p id="policy" class="muted"></p>
+  <div id="actions">
+    <button data-action="prepare" hidden>Prepare fan-out</button>
+    <button data-action="insert">Send insert</button>
+    <button data-action="update">Update latest</button>
+    <button data-action="delete">Delete latest</button>
+    <button data-action="burst">Send burst (3)</button>
+    <button data-action="pause" hidden>Pause slow sink</button>
+    <button data-action="release" hidden>Release slow sink</button>
+    <button data-action="reset">Reset experiment</button>
+  </div>
+  <p id="action-result" class="muted">Actions send real HTTP events. Source acceptance is not proof of handling.</p>
+  <p id="experiment" class="muted"></p>
+  <table><thead><tr><th>Observation since reset</th><th>Expected</th><th>Observed</th></tr></thead><tbody id="observations"></tbody></table>
+  <p class="muted">Reset releases pending handling, deletes only dashboard-owned nodes, and establishes a new baseline. It does not reset cumulative metrics or clear PostgreSQL/manual inputs.</p>
+  <details>
+    <summary>Select another scenario or signal policy</summary>
+    <p>Policies are startup settings, not pretend live toggles. Stop the runner with Ctrl-C, then use the generated command. The same seeded workload runs in every policy.</p>
+    <div class="controls">
+      <label>Scenario <select id="scenario-choice"><option value="follow">Follow one change</option><option value="controls">Signal controls</option><option value="latency">Latency lab</option></select></label>
+      <label>Profile <select id="profile-choice"><option>debug</option><option>basic</option><option>persistence</option><option>off</option></select></label>
+      <label>Tracing <select id="trace-choice"><option value="true">Enabled</option><option value="false">Disabled</option></select></label>
+      <label>Sampling <select id="sampling-choice"><option>always</option><option>never</option></select></label>
+      <label>Metrics <select id="metric-choice"><option value="true">Enabled</option><option value="false">Disabled</option></select></label>
+      <label>Logs <select id="log-choice"><option>info</option><option>warn</option><option>off</option></select></label>
+      <label>Metric exclusion <select id="exclude-choice"><option value="">None</option><option>drasi.query</option><option>inspection.duration</option></select></label>
+    </div>
+    <pre id="command"></pre>
+  </details>
+</section>
+<section>
   <h2>Connected pipeline</h2>
-  <pre>HTTP / PostgreSQL → continuous query → native inspector (.dylib / .so / .dll) → handled callback</pre>
+  <pre id="topology">HTTP / PostgreSQL → continuous query → native inspector (.dylib / .so / .dll) → handled callback</pre>
   <p>The host owns tracing, logging, metrics, and export. The plugin measures record-image inspection, not another copy of framework throughput.</p>
   <p><span id="sampling" class="pill">Loading…</span> <a id="jaeger" href="#">Open Jaeger</a> · <a href="/metrics">Prometheus metrics</a> · <a href="/logs">JSON logs</a></p>
   <small id="plugin" class="muted"></small>
@@ -46,6 +83,13 @@
 </section>
 <script>
   let latestMetrics = "";
+  let configured = false;
+  let actionBusy = false;
+  const stories = {
+    follow: ["1. Follow one change", "Insert, update, and delete a node. Follow its real source/query/native-plugin/handled-callback trace and correlated logs. PostgreSQL remains available for manual SQL."],
+    controls: ["2. Signal controls", "Run the same workload under different startup policies. Sampling never suppresses metric collection; disabling tracing does not disable logging. Basic removes debug spans; Persistence adds storage metrics to Basic (not Debug), and exclusions remove only matching metrics."],
+    latency: ["3. Why is my alert slow?", "One live source input creates ten query result rows and fans out to independent fast and slow handled sinks. Pause the slow sink, send a bounded burst, and release it: queued/accepted work is not handled work. Each fully handled envelope produces one latency observation per sink, not ten."],
+  };
   const element = id => document.getElementById(id);
   function showMetrics() {
     element("metrics").textContent = latestMetrics.split("\n")
@@ -53,6 +97,83 @@
       .join("\n") || "No plugin metric series yet.";
   }
   element("all").addEventListener("change", showMetrics);
+  function command() {
+    element("command").textContent = `DEMO_SCENARIO=${element("scenario-choice").value} TELEMETRY_PROFILE=${element("profile-choice").value} TRACE_ENABLED=${element("trace-choice").value} TRACE_SAMPLING=${element("sampling-choice").value} METRICS_ENABLED=${element("metric-choice").value} DEMO_LOG_LEVEL=${element("log-choice").value} METRIC_EXCLUDE='${element("exclude-choice").value}' make observability-demo`;
+  }
+  document.querySelectorAll("select").forEach(select => select.addEventListener("change", command));
+  document.querySelectorAll("[data-action]").forEach(button => button.addEventListener("click", async () => {
+    actionBusy = true;
+    document.querySelectorAll("[data-action]").forEach(control => { control.disabled = true; });
+    try {
+      const response = await fetch("/action", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: button.dataset.action }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+      element("action-result").textContent = `${result.action}: ${JSON.stringify(result)}. Watch actual handling below.`;
+    } catch (error) {
+      element("action-result").textContent = `Action failed: ${error.message}`;
+    } finally {
+      actionBusy = false;
+      await refresh();
+    }
+  }));
+  function total(text, name, component) {
+    return text.split("\n").filter(line => line.startsWith(`${name}{`) && (!component || line.includes(`component_id="${component}"`)))
+      .reduce((sum, line) => sum + Number(line.slice(line.lastIndexOf(" ") + 1)), 0);
+  }
+  function showScenario(state, metrics) {
+    const config = state.config, latency = config.scenario === "latency";
+    element("scenario-title").textContent = stories[config.scenario][0];
+    element("story").textContent = stories[config.scenario][1];
+    element("policy").textContent = `Effective policy: ${config.profile} · tracing ${config.tracing ? "on" : "off"} · sampling ${config.sampling} · metrics ${config.metrics ? "on" : "off"} · logs ${config.log_level} · exclusion ${config.metric_exclusion || "none"} · handled-branch timing ${config.handled_branch_latency ? "on" : "off"}`;
+    if (!configured) {
+      for (const [id, value] of Object.entries({
+        "scenario-choice": config.scenario, "profile-choice": config.profile,
+        "trace-choice": String(config.tracing), "sampling-choice": config.sampling,
+        "metric-choice": String(config.metrics), "log-choice": config.log_level,
+        "exclude-choice": config.metric_exclusion,
+      })) element(id).value = value;
+      command(); configured = true;
+    }
+    element("topology").textContent = latency
+      ? "HTTP → query (10-row fan-out) → native inspector → fast handled sink / slow handled sink (300 ms; pausable)\nPostgreSQL → query → native inspector → handled callback"
+      : "HTTP / PostgreSQL → continuous query → native inspector (.dylib / .so / .dll) → handled callback";
+    element("experiment").textContent = `Dashboard nodes: ${state.records}/${state.max_records} · inputs sent since reset: ${state.issued} · slow sink: ${state.paused ? "PAUSED" : "released"}`;
+    for (const button of document.querySelectorAll("[data-action]")) {
+      const name = button.dataset.action;
+      button.hidden = ["pause", "release", "prepare"].includes(name) && (!latency || (name === "prepare" && state.prepared));
+      button.disabled = actionBusy || (["update", "delete"].includes(name) && state.records === 0)
+        || (["insert", "burst"].includes(name) && ((latency && !state.prepared) || state.records + (name === "burst" ? 3 : 1) > state.max_records));
+    }
+    const baseline = state.baseline_metrics;
+    const diff = (name, component) => total(metrics, name, component) - total(baseline, name, component);
+    const eligibility = (name, expected) => !config.metrics ? "metrics disabled"
+      : config.metric_exclusion && name.includes(config.metric_exclusion) ? "excluded by policy" : expected;
+    const rows = [
+      ["Query input envelopes", eligibility("drasi.query.events_processed", state.issued), diff("drasi_query_events_processed", "http-query")],
+      ["New query result-row changes", eligibility("drasi.query.results_emitted", latency ? "10 per insert/delete; updates can emit paired changes" : "depends on query diff, not envelope count"), diff("drasi_query_results_emitted", "http-query")],
+      ["Physical queue depth", eligibility("drasi.queue.depth", "pending work can grow while slow handling is paused"), total(metrics, "drasi_queue_depth")],
+    ];
+    for (const component of latency ? ["http-fast", "http-slow"] : ["http-output"]) {
+      const observed = state.since_reset[component] || { envelopes: 0, rows: 0 };
+      rows.push([`${component}: handled envelopes / rows`, `${state.paused && component === "http-slow" ? "no new handling" : state.issued + " envelopes"}`, `${observed.envelopes} / ${observed.rows}`]);
+      const count = diff("drasi_pipeline_end_to_end_duration_count", component);
+      rows.push([`${component}: latency samples`, latency ? `${observed.envelopes} (one per completed envelope)` : "0: opt-in remains off", count]);
+      if (count) rows.push([`${component}: mean handled-branch latency`, component === "http-slow" ? "includes pause/queue wait and 300 ms handling" : "independent branch duration", `${(diff("drasi_pipeline_end_to_end_duration_sum", component) / count * 1000).toFixed(2)} ms`]);
+    }
+    for (const [name, instrument] of [["Evaluator mean duration", "drasi_query_engine_duration"], ["Commit mean duration", "drasi_query_commit_duration"]]) {
+      const count = diff(`${instrument}_count`, "http-query");
+      rows.push([name, name.startsWith("Commit") ? "Persistence profile only" : "excludes commit/handler work", count ? `${(diff(`${instrument}_sum`, "http-query") / count * 1000).toFixed(3)} ms` : "no observations / excluded"]);
+    }
+    element("observations").replaceChildren();
+    for (const values of rows) {
+      const row = document.createElement("tr");
+      for (const value of values) { const cell = document.createElement("td"); cell.textContent = value; row.append(cell); }
+      element("observations").append(row);
+    }
+  }
   async function get(path, json = true) {
     const response = await fetch(path, { cache: "no-store" });
     if (!response.ok) throw new Error(`${path}: HTTP ${response.status}`);
@@ -60,7 +181,8 @@
   }
   async function refresh() {
     try {
-      const [status, metrics, logs] = await Promise.all([get("/status"), get("/metrics", false), get("/logs")]);
+      const [status, metrics, logs, scenario] = await Promise.all([get("/status"), get("/metrics", false), get("/logs"), get("/scenario")]);
+      showScenario(scenario, metrics);
       element("sampling").textContent = `Trace sampling: ${status.sampling}`;
       element("sampling").className = status.sampling === "never" ? "pill warning" : "pill";
       element("jaeger").href = status.jaeger;
@@ -86,6 +208,17 @@
           cell.style.whiteSpace = "pre-wrap";
           row.append(cell);
         }
+        if (status.config.tracing && status.sampling === "always") {
+          for (const [component, observed] of Object.entries(scenario.handled)) {
+            if (!observed.trace_id || traces.has(observed.trace_id)) continue;
+            traces.add(observed.trace_id);
+            const link = document.createElement("a");
+            link.href = `${status.jaeger}/trace/${observed.trace_id}`;
+            link.textContent = `${component}: ${observed.trace_id.slice(0, 12)}…`;
+            link.target = "_blank"; link.rel = "noopener";
+            element("traces").append(link);
+          }
+        }
         element("logs").append(row);
         if (log.sampled && log.trace_id && !traces.has(log.trace_id)) {
           traces.add(log.trace_id);
@@ -98,7 +231,9 @@
         }
       }
       element("no-traces").hidden = traces.size > 0;
-      element("no-traces").textContent = status.sampling === "never"
+      element("no-traces").textContent = !status.config.tracing
+        ? "Tracing is disabled. Business processing and independently configured metrics/logging continue."
+        : status.sampling === "never"
         ? "Sampling is disabled. Inspection metrics and native logs still update; unsampled contexts are not exported to Jaeger."
         : "Waiting for a sampled inspected result…";
       element("error").hidden = true;

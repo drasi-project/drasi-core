@@ -2,13 +2,19 @@
 // Licensed under the Apache License, Version 2.0.
 
 use anyhow::Result;
-use axum::{extract::State, http::header, response::Html, routing::get, Json, Router};
+use axum::{
+    extract::State,
+    http::{header, StatusCode},
+    response::Html,
+    routing::{get, post},
+    Json, Router,
+};
 use drasi_lib::observability::{
     ComponentLogKey, ComponentLogRuntime, ComponentLogType, NativeSpanCollector,
 };
 use metrics_exporter_prometheus::PrometheusHandle;
 use serde_json::{json, Value};
-use std::{future::IntoFuture, path::PathBuf, time::Duration};
+use std::{future::IntoFuture, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 
 #[derive(Clone)]
@@ -18,7 +24,7 @@ pub struct DashboardState {
     pub spans: NativeSpanCollector,
     pub plugin: PathBuf,
     pub capabilities: u32,
-    pub sampling: String,
+    pub lab: Arc<super::scenarios::Lab>,
     pub jaeger: String,
 }
 
@@ -38,6 +44,8 @@ impl Dashboard {
             .route("/metrics", get(metric_text))
             .route("/logs", get(logs))
             .route("/status", get(status))
+            .route("/scenario", get(scenario))
+            .route("/action", post(action))
             .with_state(state);
         let task = tokio::spawn(async move {
             let server = axum::serve(listener, app).with_graceful_shutdown(async {
@@ -127,7 +135,8 @@ async fn status(State(state): State<DashboardState>) -> Json<Value> {
         "service": super::SERVICE,
         "instance": super::INSTANCE,
         "jaeger": state.jaeger,
-        "sampling": state.sampling,
+        "sampling": state.lab.config.sampling,
+        "config": state.lab.config.json(),
         "plugin_path": state.plugin.display().to_string(),
         "plugin_capabilities": state.capabilities,
         "span_buffer": match retained {
@@ -143,4 +152,26 @@ async fn status(State(state): State<DashboardState>) -> Json<Value> {
             "closed": state.logging.losses().closed,
         },
     }))
+}
+
+type ApiResult = std::result::Result<Json<Value>, (StatusCode, Json<Value>)>;
+
+fn api_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
+    tracing::warn!(%error, "Observability demo action failed");
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({"error": error.to_string()})),
+    )
+}
+
+async fn scenario(State(state): State<DashboardState>) -> ApiResult {
+    state.lab.snapshot().await.map(Json).map_err(api_error)
+}
+
+async fn action(State(state): State<DashboardState>, Json(body): Json<Value>) -> ApiResult {
+    let action = body
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| api_error(anyhow::anyhow!("action must be a string")))?;
+    state.lab.action(action).await.map(Json).map_err(api_error)
 }

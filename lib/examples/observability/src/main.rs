@@ -5,6 +5,7 @@
 //! See ../README.md for the one-command dashboard and Jaeger setup.
 
 mod dashboard;
+mod scenarios;
 
 use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
@@ -15,8 +16,8 @@ use drasi_lib::{
     error::OperationFailures,
     observability::{
         ComponentLogRuntime, ExecutionContext, LogPolicy, MetricRegistrationContext,
-        NativeSpanCollector, OpenTelemetryContextAdapter, OpenTelemetrySpanProcessor, RootSampling,
-        TelemetryOptions, TelemetryProfile, TelemetrySettings, TELEMETRY_TARGET,
+        NativeSpanCollector, OpenTelemetryContextAdapter, OpenTelemetrySpanProcessor,
+        TelemetryOptions, TELEMETRY_TARGET,
     },
     DrasiLib,
 };
@@ -118,12 +119,7 @@ fn finish(results: impl IntoIterator<Item = Result<()>>) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let sampling = setting("TRACE_SAMPLING", "always")?;
-    let sampling_policy = match sampling.as_str() {
-        "always" => RootSampling::Always,
-        "never" => RootSampling::Never,
-        _ => anyhow::bail!("TRACE_SAMPLING must be always or never"),
-    };
+    let config = scenarios::Config::from_env()?;
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_http()
         .with_endpoint(setting(
@@ -141,7 +137,7 @@ async fn main() -> Result<()> {
         .with_span_processor(processor.clone())
         .with_resource(Resource::builder_empty().with_service_name(SERVICE).build())
         .build();
-    let logging = ComponentLogRuntime::new(LogPolicy::new("info")?)?;
+    let logging = ComponentLogRuntime::new(LogPolicy::new(&config.logs)?)?;
     let native_spans = NativeSpanCollector::new(Arc::new(processor), Default::default())?;
     let recorder = Arc::new(
         PrometheusBuilder::new()
@@ -149,10 +145,7 @@ async fn main() -> Result<()> {
             .build_recorder(),
     );
     let metrics = MetricRegistrationContext::new(recorder.clone(), Default::default())?;
-    let settings = TelemetrySettings::new(TelemetryProfile::Debug)
-        .with_sampling(sampling_policy)
-        .require_distributed_tracing()
-        .require_native_metrics();
+    let settings = config.settings()?;
     let policy = settings.resolve()?;
     let result = async {
         tracing_subscriber::registry()
@@ -172,8 +165,7 @@ async fn main() -> Result<()> {
             native_spans.clone(),
             metrics,
             recorder.handle(),
-            sampling,
-            settings,
+            config,
         )
         .await
     }
@@ -198,9 +190,9 @@ async fn run(
     native_spans: NativeSpanCollector,
     metrics: MetricRegistrationContext,
     metric_handle: metrics_exporter_prometheus::PrometheusHandle,
-    sampling: String,
-    settings: TelemetrySettings,
+    config: scenarios::Config,
 ) -> Result<()> {
+    let settings = config.settings()?;
     let http = NativePlugin::from_definition(drasi_computation_source_http::plugin()?)?;
     let postgres = NativePlugin::from_definition(drasi_computation_source_postgres::plugin()?)?;
     let http_factory = http
@@ -269,6 +261,11 @@ async fn run(
         vec![resource("postgres-progress")?],
     );
     let http_port = port("HTTP_PORT", 19090)?;
+    let lab = Arc::new(scenarios::Lab::new(
+        config,
+        metric_handle.clone(),
+        http_port,
+    )?);
     let mut batch = ComponentBatch::builder();
     for (name, role, handle) in [
         (
@@ -310,8 +307,11 @@ async fn run(
             ContinuousQueryDefinition {
                 graph_id: ComponentBatch::GRAPH_ID.into(),
                 id: id(&query_id)?,
-                query: "MATCH (n:trace_items) RETURN n.id AS id, n.name AS name, n.value AS value"
-                    .into(),
+                query: if source == "http" && lab.config.scenario == "latency" {
+                    "MATCH (n:trace_items), (copy:demo_copies) RETURN n.id AS id, copy.id AS copy, n.name AS name, n.value AS value"
+                } else {
+                    "MATCH (n:trace_items) RETURN n.id AS id, n.name AS name, n.value AS value"
+                }.into(),
                 language: ComputationQueryLanguage::Cypher,
                 output_stream: stream(&query_id)?,
                 outbox_capacity: NonZeroUsize::new(32).context("query capacity")?,
@@ -323,31 +323,12 @@ async fn run(
         if source == "postgres" {
             query = query.with_source_progress(progress.clone())?;
         }
-        let reaction = NativeApplicationReaction::callback(
-            output_id.clone(),
-            QueryChangeCodec::schema().descriptor().clone(),
-            move |input| async move {
-                let context = ExecutionContext::current();
-                let trace = context
-                    .trace()
-                    .context("handled callback has no operation trace context")?;
-                println!(
-                    "RESULT source={source} query={source}-query trace_id={} span_id={} sampled={} changes={}",
-                    opentelemetry::trace::TraceId::from_bytes(trace.trace_id()),
-                    opentelemetry::trace::SpanId::from_bytes(trace.span_id()),
-                    trace.sampled(),
-                    input.envelope.changes().operations().len()
-                );
-                Ok(())
-            },
-        )?;
         batch = batch
             .query(Box::new(query))
             .component(
                 inspector_factory.specification(id(&inspection_id)?, json!({}))?,
                 inspector_factory.clone(),
             )
-            .sink(Box::new(reaction))
             .bind_stream(endpoint(source, "out")?, stream(source)?)
             .bind_stream(endpoint(&query_id, "out")?, stream(&query_id)?)
             .bind_stream(endpoint(&inspection_id, "out")?, stream(&inspection_id)?)
@@ -358,14 +339,57 @@ async fn run(
             .connect(
                 EdgeDefinition::new(endpoint(&query_id, "out")?, endpoint(&inspection_id, "in")?),
                 Box::new(BoundedPipeConfig { capacity: 32 }),
-            )
-            .connect(
-                EdgeDefinition::new(
-                    endpoint(&inspection_id, "out")?,
-                    endpoint(&output_id, "in")?,
-                ),
-                Box::new(BoundedPipeConfig { capacity: 32 }),
             );
+        let outputs = if source == "http" && lab.config.scenario == "latency" {
+            vec!["http-fast".to_owned(), "http-slow".to_owned()]
+        } else {
+            vec![output_id]
+        };
+        for output in outputs {
+            let observation = lab.clone();
+            let component = output.clone();
+            let reaction = NativeApplicationReaction::callback(
+                output.clone(),
+                QueryChangeCodec::schema().descriptor().clone(),
+                move |input| {
+                    let observation = observation.clone();
+                    let component = component.clone();
+                    async move {
+                        observation
+                            .before_handle(&component, component == "http-slow")
+                            .await?;
+                        let context = ExecutionContext::current();
+                        let rows = input.envelope.changes().operations().len();
+                        if let Some(trace) = context.trace() {
+                            println!(
+                                "RESULT source={source} query={source}-query component={component} trace_id={} span_id={} sampled={} changes={rows}",
+                                opentelemetry::trace::TraceId::from_bytes(trace.trace_id()),
+                                opentelemetry::trace::SpanId::from_bytes(trace.span_id()),
+                                trace.sampled(),
+                            );
+                        } else {
+                            ensure!(
+                                !observation.config.tracing,
+                                "handled callback lost enabled tracing context"
+                            );
+                            println!("RESULT source={source} query={source}-query component={component} trace_id=none sampled=false changes={rows}");
+                        }
+                        observation.handled(&component, rows, &context)?;
+                        Ok(())
+                    }
+                },
+            )?;
+            batch = batch.sink(Box::new(reaction)).connect(
+                EdgeDefinition::new(endpoint(&inspection_id, "out")?, endpoint(&output, "in")?),
+                Box::new(BoundedPipeConfig {
+                    capacity: if lab.config.scenario == "latency" {
+                        2
+                    } else {
+                        32
+                    },
+                }),
+            );
+        }
     }
     let core = DrasiLib::builder()
         .with_id(INSTANCE)
@@ -389,7 +413,7 @@ async fn run(
             spans: native_spans,
             plugin: plugin_path,
             capabilities,
-            sampling: sampling.clone(),
+            lab: lab.clone(),
             jaeger: setting("JAEGER_URL", "http://127.0.0.1:16689")?,
         },
     )
@@ -400,7 +424,7 @@ async fn run(
         println!("READY HTTP http://127.0.0.1:{http_port}/sources/http/events");
         println!("READY PostgreSQL publication/slot drasi_trace_demo; wait for its slot to be active before inserting");
         println!("TRACES service={SERVICE}; each RESULT prints the trace ID to open in Jaeger");
-        println!("DASHBOARD http://127.0.0.1:{dashboard_port}/ sampling={sampling}");
+        println!("DASHBOARD http://127.0.0.1:{dashboard_port}/ scenario={} sampling={}", lab.config.scenario, lab.config.sampling);
         println!("METRICS http://127.0.0.1:{dashboard_port}/metrics");
         println!("LOGS http://127.0.0.1:{dashboard_port}/logs");
         let control = core.computation_control()?;
@@ -421,6 +445,7 @@ async fn run(
         }
         Ok(())
     }.await;
+    lab.close();
     let shutdown = core.shutdown().await.map_err(Into::into);
     let dashboard_shutdown = dashboard.shutdown(dashboard_joined).await;
     finish([result, shutdown, dashboard_shutdown])

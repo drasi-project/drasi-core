@@ -2,22 +2,55 @@
 # Copyright 2026 The Drasi Authors.
 # Licensed under the Apache License, Version 2.0.
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
+
+if [[ "${1:-}" == --suite-smoke ]]; then
+    [[ $# -eq 1 ]] || { printf '%s\n' '--suite-smoke takes no other arguments.' >&2; exit 2; }
+    for variant in follow controls controls-never controls-no-traces controls-basic \
+        controls-persistence controls-off controls-no-metrics controls-no-logs controls-excluded \
+        latency latency-never latency-no-traces; do
+        scenario=controls; profile=debug; sampling=always; tracing=true; metrics=true; logs=info; exclusion=""
+        case "$variant" in
+            follow) scenario=follow ;;
+            controls) ;;
+            controls-never) sampling=never ;;
+            controls-no-traces) tracing=false ;;
+            controls-basic) profile=basic ;;
+            controls-persistence) profile=persistence ;;
+            controls-off) profile=off ;;
+            controls-no-metrics) metrics=false ;;
+            controls-no-logs) logs=off ;;
+            controls-excluded) exclusion=drasi.query ;;
+            latency) scenario=latency ;;
+            latency-never) scenario=latency; sampling=never ;;
+            latency-no-traces) scenario=latency; tracing=false ;;
+        esac
+        printf '\n=== %s ===\n' "$variant"
+        DEMO_SCENARIO="$scenario" TELEMETRY_PROFILE="$profile" TRACE_SAMPLING="$sampling" \
+            TRACE_ENABLED="$tracing" METRICS_ENABLED="$metrics" DEMO_LOG_LEVEL="$logs" \
+            METRIC_EXCLUDE="$exclusion" bash "$0" --smoke
+    done
+    exit 0
+fi
 
 smoke=0
-case "${1:-}" in
-    "") ;;
-    --smoke) smoke=1 ;;
+scenario="${DEMO_SCENARIO:-follow}"
+while [[ $# -gt 0 ]]; do
+case "$1" in
+    --smoke) smoke=1; shift ;;
+    --scenario)
+        [[ $# -ge 2 ]] || { printf '%s\n' '--scenario requires a value.' >&2; exit 2; }
+        scenario="$2"; shift 2 ;;
     --help)
-        printf 'Usage: bash %s [--smoke]\n' "$0"
+        printf 'Usage: bash %s [--smoke] [--scenario follow|controls|latency]\n       bash %s --suite-smoke\n' "$0" "$0"
         printf '%s\n' 'Start, seed, and verify the demo; Ctrl-C cleans up. --smoke exits after verification.'
         exit 0
         ;;
     *) printf 'Unknown argument: %s\n' "$1" >&2; exit 2 ;;
 esac
-if [[ $# -gt 1 ]]; then
-    printf '%s\n' 'Expected at most one argument: --smoke' >&2
-    exit 2
-fi
+done
+case "$scenario" in follow|controls|latency) ;; *) printf '%s\n' 'Unknown demo scenario.' >&2; exit 2 ;; esac
+export DEMO_SCENARIO="$scenario"
 
 directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$directory/../../.." && pwd)"
@@ -28,6 +61,11 @@ jaeger_port="${JAEGER_UI_PORT:-16689}"
 otlp_port="${OTLP_HTTP_PORT:-14318}"
 telemetry_port="${TELEMETRY_PORT:-19091}"
 sampling="${TRACE_SAMPLING:-always}"
+profile="${TELEMETRY_PROFILE:-debug}"
+tracing="${TRACE_ENABLED:-true}"
+case "$profile" in off|basic|debug|persistence) ;; *) printf '%s\n' 'Invalid TELEMETRY_PROFILE.' >&2; exit 2 ;; esac
+case "$tracing" in true|false) ;; *) printf '%s\n' 'TRACE_ENABLED must be true or false.' >&2; exit 2 ;; esac
+[[ "$profile" != off ]] || tracing=false
 case "$sampling" in
     always|never) ;;
     *) printf '%s\n' 'TRACE_SAMPLING must be always or never.' >&2; exit 2 ;;
@@ -96,6 +134,7 @@ cleanup() {
     local status=$?
     local cid file child_status
     local cleanup_failed=0
+    if [[ "$status" -ne 0 && -s "$log" ]]; then cat "$log" >&2; fi
     trap - EXIT
     trap '' INT TERM
     if [[ -n "$app_pid" ]]; then
@@ -201,6 +240,15 @@ replication_active() {
         "SELECT active FROM pg_replication_slots WHERE slot_name='drasi_trace_demo';")" == t ]]
 }
 wait_for 'active PostgreSQL replication' replication_active
+action() {
+    curl --fail-with-body --silent --show-error --max-time 15 "$telemetry_url/action" \
+        --header 'Content-Type: application/json' --data "{\"action\":\"$1\"}"
+}
+if [[ "$scenario" == latency ]]; then
+    printf '%s\n' 'Preparing ten fan-out rows, then pausing only the slow handled sink...'
+    action prepare
+    action pause
+fi
 
 printf '%s\n' 'Sending one real HTTP event and one PostgreSQL insert...'
 curl --fail-with-body --silent --show-error --max-time 10 \
@@ -209,6 +257,11 @@ curl --fail-with-body --silent --show-error --max-time 10 \
 printf '\n'
 "$engine" exec "$postgres" psql -U postgres -v ON_ERROR_STOP=1 -c \
     "INSERT INTO trace_items VALUES (1, 'PostgreSQL demo', 11);"
+if [[ "$scenario" == latency ]]; then
+    wait_for 'fast handling without slow completion' python3 "$directory/verify_scenarios.py" --url "$telemetry_url" --check paused-seed
+    python3 "$directory/verify_scenarios.py" --url "$telemetry_url" --check paused-seed
+    action release
+fi
 
 trace_id() {
     awk -v source="$1" '$1 == "RESULT" && $2 == "source=" source {
@@ -219,15 +272,16 @@ has_trace_id() { [[ -n "$(trace_id "$1")" ]]; }
 for source in http postgres; do
     wait_for "$source callback" has_trace_id "$source"
     trace="$(trace_id "$source")"
-    if [[ "$sampling" == always ]]; then
-        wait_for "$source trace export" python3 "$directory/verify_trace.py" "$source" "$trace" --jaeger "$jaeger_url"
-        python3 "$directory/verify_trace.py" "$source" "$trace" --jaeger "$jaeger_url"
+    if [[ "$sampling" == always && "$tracing" == true ]]; then
+        wait_for "$source trace export" python3 "$directory/verify_trace.py" "$source" "$trace" --jaeger "$jaeger_url" --profile "$profile" --scenario "$scenario"
+        python3 "$directory/verify_trace.py" "$source" "$trace" --jaeger "$jaeger_url" --profile "$profile" --scenario "$scenario"
     else
-        printf 'UNSAMPLED %s: context %s propagated; no Jaeger trace is expected.\n' "$source" "$trace"
+        printf 'NO EXPORT %s: context=%s tracing=%s sampling=%s; no Jaeger event trace is expected.\n' "$source" "$trace" "$tracing" "$sampling"
     fi
 done
 wait_for 'native metrics and correlated logs' python3 "$directory/verify_telemetry.py" --url "$telemetry_url" --sampling "$sampling"
 python3 "$directory/verify_telemetry.py" --url "$telemetry_url" --sampling "$sampling"
+python3 "$directory/verify_scenarios.py" --url "$telemetry_url" --exercise
 
 printf '\nDashboard: %s\nMetrics: %s/metrics\nCorrelated logs: %s/logs\nJaeger: %s\nService: drasi-source-traces\n' \
     "$telemetry_url" "$telemetry_url" "$telemetry_url" "$jaeger_url"
