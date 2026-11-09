@@ -859,6 +859,12 @@ Enabled profiles instrument the owning graph's actual operation boundaries:
 Publication excludes idle `next()` waiting; batch handling excludes collection.
 Processing excludes later forwarding, confirmation, and acknowledgement. Sink
 completion stays `accepted` or `handled` according to its declared contract.
+Query input processing and input-driven continuations use `query.process`;
+generic transformers and bounded service work retain `component.process`.
+`query.evaluate` measures the evaluator-only boundary, not the full query
+callback. Query processing was previously named `component.process`: update
+span-name filters and saved searches accordingly. Component identities, causal
+parentage, timing boundaries and metric names/labels are unchanged.
 Ordinary reaction enqueue acceptance is not completed reaction processing.
 Output-only replay does not imply another evaluation. `component.scheduled`
 starts only for an actual bounded future-queue, input-replay or output-replay unit;

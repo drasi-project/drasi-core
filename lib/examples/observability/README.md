@@ -299,7 +299,7 @@ Each available event produces one connected trace through the selected source:
 ```text
 source.publish
   pipe.send
-  component.process (query)
+  query.process (query)
     query.evaluate
     query.commit
     pipe.send
@@ -318,6 +318,13 @@ This follows [computation_runtime](../computation_runtime.rs), statically hostin
 the native SDK sources. There is no separately loaded demo inspector or synthetic
 inspection work. The final application callback records actual handling and logs
 safe result-change counts.
+
+Query components use `query.process` for their complete input-processing
+callback; `query.evaluate` remains evaluator-only. Generic transformers and
+bounded service work retain `component.process`. This is a span-name change
+only: component identities, causal parentage, timing boundaries and metric
+names/labels are unchanged. Update query span-name filters or saved searches
+that used `component.process`; older traces keep their original names.
 
 Useful framework measurements:
 

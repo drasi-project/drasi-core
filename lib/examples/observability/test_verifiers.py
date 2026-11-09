@@ -91,7 +91,7 @@ class TraceProfileTests(unittest.TestCase):
             return result
         spans = [
             span("source.publish", 1, None, component_id="http", output_count=1),
-            span("component.process", 2, 1, component_id="http-query", input_count=1, output_count=1),
+            span("query.process", 2, 1, component_id="http-query", input_count=1, output_count=1),
             span("sink.handle", 3, 2, component_id="http-output", component_kind="reaction", completion="handled", input_count=1, change_count=1),
         ]
         resource = {"attributes": [{"key": "service.name", "value": {"stringValue": "drasi-observability-demo"}}]}
@@ -110,6 +110,12 @@ class TraceProfileTests(unittest.TestCase):
         data["result"]["resourceSpans"][0]["scopeSpans"][0]["spans"][-1]["parentSpanId"] = "1".zfill(16)
         with self.assertRaisesRegex(ValueError, "query output context"):
             verify(data, "http", trace_id, "basic", "controls")
+
+    def test_generic_processing_name_is_rejected_for_query(self):
+        data, trace_id = self.trace()
+        data["result"]["resourceSpans"][0]["scopeSpans"][0]["spans"][1]["name"] = "component.process"
+        with self.assertRaisesRegex(ValueError, "span counts"):
+            verify(data, "http", trace_id, "basic")
 
     def test_exported_service_name_is_verified(self):
         data, trace_id = self.trace()

@@ -156,7 +156,9 @@ async fn scheduled_work_is_a_new_attempt_even_without_output_and_empty_probes_ar
         field(scheduled, "output_count"),
         Some(&opentelemetry::Value::I64(0))
     );
-    assert!(!spans.iter().any(|span| span.name == "component.process"));
+    assert!(!spans
+        .iter()
+        .any(|span| span.name == "component.process" || span.name == "query.process"));
     for name in ["query.evaluate", "query.commit"] {
         let children: Vec<_> = spans
             .iter()
@@ -341,7 +343,9 @@ async fn prepared_input_replay_is_not_bootstrap_and_does_not_duplicate_processin
             .count(),
         1
     );
-    assert!(!spans.iter().any(|span| span.name == "component.process"));
+    assert!(!spans
+        .iter()
+        .any(|span| span.name == "component.process" || span.name == "query.process"));
     let evaluation = spans
         .iter()
         .find(|span| span.name == "query.evaluate")

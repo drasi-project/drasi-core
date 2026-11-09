@@ -6,7 +6,7 @@ use super::{
     ReactionSubscriptionMetrics, ReactionSubscriptions, TelemetryError, TelemetryScope,
     TELEMETRY_TARGET,
 };
-use drasi_computation_contracts::ComponentRole;
+use drasi_computation_contracts::{ComponentRole, ComponentSemanticKind};
 use metrics::{Counter, Gauge, Histogram};
 use std::{
     cell::RefCell,
@@ -93,11 +93,17 @@ impl ObservedOperation {
         }
     }
 
-    fn span_name(self) -> Option<&'static str> {
+    fn span_name(self, scope: Option<&TelemetryScope>) -> Option<&'static str> {
         Some(match self {
             Self::Next | Self::Run => return None,
             Self::Publish => "source.publish",
             Self::Send => "pipe.send",
+            Self::Transform | Self::Continue
+                if scope.and_then(TelemetryScope::semantic_kind)
+                    == Some(ComponentSemanticKind::Query) =>
+            {
+                "query.process"
+            }
             Self::Transform | Self::Continue => "component.process",
             Self::Handle => "sink.handle",
             Self::HandleBatch => "sink.handle_batch",
@@ -678,7 +684,7 @@ impl ComponentObservations {
         fields: OperationFields<'_>,
     ) -> Result<OperationObservation, TelemetryError> {
         let selected = if operation
-            .span_name()
+            .span_name(self.config.scope())
             .is_some_and(|name| self.config.policy().allows_span(name))
         {
             BatchTraceParent::select(contexts, self.config.link_limits())
@@ -725,7 +731,7 @@ impl ComponentObservations {
         let eligible = trace
             && !(operation == ObservedOperation::Evaluate && fields.change_count == Some(0))
             && operation
-                .span_name()
+                .span_name(self.config.scope())
                 .is_some_and(|name| self.config.policy().allows_span(name));
         let eligible = eligible && self.lifetime.is_active()?;
         let sampled = !eligible
@@ -1098,6 +1104,11 @@ fn operation_span(
     match operation {
         ObservedOperation::Publish => span!("source.publish"),
         ObservedOperation::Send => span!("pipe.send"),
+        ObservedOperation::Transform | ObservedOperation::Continue
+            if operation.span_name(scope) == Some("query.process") =>
+        {
+            span!("query.process")
+        }
         ObservedOperation::Transform | ObservedOperation::Continue => span!("component.process"),
         ObservedOperation::Handle => span!("sink.handle"),
         ObservedOperation::HandleBatch => span!("sink.handle_batch"),
@@ -1124,6 +1135,64 @@ mod tests {
     use super::*;
     use crate::observability::{TelemetryOptions, TelemetryProfile, TelemetrySettings};
     use drasi_computation_contracts::{ComponentId, ComponentSemanticKind};
+
+    #[test]
+    fn processing_span_names_follow_component_identity() {
+        for profile in [
+            TelemetryProfile::Off,
+            TelemetryProfile::Basic,
+            TelemetryProfile::Debug,
+            TelemetryProfile::Persistence,
+        ] {
+            for (role, kind) in [
+                (ComponentRole::Query, ComponentSemanticKind::Query),
+                (ComponentRole::Transformer, ComponentSemanticKind::Query),
+                (
+                    ComponentRole::Transformer,
+                    ComponentSemanticKind::Transformer,
+                ),
+                (ComponentRole::Service, ComponentSemanticKind::Service),
+            ] {
+                for operation in [
+                    ObservedOperation::Transform,
+                    ObservedOperation::Continue,
+                    ObservedOperation::ServiceWork,
+                ] {
+                    tracing::subscriber::with_default(tracing_subscriber::registry(), || {
+                        let graph = TelemetryOptions::new(
+                            TelemetrySettings::new(profile).with_metrics(false),
+                        )
+                        .with_instance_id("instance")
+                        .resolve("graph", None)
+                        .unwrap();
+                        let owner = graph
+                            .observations(ComponentId::try_new("component").unwrap(), role, kind, 1)
+                            .unwrap();
+                        let expected = if kind == ComponentSemanticKind::Query
+                            && matches!(
+                                operation,
+                                ObservedOperation::Transform | ObservedOperation::Continue
+                            ) {
+                            "query.process"
+                        } else {
+                            "component.process"
+                        };
+                        let observation = owner
+                            .begin(operation, &ExecutionContext::default(), Default::default())
+                            .unwrap();
+                        assert_eq!(
+                            observation
+                                .span()
+                                .metadata()
+                                .map(|metadata| metadata.name()),
+                            (profile != TelemetryProfile::Off).then_some(expected),
+                            "{profile:?} {role:?} {kind:?} {operation:?}",
+                        );
+                    });
+                }
+            }
+        }
+    }
 
     #[test]
     fn operation_span_replacement_preserves_the_original_timing_lease() {

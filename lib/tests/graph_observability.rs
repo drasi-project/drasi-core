@@ -166,13 +166,14 @@ async fn directly_constructed_query_uses_real_evaluator_and_commit_boundaries() 
     .with_subscriber(tracing_subscriber::registry().with(spans.clone()))
     .await;
     let spans = spans.0.lock().unwrap();
-    for name in ["component.process", "query.evaluate", "query.commit"] {
+    for name in ["query.process", "query.evaluate", "query.commit"] {
         assert_eq!(
             spans.iter().filter(|span| span.name == name).count(),
             1,
             "{name}"
         );
     }
+    assert!(!spans.iter().any(|span| span.name == "component.process"));
     let evaluation = spans
         .iter()
         .find(|span| span.name == "query.evaluate")

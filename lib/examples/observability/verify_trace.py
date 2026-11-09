@@ -44,7 +44,7 @@ def verify(data, source, trace_id, profile="debug", scenario="follow", parent_sp
     outputs = ["http-fast", "http-slow"] if latency else [f"{source}-output"]
     expected = Counter({
         "source.publish": 1,
-        "component.process": 1,
+        "query.process": 1,
         "query.evaluate": 1,
         "query.commit": 1,
         "pipe.send": 1 + len(outputs),
@@ -63,13 +63,13 @@ def verify(data, source, trace_id, profile="debug", scenario="follow", parent_sp
         all(int(span["endTimeUnixNano"]) >= int(span["startTimeUnixNano"]) for span in spans),
         "invalid span timing",
     )
-    one = {span["name"]: span for span in spans if span["name"] not in ["pipe.send", "component.process", "component.confirm_outputs"]}
+    one = {span["name"]: span for span in spans if span["name"] not in ["pipe.send", "query.process", "component.confirm_outputs"]}
     publication = one["source.publish"]
     def component_span(name, component):
         matching = [span for span in spans if span["name"] == name and text(span, "component_id") == component]
         require(len(matching) == 1, f"expected one {name} for {component}")
         return matching[0]
-    processing = component_span("component.process", f"{source}-query")
+    processing = component_span("query.process", f"{source}-query")
     handlers = [component_span("sink.handle", component) for component in outputs]
     if parent_span_id:
         require(publication.get("parentSpanId") == parent_span_id, "source publication did not preserve the incoming parent span")

@@ -109,7 +109,7 @@ path:
 ```text
 source.publish                    (http)
   pipe.send
-  component.process               (http-query)
+  query.process                   (http-query)
     query.evaluate
     query.commit
     pipe.send
@@ -120,7 +120,7 @@ source.publish                    (http)
 **Point out:**
 
 - `source.publish`: framework publication of the available source envelope.
-- `component.process`: the query's complete transformation callback.
+- `query.process`: the query component's complete transformation callback.
 - `query.evaluate`: actual evaluation, not the whole transformation.
 - `query.commit`: the query's commit operation.
 - `pipe.send`: downstream acceptance, distinct from handling.
@@ -129,7 +129,7 @@ source.publish                    (http)
 - Component identities, parentage, successful outcomes, and durations.
 
 Click span details to compare `component_id=http-query` and
-`component_id=http-output`. There is only one `component.process` in this path.
+`component_id=http-output`. There is only one `query.process` in this path.
 
 **Say:**
 
@@ -139,10 +139,11 @@ Click span details to compare `component_id=http-query` and
 The reaction inherits query-output context. Its nesting shows causality, not
 that later reaction handling contributes to the query's processing duration.
 Similarly, evaluation/commit children do not currently explain every interval
-inside `component.process`; do not call the residual time CPU time.
+inside `query.process`; do not call the residual time CPU time.
 
-The trace starts at framework source publication, not upstream HTTP/network work.
-Incoming HTTP `traceparent` extraction is not demonstrated.
+The normal trace starts at framework source publication, not upstream HTTP/network
+work. The optional incoming-trace command supplies an upstream `traceparent`;
+Drasi continues that trace but does not fabricate or export the upstream span.
 
 ## 4. Show framework metrics
 
