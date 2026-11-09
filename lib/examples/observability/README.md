@@ -1,7 +1,9 @@
 # Observability demo suite
 
-The main demo is **HTTP-only**: one source, one continuous query, and one
-application reaction (two reactions in the latency lab). PostgreSQL is a
+The main demo is **HTTP-only**: one source, a real arithmetic transformer,
+one continuous query, and one application reaction. Signal controls use the
+same pipeline. The latency lab keeps its direct query fan-out to two reactions
+without the transformer. PostgreSQL is a
 separate, optional CDC demo selected explicitly with a Make command.
 Both reuse the host, dashboard, and runner; they never
 silently start two source pipelines.
@@ -11,7 +13,7 @@ For a single-command presentation of tracing and metrics, use the
 
 | Scenario | Start command | Actions and visible outcome |
 |---|---|---|
-| Main: follow one HTTP change | `make observability-demo` | Dashboard buttons send real HTTP inserts, updates, and deletes through one observable pipeline. |
+| Main: follow one HTTP change | `make observability-demo` | Dashboard buttons send real HTTP inserts, updates, and deletes through an arithmetic transformer, query, and reaction. |
 | Main: continue an upstream trace | `make observability-demo-incoming-trace` | Seed an HTTP event with W3C context; assert the supplied trace ID and remote parent survive through handled reaction completion. |
 | Main: signal controls | `make observability-demo-controls` | Compare the same HTTP workload under tracing, sampling, metrics, and logging policies. |
 | Main: latency/bottleneck lab | `make observability-demo-latency` | Pause the slow sink, send up to four HTTP inputs, and release it; acceptance is not handling. |
@@ -90,6 +92,60 @@ Main-demo actions: `insert`, `update`, `delete`, `burst`, `reset`; latency also
 supports `prepare` (runner-managed once), `pause`, and `release`.
 `GET /scenario` reports callback observations and the cumulative-metric baseline.
 
+## Transformer trace demo
+
+```sh
+make observability-demo
+```
+
+Wait for **"Demo is live"**, send an insert with the dashboard, and open the
+reaction's trace link. The actual data path is:
+
+```text
+HTTP source -> arithmetic transformer -> continuous query -> application reaction
+http           http-transform           http-query          http-output
+```
+
+The statically registered
+[production arithmetic transformer](../../../components/computation-plugins/transformers/arithmetic/README.md)
+multiplies the integer `value` property by two: the startup input value `7`
+becomes `14` before evaluation. Inserts, updates and deletes use the existing
+HTTP workload. No extra source, database, demo inspector or exporter is added.
+The dashboard shows the transformer topology and its actual framework
+input/output counters.
+
+The current Debug trace has **11 spans**:
+
+```text
+source.publish                         (http)
+  pipe.send                            (http)
+  component.process                    (http-transform)
+    component.confirm_outputs          (http-transform)
+  pipe.send                            (http-transform)
+  query.process                        (http-query)
+    query.evaluate
+    query.commit
+    pipe.send                          (http-query)
+    component.confirm_outputs          (http-query)
+    sink.handle                        (http-output; completion=handled)
+```
+
+The transformer explicitly preserves its **input execution context** on output.
+Its processing span and the query-processing span are therefore siblings under
+`source.publish`; query processing does not inherit the transformer's active
+operation span. The reaction still inherits the query-output context. The
+example/verifier shows this existing behavior rather than reparenting spans
+just for the demo. Component identities, operation timings and counts remain
+separate. Basic/Persistence have four spans, omitting Debug details.
+
+The existing incoming-context command uses this same transformer pipeline:
+
+```sh
+make observability-demo-incoming-trace
+```
+
+Use Ctrl-C to stop the runner and clean up before changing scenarios.
+
 ## Continue an upstream trace
 
 ```sh
@@ -99,7 +155,7 @@ make observability-demo-incoming-trace
 This uses the normal main pipeline, with tracing enabled and sampling Always.
 The runner generates a fresh upstream trace ID and parent span ID, prints the
 actual `traceparent` header, and sends it with `tracestate: demo=upstream`.
-It verifies the callback's exact trace ID and all eight exported Debug spans,
+It verifies the callback's exact trace ID and all eleven exported Debug spans,
 including `source.publish` parentage and new local span IDs. The upstream span
 itself is not fabricated or exported by Drasi. Normal dashboard actions afterward
 have no headers and create independent traces, not children of the seed.
@@ -212,9 +268,9 @@ That's all. The runner:
 
 1. Builds the source-query-reaction host (the first build can take a few minutes).
 2. Starts a disposable Jaeger container only.
-3. Starts one HTTP source, its query, an application reaction, and a telemetry dashboard.
+3. Starts one HTTP source, the arithmetic transformer, its query, an application reaction, and a telemetry dashboard.
 4. Sends one HTTP event.
-5. Verifies its eight-span trace, framework metrics, and correlated handling logs; exercises insert/update/delete and resets the experiment.
+5. Verifies its eleven-span trace, framework metrics, and correlated handling logs; exercises insert/update/delete and resets the experiment.
 
 The runner prints the dashboard, metrics, logs, and Jaeger links as soon as the
 dashboard is ready, before automatic verification. Wait for **"Demo is live"**
@@ -298,7 +354,10 @@ Each available event produces one connected trace through the selected source:
 
 ```text
 source.publish
-  pipe.send
+  pipe.send (source)
+  component.process (arithmetic transformer)
+    component.confirm_outputs (transformer)
+  pipe.send (transformer)
   query.process (query)
     query.evaluate
     query.commit
@@ -310,9 +369,10 @@ source.publish
 The verifier checks exact span counts, parent relationships, identities, numeric
 counts, successful outcomes, and handled completion. Query output carries its
 processing context directly to the application reaction, which remains connected
-even after the query's processing span has finished. A default trace has eight
-spans; Basic/Persistence omit Debug spans and have three. The latency scenario
-adds a second sink and pipe, producing ten Debug spans.
+even after the query's processing span has finished. A default trace has eleven
+spans; Basic/Persistence omit Debug spans and have four. The unchanged direct
+latency pipeline has two sinks and ten Debug spans; optional PostgreSQL has
+eight Debug spans and no arithmetic transformer.
 
 This follows [computation_runtime](../computation_runtime.rs), statically hosting
 the native SDK sources. There is no separately loaded demo inspector or synthetic

@@ -5,13 +5,13 @@ import unittest
 
 from verify_scenarios import check, total
 from verify_telemetry import sample
-from verify_trace import verify
+from verify_trace import text, verify
 
 
 class ScenarioVerificationTests(unittest.TestCase):
     def setUp(self):
         self.state = {
-            "config": {"scenario": "latency", "source": "http", "metrics": True, "metric_exclusion": "", "slow_delay_ms": 300},
+            "config": {"scenario": "latency", "source": "http", "transformer": False, "metrics": True, "metric_exclusion": "", "slow_delay_ms": 300},
             "baseline_metrics": "",
             "paused": True,
             "since_reset": {
@@ -64,7 +64,7 @@ class ScenarioVerificationTests(unittest.TestCase):
 
     def test_optional_sql_checks_use_postgres_not_http(self):
         state = {
-            "config": {"scenario": "postgres", "source": "postgres", "metrics": True, "metric_exclusion": ""},
+            "config": {"scenario": "postgres", "source": "postgres", "transformer": False, "metrics": True, "metric_exclusion": ""},
             "baseline_metrics": "", "paused": False,
             "since_reset": {"postgres-output": {"envelopes": 3, "rows": 3}},
         }
@@ -73,9 +73,25 @@ class ScenarioVerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "query input envelope"):
             check(state, metrics.replace("postgres-query", "http-query"), "actions")
 
+    def test_transformer_actions_require_real_input_and_output_counts(self):
+        state = {
+            "config": {"scenario": "follow", "source": "http", "transformer": True, "metrics": True, "metric_exclusion": ""},
+            "baseline_metrics": "", "paused": False,
+            "since_reset": {"http-output": {"envelopes": 3, "rows": 3}},
+        }
+        metrics = '\n'.join([
+            'drasi_query_events_processed{component_id="http-query",query_id="http-query",phase="steady"} 3',
+            'drasi_component_inputs_processed{component_id="http-transform",completion="transformed"} 3',
+            'drasi_component_outputs_emitted{component_id="http-transform"} 3',
+        ])
+        check(state, metrics, "actions")
+        for instrument in ["drasi_component_inputs_processed", "drasi_component_outputs_emitted"]:
+            with self.subTest(instrument=instrument), self.assertRaisesRegex(ValueError, "transformer .* envelope count"):
+                check(state, "\n".join(line for line in metrics.splitlines() if not line.startswith(instrument)), "actions")
+
 
 class TraceProfileTests(unittest.TestCase):
-    def trace(self):
+    def trace(self, transformer=True, debug=False):
         trace_id = "1" * 32
         def span(name, identifier, parent, **fields):
             result = {
@@ -94,6 +110,21 @@ class TraceProfileTests(unittest.TestCase):
             span("query.process", 2, 1, component_id="http-query", input_count=1, output_count=1),
             span("sink.handle", 3, 2, component_id="http-output", component_kind="reaction", completion="handled", input_count=1, change_count=1),
         ]
+        if transformer:
+            spans.append(span("component.process", 4, 1, component_id="http-transform", component_kind="transformer", input_count=1, output_count=1))
+        if debug:
+            spans.extend([
+                span("query.evaluate", 5, 2, change_count=1, result_change_count=1),
+                span("query.commit", 6, 2),
+                span("pipe.send", 7, 1, component_id="http"),
+                span("pipe.send", 8, 2, component_id="http-query"),
+                span("component.confirm_outputs", 9, 2, component_id="http-query"),
+            ])
+            if transformer:
+                spans.extend([
+                    span("pipe.send", 10, 1, component_id="http-transform"),
+                    span("component.confirm_outputs", 11, 4, component_id="http-transform"),
+                ])
         resource = {"attributes": [{"key": "service.name", "value": {"stringValue": "drasi-observability-demo"}}]}
         return {"result": {"resourceSpans": [{"resource": resource, "scopeSpans": [{"spans": spans}]}]}}, trace_id
 
@@ -101,13 +132,14 @@ class TraceProfileTests(unittest.TestCase):
         data, trace_id = self.trace()
         for profile in ["basic", "persistence"]:
             with self.subTest(profile=profile):
-                self.assertEqual(verify(data, "http", trace_id, profile, "controls"), 3)
+                self.assertEqual(verify(data, "http", trace_id, profile, "controls"), 4)
         with self.assertRaisesRegex(ValueError, "span counts"):
             verify(data, "http", trace_id, "debug", "controls")
 
     def test_reaction_inherits_query_output_context(self):
         data, trace_id = self.trace()
-        data["result"]["resourceSpans"][0]["scopeSpans"][0]["spans"][-1]["parentSpanId"] = "1".zfill(16)
+        next(span for span in data["result"]["resourceSpans"][0]["scopeSpans"][0]["spans"]
+             if span["name"] == "sink.handle")["parentSpanId"] = "1".zfill(16)
         with self.assertRaisesRegex(ValueError, "query output context"):
             verify(data, "http", trace_id, "basic", "controls")
 
@@ -128,7 +160,7 @@ class TraceProfileTests(unittest.TestCase):
         publication = data["result"]["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
         parent = "abcdef0123456789"
         publication["parentSpanId"] = parent
-        self.assertEqual(verify(data, "http", trace_id, "basic", "follow", parent), 3)
+        self.assertEqual(verify(data, "http", trace_id, "basic", "follow", parent), 4)
         with self.assertRaisesRegex(ValueError, "trace root"):
             verify(data, "http", trace_id, "basic")
         with self.assertRaisesRegex(ValueError, "incoming parent"):
@@ -136,6 +168,38 @@ class TraceProfileTests(unittest.TestCase):
         publication["parentSpanId"] = publication["spanId"]
         with self.assertRaisesRegex(ValueError, "new local span IDs"):
             verify(data, "http", trace_id, "basic", "follow", publication["spanId"])
+
+    def test_transformer_trace_has_separate_generic_and_query_processing(self):
+        for profile in ["basic", "persistence", "debug"]:
+            with self.subTest(profile=profile):
+                data, trace_id = self.trace(transformer=True, debug=profile == "debug")
+                self.assertEqual(
+                    verify(data, "http", trace_id, profile, "follow"),
+                    11 if profile == "debug" else 4,
+                )
+
+    def test_transformer_does_not_rewrite_the_querys_input_parent(self):
+        data, trace_id = self.trace(transformer=True, debug=True)
+        spans = data["result"]["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        next(span for span in spans if span["name"] == "query.process")["parentSpanId"] = "4".zfill(16)
+        with self.assertRaisesRegex(ValueError, "query parent is not publication"):
+            verify(data, "http", trace_id, "debug", "follow")
+
+    def test_transformer_confirmation_has_its_own_processing_parent(self):
+        data, trace_id = self.trace(transformer=True, debug=True)
+        spans = data["result"]["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        next(span for span in spans if span["name"] == "component.confirm_outputs" and
+             text(span, "component_id") == "http-transform")["parentSpanId"] = "2".zfill(16)
+        with self.assertRaisesRegex(ValueError, "transformer confirmation parent"):
+            verify(data, "http", trace_id, "debug", "follow")
+
+    def test_postgres_keeps_its_direct_pipeline_without_a_transformer(self):
+        data, trace_id = self.trace(transformer=False, debug=True)
+        for span in data["result"]["resourceSpans"][0]["scopeSpans"][0]["spans"]:
+            for entry in span["attributes"]:
+                if entry["key"] == "component_id":
+                    entry["value"]["stringValue"] = entry["value"]["stringValue"].replace("http", "postgres")
+        self.assertEqual(verify(data, "postgres", trace_id, "debug", "postgres"), 8)
 
 
 if __name__ == "__main__":

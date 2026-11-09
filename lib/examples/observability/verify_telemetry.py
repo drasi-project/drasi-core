@@ -44,6 +44,8 @@ def verify(url, sampling):
     require(not any(f'component_id="{inactive}' in line for line in metrics.splitlines()), "inactive source pipeline produced metric series")
     outputs = ["http-fast", "http-slow"] if config["scenario"] == "latency" else [f"{source}-output"]
     allowed = {source, f"{source}-query", *outputs}
+    if config["transformer"]:
+        allowed.add("http-transform")
     require(all(log["component"] in allowed for log in logs), "unexpected pipeline component produced logs")
     rows = 10 if config["scenario"] == "latency" else 1
     for component in outputs:
@@ -75,6 +77,9 @@ def verify(url, sampling):
         require(sample(metrics, "drasi_query_events_processed", component, aggregate=True) == inputs, "framework input count differs")
         require(sample(metrics, "drasi_query_results_emitted", component, aggregate=True) == rows, "framework result-row count differs")
         require(sample(metrics, "drasi_query_engine_duration_count", component, aggregate=True) == inputs, "query evaluator timing count differs")
+        if config["transformer"]:
+            require(sample(metrics, "drasi_component_inputs_processed", "http-transform", aggregate=True) == 1, "transformer input count differs")
+            require(sample(metrics, "drasi_component_outputs_emitted", "http-transform") == 1, "transformer output count differs")
         for output in outputs:
             require(sample(metrics, "drasi_component_inputs_processed", output, aggregate=True) == 1, "reaction handling count differs")
         if config["profile"] == "persistence":

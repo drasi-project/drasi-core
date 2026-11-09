@@ -40,6 +40,7 @@ def verify(data, source, trace_id, profile="debug", scenario="follow", parent_sp
         for span in scope["spans"]
     ]
     latency = source == "http" and scenario == "latency"
+    transformer = source == "http" and scenario in ["follow", "controls"]
     rows = 10 if latency else 1
     outputs = ["http-fast", "http-slow"] if latency else [f"{source}-output"]
     expected = Counter({
@@ -51,6 +52,10 @@ def verify(data, source, trace_id, profile="debug", scenario="follow", parent_sp
         "component.confirm_outputs": 1,
         "sink.handle": len(outputs),
     })
+    if transformer:
+        expected["component.process"] = 1
+        expected["pipe.send"] += 1
+        expected["component.confirm_outputs"] += 1
     if profile != "debug":
         for name in ["query.evaluate", "query.commit", "pipe.send", "component.confirm_outputs"]:
             del expected[name]
@@ -79,14 +84,22 @@ def verify(data, source, trace_id, profile="debug", scenario="follow", parent_sp
     require(text(publication, "component_id") == source, "wrong source identity")
     require(text(processing, "component_id") == f"{source}-query", "wrong query identity")
     require(processing.get("parentSpanId") == publication["spanId"], "query parent is not publication")
+    transforming = component_span("component.process", "http-transform") if transformer else None
+    if transforming:
+        require(text(transforming, "component_kind") == "transformer", "wrong transformer semantic identity")
+        require(transforming.get("parentSpanId") == publication["spanId"], "wrong transformer parent")
+        count(transforming, "input_count", 1)
+        count(transforming, "output_count", 1)
     if profile == "debug":
         for name in ["query.evaluate", "query.commit"]:
             require(one[name].get("parentSpanId") == processing["spanId"], f"wrong {name} parent")
     if profile == "debug":
         require(component_span("component.confirm_outputs", f"{source}-query").get("parentSpanId") == processing["spanId"], "wrong query confirmation parent")
+        if transforming:
+            require(component_span("component.confirm_outputs", "http-transform").get("parentSpanId") == transforming["spanId"], "wrong transformer confirmation parent")
         require(
             Counter(span.get("parentSpanId") for span in spans if span["name"] == "pipe.send")
-            == Counter([publication["spanId"]] + [processing["spanId"]] * len(outputs)),
+            == Counter([publication["spanId"]] * (2 if transformer else 1) + [processing["spanId"]] * len(outputs)),
             "wrong pipe acceptance parents",
         )
     for handling in handlers:

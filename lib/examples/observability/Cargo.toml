@@ -16,6 +16,7 @@ drasi-host-sdk = { path = "../../../components/host-sdk", features = ["otel-cont
 drasi-http-common = { path = "../../../components/http-common" }
 drasi-computation-source-http = { path = "../../../components/computation-plugins/sources/http" }
 drasi-computation-source-postgres = { path = "../../../components/computation-plugins/sources/postgres" }
+drasi-computation-transformer-arithmetic = { path = "../../../components/computation-plugins/transformers/arithmetic" }
 drasi-reaction-application = { path = "../../../components/reactions/application" }
 opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace"] }

@@ -1,7 +1,7 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! One source, continuous query, and handled application reaction per demo.
+//! One source, optional transformer, query, and handled application reaction.
 //! See ../README.md for the one-command dashboard and Jaeger setup.
 
 mod dashboard;
@@ -10,7 +10,7 @@ mod scenarios;
 use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use drasi_core::computation::InMemoryComputationProvider;
-use drasi_host_sdk::computation::NativePlugin;
+use drasi_host_sdk::computation::{NativeFactory, NativePlugin};
 use drasi_lib::{
     computation::v1::*,
     error::OperationFailures,
@@ -36,6 +36,7 @@ use tracing_subscriber::{filter::filter_fn, prelude::*};
 
 const INSTANCE: &str = "source-trace-demo";
 const SERVICE: &str = "drasi-observability-demo";
+const TRANSFORMER: &str = "http-transform";
 
 fn setting(name: &str, default: &str) -> Result<String> {
     match env::var(name) {
@@ -69,6 +70,26 @@ fn stream(component: &str) -> Result<StreamId> {
 
 fn resource(name: &str) -> Result<ResourceId> {
     Ok(ResourceId::try_new(name)?)
+}
+
+fn arithmetic_factory() -> Result<Arc<NativeFactory>> {
+    let plugin =
+        NativePlugin::from_definition(drasi_computation_transformer_arithmetic::plugin()?)?;
+    plugin
+        .factories()
+        .iter()
+        .find(|factory| {
+            factory.metadata().implementation.name.as_ref()
+                == drasi_computation_transformer_arithmetic::ARITHMETIC
+        })
+        .cloned()
+        .context("demo arithmetic transformer factory")
+}
+
+fn arithmetic_configuration() -> Result<Value> {
+    Ok(json!({
+        "stream": stream(TRANSFORMER)?, "field": "value", "add": 0, "multiply": 2,
+    }))
 }
 
 struct PostgresSettings;
@@ -283,6 +304,22 @@ async fn run(
     {
         let query_id = format!("{source}-query");
         let output_id = format!("{source}-output");
+        let query_input = if lab.config.uses_transformer() {
+            let factory = arithmetic_factory()?;
+            batch = batch
+                .component(
+                    factory.specification(id(TRANSFORMER)?, arithmetic_configuration()?)?,
+                    factory,
+                )
+                .bind_stream(endpoint(TRANSFORMER, "out")?, stream(TRANSFORMER)?)
+                .connect(
+                    EdgeDefinition::new(endpoint(source, "out")?, endpoint(TRANSFORMER, "in")?),
+                    Box::new(BoundedPipeConfig { capacity: 32 }),
+                );
+            TRANSFORMER
+        } else {
+            source
+        };
         let mut query = ContinuousQueryTransformer::new(
             ContinuousQueryDefinition {
                 graph_id: ComponentBatch::GRAPH_ID.into(),
@@ -308,7 +345,7 @@ async fn run(
             .bind_stream(endpoint(source, "out")?, stream(source)?)
             .bind_stream(endpoint(&query_id, "out")?, stream(&query_id)?)
             .connect(
-                EdgeDefinition::new(endpoint(source, "out")?, endpoint(&query_id, "in")?),
+                EdgeDefinition::new(endpoint(query_input, "out")?, endpoint(&query_id, "in")?),
                 Box::new(BoundedPipeConfig { capacity: 32 }),
             );
         let outputs = if source == "http" && lab.config.scenario == "latency" {
@@ -497,4 +534,66 @@ async fn run(
     let shutdown = core.shutdown().await.map_err(Into::into);
     let dashboard_shutdown = dashboard.shutdown(dashboard_joined).await;
     finish([result, shutdown, dashboard_shutdown])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drasi_core::models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
+    };
+
+    #[tokio::test]
+    async fn demo_transformer_doubles_values_and_preserves_input_context() -> Result<()> {
+        let mut transformer = arithmetic_factory()?
+            .create_component(id(TRANSFORMER)?, arithmetic_configuration()?)?;
+        transformer.start().await?;
+        let input_context = ExecutionContext::from_w3c_headers(
+            Some(b"00-11111111111111111111111111111111-2222222222222222-01"),
+            None,
+        );
+        let operation_context = ExecutionContext::from_w3c_headers(
+            Some(b"00-11111111111111111111111111111111-3333333333333333-01"),
+            None,
+        );
+        let envelope = GraphChangeCodec::encode_change(
+            SourceChange::Insert {
+                element: Element::Node {
+                    metadata: ElementMetadata {
+                        reference: ElementReference::new("http", "test-node"),
+                        labels: Arc::from([Arc::from("trace_items")]),
+                        effective_from: 1,
+                    },
+                    properties: ElementPropertyMap::from(json!({"value": 7})),
+                },
+            },
+            stream("http")?,
+            1,
+            None,
+        )?;
+        let outputs = ExecutionScope::new(operation_context)
+            .scope(
+                transformer.transform(
+                    InputEnvelope::new(PortId::try_new("in")?, envelope)
+                        .with_execution_context(input_context.clone()),
+                ),
+            )
+            .await?;
+        ensure!(
+            outputs.len() == 1,
+            "arithmetic transformer must emit one envelope"
+        );
+        assert_eq!(outputs[0].execution_context, input_context);
+        assert_eq!(outputs[0].envelope.system().stream(), &stream(TRANSFORMER)?);
+        let changes = GraphChangeCodec::decode_changes(&outputs[0].envelope)?;
+        let [SourceChange::Insert {
+            element: Element::Node { properties, .. },
+        }] = changes.as_slice()
+        else {
+            anyhow::bail!("arithmetic transformer did not preserve the insert");
+        };
+        assert_eq!(properties.get("value"), Some(&ElementValue::Integer(14)));
+        transformer.stop().await?;
+        Ok(())
+    }
 }

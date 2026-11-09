@@ -78,6 +78,10 @@ impl Config {
         }
     }
 
+    pub fn uses_transformer(&self) -> bool {
+        matches!(self.scenario.as_str(), "follow" | "controls")
+    }
+
     pub fn settings(&self) -> Result<TelemetrySettings> {
         let sampling = if self.sampling == "always" {
             drasi_lib::observability::RootSampling::Always
@@ -107,6 +111,7 @@ impl Config {
     pub fn json(&self) -> Value {
         json!({
             "scenario": self.scenario, "profile": self.profile,
+            "transformer": self.uses_transformer(),
             "source": self.source(),
             "sampling": self.sampling, "tracing": self.tracing,
             "metrics": self.metrics, "log_level": self.logs,
@@ -525,6 +530,24 @@ mod tests {
             lab.targets(&session).unwrap(),
             [("http-fast".into(), 5), ("http-slow".into(), 5)].into()
         );
+    }
+
+    #[test]
+    fn main_http_workloads_use_the_transformer_but_other_modes_do_not() {
+        for scenario in ["follow", "controls"] {
+            let lab = lab(scenario);
+            assert!(lab.config.uses_transformer());
+            assert_eq!(lab.config.source(), "http");
+            assert_eq!(lab.config.json()["transformer"], true);
+            assert_eq!(lab.config.json()["handled_branch_latency"], false);
+            assert_eq!(
+                lab.targets(&Session::default()).unwrap(),
+                [("http-output".into(), 0)].into(),
+            );
+        }
+        for scenario in ["latency", "postgres"] {
+            assert!(!lab(scenario).config.uses_transformer());
+        }
     }
 
     #[test]

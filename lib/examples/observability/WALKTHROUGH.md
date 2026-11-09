@@ -5,7 +5,7 @@ A presenter walkthrough for `make observability-demo`. Allow approximately
 
 ## Main message
 
-> We can follow a real data change from source through continuous-query processing
+> We can follow a real data change from source through transformation and continuous-query processing
 > to actual reaction handling, and measure what happened at each stage.
 
 This walkthrough demonstrates connected tracing, input/result/handled-output
@@ -40,6 +40,11 @@ the upstream span and new local span IDs. The upstream span is not generated
 by Drasi. The [incoming-trace commands](README.md#continue-an-upstream-trace)
 also show a copyable curl request for an already-running main demo.
 
+The existing main demo includes a
+[real arithmetic transformer](README.md#transformer-trace-demo) that doubles each integer
+`value` and shows `component.process` for `http-transform` alongside
+`query.process` for `http-query`, with separate component identities and timings.
+
 The runner automatically sends an HTTP seed event, verifies its trace and
 telemetry, exercises insert/update/delete, and resets the experiment baseline.
 There will already be traces, logs, and cumulative metrics before presenting.
@@ -49,22 +54,23 @@ snapshots. Reset does not erase historical traces.
 The dashboard refreshes every two seconds. Allow a refresh before interpreting
 counts, and allow time for a completed trace to reach Jaeger.
 
-## 1. Explain the three components
+## 1. Explain the four components
 
 **Show:** **Connected pipeline**.
 
 ```text
-HTTP source -> Continuous query -> Application reaction
-   http          http-query           http-output
+HTTP source -> Arithmetic transformer -> Continuous query -> Application reaction
+   http           http-transform           http-query           http-output
 ```
 
 | Component | Responsibility |
 |---|---|
 | HTTP source | Receives real insert/update/delete events from the dashboard. |
+| Arithmetic transformer | Doubles the integer `value` property before evaluation; uses the production native arithmetic component. |
 | Continuous query | Evaluates the change and produces result-row differences. |
 | Application reaction | Handles results through an in-process callback and reports completion. |
 
-All three belong to one `DrasiLib` instance, `source-trace-demo`, and one
+All four belong to one `DrasiLib` instance, `source-trace-demo`, and one
 ComputationGraph. There is no PostgreSQL source or database in this walkthrough.
 The query uses in-memory storage:
 
@@ -82,8 +88,8 @@ effect durable.
 
 **Say:**
 
-> This is the normal source-query-reaction pipeline. We are observing real input,
-> real evaluation, and actual completion of the application callback.
+> This source-transformer-query-reaction pipeline observes real input,
+> real transformation, real evaluation, and actual completion of the application callback.
 
 ## 2. Send one change
 
@@ -96,6 +102,7 @@ effect durable.
 For this simple insert, the measurements since reset should increase by:
 
 - One query input envelope.
+- One transformer input and one transformer output envelope.
 - One newly emitted result-row change.
 - One successfully handled output envelope and row.
 
@@ -103,12 +110,15 @@ Do not expect raw cumulative counters to start at zero; they include self-checks
 
 ## 3. Follow the connected trace
 
-With default Debug settings, a fresh insert produces the verified eight-span
+With default Debug settings, a fresh insert produces the verified eleven-span
 path:
 
 ```text
 source.publish                    (http)
-  pipe.send
+  pipe.send                       (http)
+  component.process               (http-transform)
+    component.confirm_outputs     (http-transform)
+  pipe.send                       (http-transform)
   query.process                   (http-query)
     query.evaluate
     query.commit
@@ -120,15 +130,16 @@ source.publish                    (http)
 **Point out:**
 
 - `source.publish`: framework publication of the available source envelope.
+- `component.process`: the arithmetic transformer's actual processing callback.
 - `query.process`: the query component's complete transformation callback.
 - `query.evaluate`: actual evaluation, not the whole transformation.
 - `query.commit`: the query's commit operation.
 - `pipe.send`: downstream acceptance, distinct from handling.
-- `component.confirm_outputs`: the query's output confirmation.
+- `component.confirm_outputs`: each producing component's own output confirmation.
 - `sink.handle`: the actual application reaction.
 - Component identities, parentage, successful outcomes, and durations.
 
-Click span details to compare `component_id=http-query` and
+Click span details to compare `component_id=http-transform`, `component_id=http-query`, and
 `component_id=http-output`. There is only one `query.process` in this path.
 
 **Say:**
@@ -138,6 +149,9 @@ Click span details to compare `component_id=http-query` and
 
 The reaction inherits query-output context. Its nesting shows causality, not
 that later reaction handling contributes to the query's processing duration.
+The arithmetic transformer preserves input context on its output, so its
+`component.process` and the query's `query.process` are siblings under
+`source.publish`. The data path and span-parent tree are not identical.
 Similarly, evaluation/commit children do not currently explain every interval
 inside `query.process`; do not call the residual time CPU time.
 

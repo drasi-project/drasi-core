@@ -28,7 +28,7 @@
   #logs .pill { font-size: .7rem; margin-right: .4rem; }
 </style>
 <h1>Drasi observability demo suite</h1>
-<p id="subtitle" class="muted">One HTTP source, a continuous query, and an application reaction.</p>
+<p id="subtitle" class="muted">One HTTP source, an arithmetic transformer, a continuous query, and an application reaction.</p>
 <p id="error" hidden></p>
 <section>
   <h2 id="scenario-title">Loading scenario...</h2>
@@ -71,8 +71,8 @@
 </section>
 <section>
   <h2>Connected pipeline</h2>
-  <pre id="topology">HTTP → continuous query → application reaction (handled callback)</pre>
-  <p>One instance owns the source, query, and reaction. The host owns tracing, logging, metrics, and export.</p>
+  <pre id="topology">HTTP → arithmetic transformer → continuous query → application reaction (handled callback)</pre>
+  <p>One instance owns the source, configured transformer, query, and reaction. The host owns tracing, logging, metrics, and export.</p>
   <p><span id="service" class="pill">Loading service…</span> <span id="sampling" class="pill">Loading…</span> <a id="jaeger" href="#">Open Jaeger</a> · <a href="/metrics">Prometheus metrics</a> · <a href="/logs">JSON logs</a></p>
   <small id="identity" class="muted"></small>
   <p id="health" class="muted"></p>
@@ -100,7 +100,7 @@
   let configured = false;
   let actionBusy = false;
   const stories = {
-    follow: ["1. Follow one HTTP change", "Insert, update, and delete a node through the buttons below. Follow one HTTP source → query → application reaction pipeline. No PostgreSQL source or database is running in this demo."],
+    follow: ["1. Follow one HTTP change", "Insert, update, and delete a node through HTTP → arithmetic transformer → query → application reaction. The transformer doubles the integer value before evaluation. Compare component.process (http-transform) with query.process (http-query). It preserves input trace context, so those processing spans are siblings under source.publish. No PostgreSQL source or database is running."],
     controls: ["2. Signal controls", "Run the same workload under different startup policies. Sampling never suppresses metric collection; disabling tracing does not disable logging. Basic removes debug spans; Persistence adds storage metrics to Basic (not Debug), and exclusions remove only matching metrics."],
     latency: ["3. Why is my alert slow?", "One live source input creates ten query result rows and fans out to independent fast and slow handled sinks. Pause the slow sink, send a bounded burst, and release it: queued/accepted work is not handled work. Each fully handled envelope produces one latency observation per sink, not ten."],
     postgres: ["Optional: PostgreSQL CDC", "Insert, update, and delete rows through SQL. Follow one PostgreSQL replication → query → application reaction pipeline. This is a live-change demonstration, not a bootstrap snapshot; no HTTP source is running."],
@@ -246,9 +246,14 @@
       element("logs").append(row);
     }
   }
+  function pipelineTopology(config) {
+    if (config.scenario === "latency") return "HTTP → query (10-row fan-out) → fast / slow application reactions (300 ms slow handling; pausable)";
+    if (config.transformer) return "HTTP → arithmetic transformer (value * 2) → continuous query → application reaction (handled callback)";
+    return `${config.source === "postgres" ? "PostgreSQL logical replication" : "HTTP"} → continuous query → application reaction (handled callback)`;
+  }
   function showScenario(state, metrics, status) {
     const config = state.config, latency = config.scenario === "latency", postgres = config.source === "postgres";
-    element("subtitle").textContent = `One ${postgres ? "PostgreSQL CDC" : "HTTP"} source, a continuous query, and an application reaction.`;
+    element("subtitle").textContent = `One ${postgres ? "PostgreSQL CDC" : "HTTP"} source, ${config.transformer ? "an arithmetic transformer, " : ""}a continuous query, and an application reaction.`;
     element("input-note").textContent = postgres ? "Inputs come from SQL only. The reset button only resets the observation baseline." : "All input buttons send real HTTP events. Source acceptance is not proof of handling.";
     element("sql-input").hidden = !postgres;
     element("sql-command").textContent = status.postgres_command || "";
@@ -267,9 +272,7 @@
       })) element(id).value = value;
       command(); configured = true;
     }
-    element("topology").textContent = latency
-      ? "HTTP → query (10-row fan-out) → fast / slow application reactions (300 ms slow handling; pausable)"
-      : `${postgres ? "PostgreSQL logical replication" : "HTTP"} → continuous query → application reaction (handled callback)`;
+    element("topology").textContent = pipelineTopology(config);
     element("experiment").textContent = postgres ? "SQL-driven PostgreSQL pipeline; no HTTP source or dashboard-owned nodes."
       : `Dashboard nodes: ${state.records}/${state.max_records} · inputs sent since reset: ${state.issued}${latency ? " · slow sink: " + (state.paused ? "PAUSED" : "released") : ""}`;
     for (const button of document.querySelectorAll("[data-action]")) {
@@ -289,6 +292,12 @@
       ["New query result-row changes", eligibility("drasi.query.results_emitted", latency ? "10 per insert/delete; updates can emit paired changes" : "depends on query diff, not envelope count"), diff("drasi_query_results_emitted", query)],
       ["Physical queue depth", eligibility("drasi.queue.depth", "pending work can grow while slow handling is paused"), total(metrics, "drasi_queue_depth")],
     ];
+    if (config.transformer) {
+      rows.unshift(
+        ["Transformer input envelopes", eligibility("drasi.component.inputs_processed", state.issued), diff("drasi_component_inputs_processed", "http-transform")],
+        ["Transformer output envelopes", eligibility("drasi.component.outputs_emitted", state.issued), diff("drasi_component_outputs_emitted", "http-transform")],
+      );
+    }
     for (const component of latency ? ["http-fast", "http-slow"] : [`${config.source}-output`]) {
       const observed = state.since_reset[component] || { envelopes: 0, rows: 0 };
       rows.push([`${component}: handled envelopes / rows`, postgres ? "actual completed SQL-driven output" : `${state.paused && component === "http-slow" ? "no new handling" : state.issued + " envelopes"}`, `${observed.envelopes} / ${observed.rows}`]);

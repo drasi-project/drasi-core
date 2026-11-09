@@ -104,6 +104,9 @@ async fn logs(State(state): State<DashboardState>) -> Json<Vec<Value>> {
         (ComponentLogType::Source, source.to_owned()),
         (ComponentLogType::Query, format!("{source}-query")),
     ];
+    if state.lab.config.uses_transformer() {
+        components.push((ComponentLogType::Transformer, super::TRANSFORMER.into()));
+    }
     if state.lab.config.scenario == "latency" {
         components.extend([
             (ComponentLogType::Sink, "http-fast".into()),

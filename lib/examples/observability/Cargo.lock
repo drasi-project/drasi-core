@@ -710,6 +710,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "drasi-computation-transformer-arithmetic"
+version = "0.11.3"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "drasi-computation-contracts",
+ "drasi-computation-plugin-sdk",
+ "drasi-core-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "drasi-core"
 version = "0.5.10"
 dependencies = [
@@ -1014,6 +1027,7 @@ dependencies = [
  "axum",
  "drasi-computation-source-http",
  "drasi-computation-source-postgres",
+ "drasi-computation-transformer-arithmetic",
  "drasi-core",
  "drasi-host-sdk",
  "drasi-http-common",

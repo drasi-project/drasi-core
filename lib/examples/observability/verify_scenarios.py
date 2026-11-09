@@ -44,6 +44,14 @@ def check(state, metrics, phase):
             require(samples == completed, f"{component}: latency must observe envelopes, not rows or acceptance")
     if config["metrics"] and not (config["metric_exclusion"] and config["metric_exclusion"] in "drasi.query.events_processed"):
         require(delta(metrics, baseline, "drasi_query_events_processed", component_id=f"{source}-query", query_id=f"{source}-query", phase="steady") == expected, "query input envelope count differs")
+    if config["transformer"] and config["metrics"] and not (
+        config["metric_exclusion"] and config["metric_exclusion"] in "drasi.component.inputs_processed"
+    ):
+        require(delta(metrics, baseline, "drasi_component_inputs_processed", component_id="http-transform", completion="transformed") == expected, "transformer input envelope count differs")
+    if config["transformer"] and config["metrics"] and not (
+        config["metric_exclusion"] and config["metric_exclusion"] in "drasi.component.outputs_emitted"
+    ):
+        require(delta(metrics, baseline, "drasi_component_outputs_emitted", component_id="http-transform") == expected, "transformer output envelope count differs")
     if latency:
         require(delta(metrics, baseline, "drasi_query_results_emitted", component_id="http-query", query_id="http-query") == expected * 10, "query result-row count differs")
         if phase == "paused-burst":
