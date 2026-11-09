@@ -32,6 +32,14 @@ synthetic inspection work.
    Defaults can be overridden by telemetry environment variables.
 7. The displayed and exported service name is **`drasi-observability-demo`**.
 
+For an upstream-context demonstration, use
+`make observability-demo-incoming-trace` instead. It prints a generated W3C
+`traceparent`, submits it to the same HTTP source, and verifies that the reaction
+and all exported spans retain that trace ID, with `source.publish` parented to
+the upstream span and new local span IDs. The upstream span is not generated
+by Drasi. The [incoming-trace commands](README.md#continue-an-upstream-trace)
+also show a copyable curl request for an already-running main demo.
+
 The runner automatically sends an HTTP seed event, verifies its trace and
 telemetry, exercises insert/update/delete, and resets the experiment baseline.
 There will already be traces, logs, and cumulative metrics before presenting.

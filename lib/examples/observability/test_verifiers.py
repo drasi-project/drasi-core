@@ -117,6 +117,20 @@ class TraceProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "service.name"):
             verify(data, "http", trace_id, "basic", "controls")
 
+    def test_incoming_trace_preserves_remote_parent_and_new_local_spans(self):
+        data, trace_id = self.trace()
+        publication = data["result"]["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+        parent = "abcdef0123456789"
+        publication["parentSpanId"] = parent
+        self.assertEqual(verify(data, "http", trace_id, "basic", "follow", parent), 3)
+        with self.assertRaisesRegex(ValueError, "trace root"):
+            verify(data, "http", trace_id, "basic")
+        with self.assertRaisesRegex(ValueError, "incoming parent"):
+            verify(data, "http", trace_id, "basic", "follow", "f" * 16)
+        publication["parentSpanId"] = publication["spanId"]
+        with self.assertRaisesRegex(ValueError, "new local span IDs"):
+            verify(data, "http", trace_id, "basic", "follow", publication["spanId"])
+
 
 if __name__ == "__main__":
     unittest.main()

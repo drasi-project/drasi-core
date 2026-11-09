@@ -6,12 +6,13 @@ export PYTHONDONTWRITEBYTECODE=1
 
 if [[ "${1:-}" == --suite-smoke ]]; then
     [[ $# -eq 1 ]] || { printf '%s\n' '--suite-smoke takes no other arguments.' >&2; exit 2; }
-    for variant in follow controls controls-never controls-no-traces controls-basic \
+    for variant in follow incoming-trace controls controls-never controls-no-traces controls-basic \
         controls-persistence controls-off controls-no-metrics controls-no-logs controls-excluded \
         latency latency-never latency-no-traces postgres; do
-        scenario=controls; profile=debug; sampling=always; tracing=true; metrics=true; logs=info; exclusion=""
+        scenario=controls; profile=debug; sampling=always; tracing=true; metrics=true; logs=info; exclusion=""; incoming=false
         case "$variant" in
             follow) scenario=follow ;;
+            incoming-trace) scenario=follow; incoming=true ;;
             controls) ;;
             controls-never) sampling=never ;;
             controls-no-traces) tracing=false ;;
@@ -29,7 +30,7 @@ if [[ "${1:-}" == --suite-smoke ]]; then
         printf '\n=== %s ===\n' "$variant"
         DEMO_SCENARIO="$scenario" TELEMETRY_PROFILE="$profile" TRACE_SAMPLING="$sampling" \
             TRACE_ENABLED="$tracing" METRICS_ENABLED="$metrics" DEMO_LOG_LEVEL="$logs" \
-            METRIC_EXCLUDE="$exclusion" bash "$0" --smoke
+            METRIC_EXCLUDE="$exclusion" DEMO_INCOMING_TRACE="$incoming" bash "$0" --smoke
     done
     exit 0
 fi
@@ -69,6 +70,8 @@ export DEMO_POSTGRES_CONTAINER="$postgres_name" CONTAINER_ENGINE="$engine"
 sampling="${TRACE_SAMPLING:-always}"
 profile="${TELEMETRY_PROFILE:-debug}"
 tracing="${TRACE_ENABLED:-true}"
+incoming_trace="${DEMO_INCOMING_TRACE:-false}"
+case "$incoming_trace" in true|false) ;; *) printf '%s\n' 'DEMO_INCOMING_TRACE must be true or false.' >&2; exit 2 ;; esac
 case "$profile" in off|basic|debug|persistence) ;; *) printf '%s\n' 'Invalid TELEMETRY_PROFILE.' >&2; exit 2 ;; esac
 case "$tracing" in true|false) ;; *) printf '%s\n' 'TRACE_ENABLED must be true or false.' >&2; exit 2 ;; esac
 [[ "$profile" != off ]] || tracing=false
@@ -76,7 +79,13 @@ case "$sampling" in
     always|never) ;;
     *) printf '%s\n' 'TRACE_SAMPLING must be always or never.' >&2; exit 2 ;;
 esac
-target="${CARGO_TARGET_DIR:-"$root/target"}"
+if [[ "$incoming_trace" == true && ( "$scenario" != follow || "$tracing" != true || "$sampling" != always ) ]]; then
+    printf '%s\n' 'The incoming-trace demonstration requires the follow scenario, tracing enabled, and TRACE_SAMPLING=always.' >&2
+    exit 2
+fi
+# lib+cdylib dependencies emit unhashed artifacts; isolate this standalone
+# workspace from the main workspace's plugin and test builds.
+target="${CARGO_TARGET_DIR:-"$root/target"}/observability-demo"
 case "$target" in /*) ;; *) target="$PWD/$target" ;; esac
 
 commands=("$engine" cargo curl python3)
@@ -266,8 +275,15 @@ if [[ "$scenario" == postgres ]]; then
         "INSERT INTO trace_items VALUES (1, 'PostgreSQL demo', 11);"
 else
     printf '%s\n' 'Sending one real HTTP event (no PostgreSQL source or database)...'
+    seed_headers=(--header 'Content-Type: application/json')
+    if [[ "$incoming_trace" == true ]]; then
+        read -r incoming_id incoming_parent < <(python3 -c 'import secrets; print(secrets.token_hex(16), secrets.token_hex(8))')
+        printf 'Upstream trace ID: %s\nUpstream parent span: %s\nHTTP header: traceparent: 00-%s-%s-01\n' \
+            "$incoming_id" "$incoming_parent" "$incoming_id" "$incoming_parent"
+        seed_headers+=(--header "traceparent: 00-$incoming_id-$incoming_parent-01" --header 'tracestate: demo=upstream')
+    fi
     curl --fail-with-body --silent --show-error --max-time 10 \
-        "http://127.0.0.1:$http_port/sources/http/events" --header 'Content-Type: application/json' \
+        "http://127.0.0.1:$http_port/sources/http/events" "${seed_headers[@]}" \
         --data '{"operation":"insert","element":{"type":"node","id":"http-1","labels":["trace_items"],"properties":{"id":1,"name":"HTTP demo","value":7}}}'
     printf '\n'
 fi
@@ -286,9 +302,14 @@ has_trace_id() { [[ -n "$(trace_id "$1")" ]]; }
 for source in "$input_source"; do
     wait_for "$source callback" has_trace_id "$source"
     trace="$(trace_id "$source")"
+    verification=("$source" "$trace" --jaeger "$jaeger_url" --profile "$profile" --scenario "$scenario")
+    if [[ "$incoming_trace" == true ]]; then
+        [[ "$trace" == "$incoming_id" ]] || { printf 'Incoming trace ID was not preserved: expected %s, got %s\n' "$incoming_id" "$trace" >&2; exit 1; }
+        verification+=(--parent-span-id "$incoming_parent")
+    fi
     if [[ "$sampling" == always && "$tracing" == true ]]; then
-        wait_for "$source trace export" python3 "$directory/verify_trace.py" "$source" "$trace" --jaeger "$jaeger_url" --profile "$profile" --scenario "$scenario"
-        python3 "$directory/verify_trace.py" "$source" "$trace" --jaeger "$jaeger_url" --profile "$profile" --scenario "$scenario"
+        wait_for "$source trace export" python3 "$directory/verify_trace.py" "${verification[@]}"
+        python3 "$directory/verify_trace.py" "${verification[@]}"
     else
         printf 'NO EXPORT %s: context=%s tracing=%s sampling=%s; no Jaeger event trace is expected.\n' "$source" "$trace" "$tracing" "$sampling"
     fi

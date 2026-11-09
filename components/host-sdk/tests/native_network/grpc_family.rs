@@ -5,6 +5,77 @@ use super::http_family::family_component;
 use super::*;
 use futures_util::FutureExt;
 
+#[tokio::test(flavor = "current_thread")]
+async fn incoming_grpc_trace_context_survives_unary_streaming_and_native_transport() -> Result<()> {
+    use drasi_computation_plugin_sdk::telemetry::ExecutionContext;
+
+    for linked in [true, false] {
+        let port = free_port()?;
+        let mut source = family_component(
+            GRPC_SOURCE,
+            "trace-grpc",
+            json!({
+                "stream":"facilities-db/out", "host":"127.0.0.1", "port":port, "ingressCapacity":4,
+            }),
+            linked,
+        )?;
+        source.start().await?;
+        let mut client = source::source_service_client::SourceServiceClient::connect(format!(
+            "http://127.0.0.1:{port}"
+        ))
+        .await?;
+        for parent in [
+            Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
+            Some("00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-00"),
+            Some("malformed"),
+            None,
+        ] {
+            let mut request = tonic::Request::new(source::SubmitEventRequest {
+                event: Some(proto_event(1)),
+            });
+            if let Some(parent) = parent {
+                request
+                    .metadata_mut()
+                    .insert("traceparent", parent.parse()?);
+                request
+                    .metadata_mut()
+                    .insert("tracestate", "vendor=value".parse()?);
+            }
+            assert!(client.submit_event(request).await?.into_inner().success);
+            assert_eq!(
+                next_output(&mut source).await?.execution_context,
+                ExecutionContext::from_w3c_headers(
+                    parent.map(str::as_bytes),
+                    Some(b"vendor=value")
+                ),
+                "linked={linked}, parent={parent:?}",
+            );
+        }
+        let parent = "00-11111111111111111111111111111111-2222222222222222-00";
+        let mut request = tonic::Request::new(tokio_stream::iter([proto_event(2), proto_event(3)]));
+        request
+            .metadata_mut()
+            .insert("traceparent", parent.parse()?);
+        let mut responses = client.stream_events(request).await?.into_inner();
+        for _ in 0..2 {
+            assert!(
+                responses
+                    .message()
+                    .await?
+                    .context("stream response")?
+                    .success
+            );
+            assert_eq!(
+                next_output(&mut source).await?.execution_context,
+                ExecutionContext::from_w3c_headers(Some(parent.as_bytes()), None),
+            );
+        }
+        assert!(responses.message().await?.is_none());
+        source.stop().await?;
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 struct GrpcState {
     requests: Mutex<

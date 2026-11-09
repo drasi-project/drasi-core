@@ -247,7 +247,7 @@ fn source_value(envelope: &ChangeEnvelope) -> Result<i64> {
         _ => anyhow::bail!("missing integer value"),
     }
 }
-async fn next(source: &mut NativeComponentProxy) -> Result<ChangeEnvelope> {
+async fn next_output(source: &mut NativeComponentProxy) -> Result<OutputEnvelope> {
     let output = tokio::time::timeout(DEADLINE, source.next())
         .await??
         .context("unexpected EOF")?;
@@ -256,7 +256,10 @@ async fn next(source: &mut NativeComponentProxy) -> Result<ChangeEnvelope> {
         .context("real producer identity")?;
     assert!(!progress.identity().persistent());
     assert_eq!(progress.sequence(), output.envelope.system().sequence());
-    Ok(output.envelope)
+    Ok(output)
+}
+async fn next(source: &mut NativeComponentProxy) -> Result<ChangeEnvelope> {
+    Ok(next_output(source).await?.envelope)
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -31,6 +31,16 @@ The default `0.0.0.0` listens on every interface. Webhook authentication below
 protects configured webhook routes; it does not authenticate the standard
 event or producer-session routes.
 
+## Incoming trace context
+
+Standard events, batches, webhooks and durable admission extract W3C
+`traceparent` and optional `tracestate` through the shared SDK. An incoming
+trace ID and sampling decision are preserved; `source.publish` gets a new
+span ID with the supplied sender span as its parent. Missing headers start
+normal context-free ingestion. Malformed metadata logs a warning and is
+ignored without rejecting the event. Context is transient, never part of
+event data or durable receipt identity.
+
 ## Webhooks
 
 `webhooks` selects the published HTTP webhook contract instead of the standard

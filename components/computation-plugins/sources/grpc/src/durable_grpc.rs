@@ -230,8 +230,9 @@ impl proto::admission_service_server::AdmissionService for AdmissionService {
             .0
             .request_permit()
             .map_err(|error| Status::resource_exhausted(error.to_string()))?;
+        let scope = crate::component::request_scope(&self.0, &request);
         Ok(Response::new(admit_response(
-            admit(&self.0, request.into_inner()).await,
+            scope.scope(admit(&self.0, request.into_inner())).await,
         )))
     }
     type StreamEventsStream =
@@ -245,6 +246,7 @@ impl proto::admission_service_server::AdmissionService for AdmissionService {
             .request_permit()
             .map_err(|error| Status::resource_exhausted(error.to_string()))?;
         let ingress = self.0.clone();
+        let scope = crate::component::request_scope(&ingress, &request);
         let mut input = request.into_inner();
         let output = async_stream::try_stream! {
             let _permit = permit;
@@ -256,7 +258,7 @@ impl proto::admission_service_server::AdmissionService for AdmissionService {
                         result.map_err(|_| Status::deadline_exceeded("admission stream idle timeout")).and_then(|value| value),
                 }?;
                 let Some(request) = request else { break; };
-                let result = admit(&ingress, request).await;
+                let result = scope.scope(admit(&ingress, request)).await;
                 let failed = result.is_err();
                 yield admit_response(result);
                 if failed { break; }

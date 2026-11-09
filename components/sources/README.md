@@ -961,6 +961,18 @@ from persisted data has no historical trace context. Do not put tracing
 metadata in source positions, WAL records, payload properties or event IDs.
 An empty event context MUST clear a previous event's parent, not reuse it.
 
+Sources accepting upstream trace metadata SHOULD use the shared
+`drasi_lib::observability::ExecutionContext::from_w3c_headers` helper, or
+`ExecutionScope::with_w3c_headers`, with transport `traceparent` and optional
+`tracestate` bytes. The SDK preserves trace/parent IDs and sampling; missing
+metadata clears prior context, and malformed metadata warns and leaves the
+event context-free without rejecting business data. HTTP/gRPC event ingress,
+OTLP request metadata, Kafka record headers and Platform CloudEvents extensions
+use this shared extraction. A stream's metadata applies to every event in that
+stream. OTLP payload span/log IDs remain graph data, not ingestion parents.
+Other formats require explicit source mapping, not
+guessing a `trace_id` property in business data.
+
 Scope futures per poll and blocking closures with `in_scope`; never hold an
 entered tracing/context guard across an await. Optional fetch/decode detail
 belongs around real bounded work, not an idle listener lifetime. Legacy

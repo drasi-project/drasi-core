@@ -33,3 +33,14 @@ the latest total rather than summing responses. Invalid input returns a failed
 response with the accepted prefix count and closes that stream. Transport,
 timeout and admission errors remain errors even if earlier responses succeeded.
 The separate durable admission service returns receipts, not these counters.
+
+## Incoming trace context
+
+Unary event calls, streaming events and durable admission extract W3C
+`traceparent` and optional `tracestate` from request metadata through the
+shared SDK. Request metadata applies to every event in that stream. The
+incoming trace ID, sender parent span and sampling decision are retained;
+framework spans receive new local span IDs. Missing metadata clears prior
+context; malformed metadata logs a warning and is ignored without rejecting
+business data. Trace context is transient and does not change protobuf event
+messages, persisted data or receipt identities.

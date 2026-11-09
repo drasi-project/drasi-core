@@ -118,7 +118,7 @@ use tokio::sync::RwLock;
 use tonic::{transport::Server, Request, Response, Status};
 
 use drasi_lib::channels::{DispatchMode, *};
-use drasi_lib::observability::{log_component_start, log_component_stop};
+use drasi_lib::observability::{log_component_start, log_component_stop, ExecutionScope};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::wal::{WalError, WalProvider};
 use drasi_lib::Source;
@@ -552,6 +552,16 @@ impl SourceService for GrpcSourceService {
         &self,
         request: Request<SubmitEventRequest>,
     ) -> Result<Response<SubmitEventResponse>, Status> {
+        let scope = ExecutionScope::capture().with_w3c_headers(
+            request
+                .metadata()
+                .get("traceparent")
+                .map(|value| value.as_encoded_bytes()),
+            request
+                .metadata()
+                .get("tracestate")
+                .map(|value| value.as_encoded_bytes()),
+        );
         let event_request = request.into_inner();
 
         if let Some(proto_change) = event_request.event {
@@ -605,7 +615,7 @@ impl SourceService for GrpcSourceService {
 
                     debug!("[{}] Processing gRPC event: {:?}", self.source_id, &wrapper);
 
-                    if let Err(e) = self.base.dispatch_event(wrapper).await {
+                    if let Err(e) = scope.scope(self.base.dispatch_event(wrapper)).await {
                         debug!(
                             "[{}] Failed to dispatch (no subscribers): {}",
                             self.source_id, e
@@ -648,6 +658,16 @@ impl SourceService for GrpcSourceService {
         &self,
         request: Request<tonic::Streaming<ProtoSourceChange>>,
     ) -> Result<Response<Self::StreamEventsStream>, Status> {
+        let scope = ExecutionScope::capture().with_w3c_headers(
+            request
+                .metadata()
+                .get("traceparent")
+                .map(|value| value.as_encoded_bytes()),
+            request
+                .metadata()
+                .get("tracestate")
+                .map(|value| value.as_encoded_bytes()),
+        );
         let mut stream = request.into_inner();
         let source_id = self.source_id.clone();
         let instance_id = self.instance_id.clone();
@@ -724,7 +744,7 @@ impl SourceService for GrpcSourceService {
                                     Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
                             }
 
-                            if let Err(e) = base.dispatch_event(wrapper).await {
+                            if let Err(e) = scope.scope(base.dispatch_event(wrapper)).await {
                                 debug!("[{source_id}] Failed to dispatch (no subscribers): {e}");
                             }
 

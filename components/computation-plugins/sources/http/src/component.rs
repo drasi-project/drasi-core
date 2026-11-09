@@ -207,6 +207,16 @@ async fn request_scope(
     request: Request,
     next: Next,
 ) -> Response {
+    let scope = ingress.execution_scope.with_w3c_headers(
+        request
+            .headers()
+            .get("traceparent")
+            .map(|value| value.as_bytes()),
+        request
+            .headers()
+            .get("tracestate")
+            .map(|value| value.as_bytes()),
+    );
     let _permit = if request.uri().path() == "/health" {
         None
     } else {
@@ -230,7 +240,8 @@ async fn request_scope(
                 Err(_) => return failure(StatusCode::REQUEST_TIMEOUT, "request body timeout", 0),
             },
     };
-    next.run(Request::from_parts(parts, axum::body::Body::from(bytes)))
+    scope
+        .scope(next.run(Request::from_parts(parts, axum::body::Body::from(bytes))))
         .await
 }
 async fn serve(listener: TcpListener, ingress: Arc<Ingress>) -> Result<()> {

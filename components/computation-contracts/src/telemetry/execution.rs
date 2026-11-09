@@ -42,6 +42,40 @@ impl TryFrom<TraceContextFields> for TraceContextV1 {
 }
 
 impl TraceContextV1 {
+    /// Decode W3C transport metadata without installing a tracing backend.
+    pub fn from_w3c_headers(traceparent: &[u8], tracestate: Option<&[u8]>) -> Result<Self> {
+        let invalid = || TelemetryError::Invalid("invalid W3C traceparent".into());
+        if traceparent.len() < 55
+            || traceparent[2] != b'-'
+            || traceparent[35] != b'-'
+            || traceparent[52] != b'-'
+        {
+            return Err(invalid());
+        }
+        let [version] = Self::decode_trace_hex(&traceparent[..2])?;
+        if version == 0xff
+            || (version == 0 && traceparent.len() != 55)
+            || (traceparent.len() > 55 && (traceparent[55] != b'-' || traceparent.len() == 56))
+        {
+            return Err(invalid());
+        }
+        let trace_id = Self::decode_trace_hex(&traceparent[3..35])?;
+        let span_id = Self::decode_trace_hex(&traceparent[36..52])?;
+        let [flags] = Self::decode_trace_hex(&traceparent[53..55])?;
+        let state = tracestate
+            .map(|state| {
+                if state.len() > MAX_TRACE_STATE_BYTES {
+                    return Err(TelemetryError::Invalid("oversized W3C tracestate".into()));
+                }
+                let state = std::str::from_utf8(state)
+                    .map_err(|_| TelemetryError::Invalid("invalid W3C tracestate".into()))?;
+                validate_trace_state(state)?;
+                Ok(Arc::from(state))
+            })
+            .transpose()?;
+        Self::new(trace_id, span_id, flags, state)
+    }
+
     pub fn new(
         trace_id: [u8; 16],
         span_id: [u8; 8],
@@ -62,6 +96,21 @@ impl TraceContextV1 {
             trace_flags,
             trace_state,
         })
+    }
+
+    fn decode_trace_hex<const N: usize>(value: &[u8]) -> Result<[u8; N]> {
+        let digit = |byte| match byte {
+            b'0'..=b'9' => Ok(byte - b'0'),
+            b'a'..=b'f' => Ok(byte - b'a' + 10),
+            _ => Err(TelemetryError::Invalid(
+                "invalid W3C traceparent hex".into(),
+            )),
+        };
+        let mut decoded = [0; N];
+        for (output, pair) in decoded.iter_mut().zip(value.chunks_exact(2)) {
+            *output = digit(pair[0])? * 16 + digit(pair[1])?;
+        }
+        Ok(decoded)
     }
 
     pub fn trace_id(&self) -> [u8; 16] {
@@ -150,6 +199,22 @@ struct ExecutionContextRecord {
 }
 
 impl ExecutionContext {
+    /// Missing metadata clears prior context. Malformed metadata is diagnosed
+    /// and ignored so tracing cannot reject otherwise valid source data.
+    pub fn from_w3c_headers(traceparent: Option<&[u8]>, tracestate: Option<&[u8]>) -> Self {
+        let Some(traceparent) = traceparent else {
+            return Self::default();
+        };
+        match TraceContextV1::from_w3c_headers(traceparent, tracestate) {
+            Ok(trace) => Self::new(trace),
+            Err(error) => {
+                log::warn!(target: "drasi::telemetry",
+                    "Ignoring malformed incoming trace context; starting a fresh trace: {error}");
+                Self::default()
+            }
+        }
+    }
+
     pub fn new(trace: TraceContextV1) -> Self {
         Self {
             trace: Some(Arc::new(trace)),
@@ -248,6 +313,62 @@ mod tests {
 
     fn context(state: Option<&str>, flags: u8) -> Result<ExecutionContext> {
         TraceContextV1::new([1; 16], [2; 8], flags, state.map(Arc::from)).map(ExecutionContext::new)
+    }
+
+    #[test]
+    fn incoming_w3c_context_preserves_identity_flags_and_state() {
+        for flags in ["00", "01", "03"] {
+            let parent = format!("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-{flags}");
+            let context =
+                ExecutionContext::from_w3c_headers(Some(parent.as_bytes()), Some(b"vendor=value"));
+            let trace = context.trace().unwrap();
+            assert_eq!(
+                trace.trace_id(),
+                [
+                    0x4b, 0xf9, 0x2f, 0x35, 0x77, 0xb3, 0x4d, 0xa6, 0xa3, 0xce, 0x92, 0x9d, 0x0e,
+                    0x0e, 0x47, 0x36
+                ]
+            );
+            assert_eq!(
+                trace.span_id(),
+                [0x00, 0xf0, 0x67, 0xaa, 0x0b, 0xa9, 0x02, 0xb7]
+            );
+            assert_eq!(trace.sampled(), flags != "00");
+            assert_eq!(trace.trace_flags(), u8::from_str_radix(flags, 16).unwrap());
+            assert_eq!(trace.trace_state(), Some("vendor=value"));
+        }
+    }
+
+    #[test]
+    fn incoming_w3c_context_rejects_malformed_metadata_without_rejecting_data() {
+        let parent = b"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        assert!(ExecutionContext::from_w3c_headers(None, Some(b"vendor=value")).is_empty());
+        for invalid in [
+            "",
+            "4bf92f3577b34da6a3ce929d0e0e4736",
+            "00-00000000000000000000000000000000-00f067aa0ba902b7-01",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01",
+            "00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01",
+            "ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-gg",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-extra",
+            "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-",
+            "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01x",
+        ] {
+            assert!(
+                TraceContextV1::from_w3c_headers(invalid.as_bytes(), None).is_err(),
+                "{invalid}"
+            );
+            assert!(ExecutionContext::from_w3c_headers(Some(invalid.as_bytes()), None).is_empty());
+        }
+        for invalid in [b"vendor=".as_slice(), b"a=b,a=c", &[0xff], &[b'x'; 513]] {
+            assert!(ExecutionContext::from_w3c_headers(Some(parent), Some(invalid)).is_empty());
+        }
+        assert!(TraceContextV1::from_w3c_headers(
+            b"01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-future",
+            None,
+        )
+        .is_ok());
     }
 
     #[test]

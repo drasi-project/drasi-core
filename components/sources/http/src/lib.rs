@@ -234,8 +234,9 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use axum::{
     body::Bytes,
-    extract::{Path, State},
+    extract::{Path, Request, State},
     http::{header, Method, StatusCode},
+    middleware::{self, Next},
     response::IntoResponse,
     routing::{delete, get, post, put},
     Json, Router,
@@ -250,6 +251,7 @@ use tokio::time::timeout;
 use tower_http::cors::{Any, CorsLayer};
 
 use drasi_lib::channels::{ComponentType, *};
+use drasi_lib::observability::{ExecutionContext, ExecutionScope};
 use drasi_lib::schema::{NodeSchema, PropertySchema, RelationSchema, SourceSchema};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::wal::{WalError, WalProvider};
@@ -1262,6 +1264,21 @@ impl Source for HttpSource {
                 )
                 .with_state(state)
         };
+
+        let receiver_scope = ExecutionScope::capture().with_context(ExecutionContext::default());
+        let app = app.layer(middleware::from_fn(move |request: Request, next: Next| {
+            let scope = receiver_scope.with_w3c_headers(
+                request
+                    .headers()
+                    .get("traceparent")
+                    .map(|value| value.as_bytes()),
+                request
+                    .headers()
+                    .get("tracestate")
+                    .map(|value| value.as_bytes()),
+            );
+            async move { scope.scope(next.run(request)).await }
+        }));
 
         // Create shutdown channel
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();

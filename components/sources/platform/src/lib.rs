@@ -805,6 +805,8 @@ impl PlatformSource {
                                         // Parse JSON
                                         match serde_json::from_str::<Value>(&event_json) {
                                             Ok(cloud_event) => {
+                                                let scope = drasi_lib::observability::ExecutionScope::capture()
+                                                    .with_context(incoming_cloud_event_context(&cloud_event));
                                                 // Detect message type
                                                 let message_type =
                                                     detect_message_type(&cloud_event);
@@ -837,7 +839,7 @@ impl PlatformSource {
                                                                     );
 
                                                                     // Dispatch via helper
-                                                                    if let Err(e) = base.dispatch_event(wrapper).await
+                                                                    if let Err(e) = scope.scope(base.dispatch_event(wrapper)).await
                                                                     {
                                                                         debug!("[{source_id}] Failed to dispatch control event (no subscribers): {e}");
                                                                     } else {
@@ -893,7 +895,7 @@ impl PlatformSource {
                                                                     );
 
                                                                     // Dispatch via helper
-                                                                    if let Err(e) = base.dispatch_event(wrapper).await
+                                                                    if let Err(e) = scope.scope(base.dispatch_event(wrapper)).await
                                                                     {
                                                                         debug!("[{source_id}] Failed to dispatch change (no subscribers): {e}");
                                                                     } else {
@@ -1246,6 +1248,18 @@ struct SourceChangeWithTimestamps {
     source_change: SourceChange,
     reactivator_start_ns: Option<u64>,
     reactivator_end_ns: Option<u64>,
+}
+
+fn incoming_cloud_event_context(event: &Value) -> drasi_lib::observability::ExecutionContext {
+    let value = |name| {
+        event
+            .get(name)
+            .map(|value| value.as_str().map(str::as_bytes).unwrap_or_default())
+    };
+    drasi_lib::observability::ExecutionContext::from_w3c_headers(
+        value("traceparent"),
+        value("tracestate"),
+    )
 }
 
 /// Transform CloudEvent-wrapped platform event to drasi-core SourceChange(s)

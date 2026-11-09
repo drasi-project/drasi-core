@@ -4,6 +4,17 @@ Receives OpenTelemetry Protocol (OTLP) data and projects an allowlisted subset i
 
 Every record needs Resource `service.name`. That becomes a `Service` node. Metrics, spans, and logs hang off that service.
 
+## Incoming request trace context
+
+OTLP HTTP headers and gRPC metadata may supply W3C `traceparent` and optional
+`tracestate`. Shared SDK extraction preserves the incoming request's trace ID,
+sender parent and sampling for the projected graph changes. Missing metadata
+clears prior context; malformed metadata warns and is ignored without rejecting
+otherwise valid data. The trace IDs of spans/logs **inside OTLP payloads remain
+graph data**, not the parent of the ingestion operation: one request may contain
+records from many unrelated traces. Trace metadata is not persisted in source
+positions or WAL records.
+
 ## Prerequisites
 
 - Rust 1.95+ (workspace `rust-toolchain.toml`)

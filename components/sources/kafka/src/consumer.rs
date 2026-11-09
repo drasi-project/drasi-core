@@ -19,10 +19,11 @@ use crate::position::{decode_partition_offsets, encode_position};
 use anyhow::{anyhow, Context, Result};
 use drasi_core::models::{ElementMetadata, ElementReference, SourceChange};
 use drasi_lib::channels::events::{SourceEvent, SourceEventWrapper};
+use drasi_lib::observability::{ExecutionContext, ExecutionScope};
 use drasi_lib::sources::SourceBase;
 use drasi_source_mapping::{SourceMapping, SourceMappingEngine};
 use rdkafka::consumer::{Consumer, StreamConsumer};
-use rdkafka::message::Message;
+use rdkafka::message::{Headers, Message};
 use rdkafka::{ClientConfig, Offset, TopicPartitionList};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -39,6 +40,15 @@ pub struct KafkaConsumerTask {
     pub source_id: String,
     pub shutdown_rx: watch::Receiver<bool>,
     pub resume_positions: Arc<RwLock<HashMap<String, Vec<i64>>>>,
+}
+
+fn incoming_message_context<H: Headers>(headers: Option<&H>) -> ExecutionContext {
+    let value = |name| {
+        headers
+            .and_then(|headers| headers.iter().find(|header| header.key == name))
+            .and_then(|header| header.value)
+    };
+    ExecutionContext::from_w3c_headers(value("traceparent"), value("tracestate"))
 }
 
 impl KafkaConsumerTask {
@@ -174,6 +184,8 @@ impl KafkaConsumerTask {
                 message_result = consumer.recv() => {
                     match message_result {
                         Ok(msg) => {
+                            let scope = ExecutionScope::capture()
+                                .with_context(incoming_message_context(msg.headers()));
                             let partition = msg.partition() as usize;
                             let offset = msg.offset();
                             let key = msg.key()
@@ -212,7 +224,7 @@ impl KafkaConsumerTask {
                                         sequence: self.base.next_sequence(),
                                     };
 
-                                    if let Err(e) = self.base.dispatch_event(wrapper).await {
+                                    if let Err(e) = scope.scope(self.base.dispatch_event(wrapper)).await {
                                         error!("[{}] Failed to dispatch event: {}", self.source_id, e);
                                     } else if partition < current_offsets.len() {
                                         // Advance only after successful dispatch so failed events
@@ -412,6 +424,33 @@ impl KafkaConsumerTask {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn incoming_w3c_kafka_headers_use_shared_sdk_context() {
+        use super::*;
+        use rdkafka::message::{Header, OwnedHeaders};
+
+        assert!(incoming_message_context(None::<&OwnedHeaders>).is_empty());
+        for parent in [
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-00",
+            "malformed",
+        ] {
+            let headers = OwnedHeaders::new()
+                .insert(Header {
+                    key: "traceparent",
+                    value: Some(parent),
+                })
+                .insert(Header {
+                    key: "tracestate",
+                    value: Some("vendor=value"),
+                });
+            assert_eq!(
+                incoming_message_context(Some(&headers)),
+                ExecutionContext::from_w3c_headers(Some(parent.as_bytes()), Some(b"vendor=value")),
+            );
+        }
+    }
+
     use super::*;
     use crate::config::AutoOffsetReset;
     use drasi_lib::sources::SourceBaseParams;

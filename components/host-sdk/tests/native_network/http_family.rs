@@ -59,6 +59,68 @@ pub(super) fn family_component(
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn incoming_http_trace_context_survives_requests_batches_and_native_transport() -> Result<()>
+{
+    use drasi_computation_plugin_sdk::telemetry::ExecutionContext;
+
+    for linked in [true, false] {
+        let port = free_port()?;
+        let mut source = family_component(
+            HTTP_SOURCE,
+            "trace-http",
+            json!({
+                "stream":"facilities-db/out", "host":"127.0.0.1", "port":port,
+                "ingressCapacity":8, "adaptiveEnabled":true,
+                "adaptiveMinBatchSize":2, "adaptiveMaxBatchSize":2,
+            }),
+            linked,
+        )?;
+        source.start().await?;
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/sources/facilities-db/events");
+        for parent in [
+            Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
+            Some("00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-00"),
+            Some("malformed"),
+            None,
+        ] {
+            let mut request = client.post(&url).json(&http_event(1));
+            if let Some(parent) = parent {
+                request = request
+                    .header("traceparent", parent)
+                    .header("tracestate", "vendor=value");
+            }
+            request.send().await?.error_for_status()?;
+            let output = next_output(&mut source).await?;
+            assert_eq!(
+                output.execution_context,
+                ExecutionContext::from_w3c_headers(
+                    parent.map(str::as_bytes),
+                    Some(b"vendor=value")
+                ),
+                "linked={linked}, parent={parent:?}",
+            );
+        }
+        let parent = "00-11111111111111111111111111111111-2222222222222222-01";
+        client
+            .post(format!("{url}/batch"))
+            .header("traceparent", parent)
+            .json(&json!({"events":[http_event(2), http_event(3)]}))
+            .send()
+            .await?
+            .error_for_status()?;
+        for _ in 0..2 {
+            assert_eq!(
+                next_output(&mut source).await?.execution_context,
+                ExecutionContext::from_w3c_headers(Some(parent.as_bytes()), None),
+            );
+        }
+        source.stop().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn native_webhooks_reuse_auth_mapping_timestamps_content_types_and_cors() -> Result<()> {
     const BODY: &str = r#"{"id":"r1","value":21,"time":1700000000000}"#;
     std::env::set_var("NATIVE_HTTP_FAMILY_HMAC_TEST", "native-http-test-only");
@@ -98,6 +160,10 @@ async fn native_webhooks_reuse_auth_mapping_timestamps_content_types_and_cors() 
         );
         let response = client
             .post(&url)
+            .header(
+                "traceparent",
+                "00-11111111111111111111111111111111-2222222222222222-01",
+            )
             .header("content-type", "application/json")
             .header("authorization", "Bearer native-http-test-token")
             .header(
@@ -111,7 +177,16 @@ async fn native_webhooks_reuse_auth_mapping_timestamps_content_types_and_cors() 
             .json::<Value>()
             .await?;
         assert_eq!(response["events_processed"], 2);
-        let first = GraphChangeCodec::decode_changes(&next(&mut source).await?)?;
+        let first_output = next_output(&mut source).await?;
+        let first_context = first_output.execution_context.clone();
+        assert_eq!(
+            first_context
+                .trace()
+                .context("webhook trace context")?
+                .trace_id(),
+            [0x11; 16]
+        );
+        let first = GraphChangeCodec::decode_changes(&first_output.envelope)?;
         let [SourceChange::Insert {
             element:
                 Element::Node {
@@ -135,7 +210,9 @@ async fn native_webhooks_reuse_auth_mapping_timestamps_content_types_and_cors() 
                 "west coast".into()
             ))
         );
-        let relation = GraphChangeCodec::decode_changes(&next(&mut source).await?)?;
+        let relation_output = next_output(&mut source).await?;
+        assert_eq!(relation_output.execution_context, first_context);
+        let relation = GraphChangeCodec::decode_changes(&relation_output.envelope)?;
         assert!(
             matches!(&relation[0], SourceChange::Insert { element: Element::Relation { in_node, out_node, .. }}
             if in_node.element_id.as_ref() == "r1" && out_node.element_id.as_ref() == "acme")

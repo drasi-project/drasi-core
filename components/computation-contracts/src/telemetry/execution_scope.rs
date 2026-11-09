@@ -184,6 +184,13 @@ impl ExecutionScope {
         }
     }
 
+    /// Bind one incoming event or request, preserving the receiver's identity.
+    pub fn with_w3c_headers(&self, traceparent: Option<&[u8]>, tracestate: Option<&[u8]>) -> Self {
+        self.with_context(
+            self.in_scope(|| ExecutionContext::from_w3c_headers(traceparent, tracestate)),
+        )
+    }
+
     pub fn context(&self) -> &ExecutionContext {
         &self.context
     }
@@ -325,6 +332,31 @@ mod tests {
 
     fn context(id: u8) -> ExecutionContext {
         ExecutionContext::new(TraceContextV1::new([id; 16], [id; 8], 1, None).unwrap())
+    }
+
+    #[tokio::test]
+    async fn incoming_w3c_scopes_clear_stale_context_and_isolate_requests() {
+        let receiver = ExecutionScope::new(context(9));
+        let parent = b"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00";
+        let incoming = receiver.with_w3c_headers(Some(parent), Some(b"vendor=value"));
+        let empty = receiver.with_w3c_headers(None, None);
+        let invalid = receiver.with_w3c_headers(Some(b"invalid"), None);
+        let observe = |expected: ExecutionContext| async move {
+            assert_eq!(ExecutionContext::current(), expected);
+            tokio::task::yield_now().await;
+            assert_eq!(ExecutionContext::current(), expected);
+        };
+        receiver
+            .scope(async {
+                tokio::join!(
+                    incoming.scope(observe(incoming.context().clone())),
+                    empty.scope(observe(ExecutionContext::default())),
+                    invalid.scope(observe(ExecutionContext::default())),
+                );
+                assert_eq!(ExecutionContext::current(), context(9));
+            })
+            .await;
+        assert!(ExecutionContext::current().is_empty());
     }
 
     async fn interleave() {

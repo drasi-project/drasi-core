@@ -58,6 +58,22 @@ impl NativeSource for GrpcSource {
 }
 
 struct SourceService(Arc<Ingress>);
+pub(crate) fn request_scope<T>(
+    ingress: &Ingress,
+    request: &Request<T>,
+) -> drasi_computation_plugin_sdk::telemetry::ExecutionScope {
+    ingress.execution_scope.with_w3c_headers(
+        request
+            .metadata()
+            .get("traceparent")
+            .map(|value| value.as_encoded_bytes()),
+        request
+            .metadata()
+            .get("tracestate")
+            .map(|value| value.as_encoded_bytes()),
+    )
+}
+
 type ResponseStream<T> = Pin<Box<dyn Stream<Item = std::result::Result<T, Status>> + Send>>;
 #[tonic::async_trait]
 impl source::source_service_server::SourceService for SourceService {
@@ -74,6 +90,7 @@ impl source::source_service_server::SourceService for SourceService {
             .0
             .request_permit()
             .map_err(|error| Status::resource_exhausted(error.to_string()))?;
+        let scope = request_scope(&self.0, &request);
         let converted = request
             .into_inner()
             .event
@@ -91,12 +108,15 @@ impl source::source_service_server::SourceService for SourceService {
                 }));
             }
         };
-        self.0.admit(vec![change]).await.map_err(|error| {
-            Status::unavailable(format!(
-                "admission failed after {} events: {:#}",
-                error.accepted, error.error
-            ))
-        })?;
+        scope
+            .scope(self.0.admit(vec![change]))
+            .await
+            .map_err(|error| {
+                Status::unavailable(format!(
+                    "admission failed after {} events: {:#}",
+                    error.accepted, error.error
+                ))
+            })?;
         Ok(Response::new(source::SubmitEventResponse {
             success: true,
             message: "Event processed successfully".into(),
@@ -122,6 +142,7 @@ impl source::source_service_server::SourceService for SourceService {
             .request_permit()
             .map_err(|error| Status::resource_exhausted(error.to_string()))?;
         let ingress = self.0.clone();
+        let scope = request_scope(&ingress, &request);
         let mut input = request.into_inner();
         let output = async_stream::try_stream! {
             let _permit = permit;
@@ -146,7 +167,7 @@ impl source::source_service_server::SourceService for SourceService {
                 };
                 let next = events_processed.checked_add(1)
                     .ok_or_else(|| Status::resource_exhausted("gRPC stream event count exhausted"))?;
-                ingress.admit(vec![change]).await.map_err(|error| Status::unavailable(format!(
+                scope.scope(ingress.admit(vec![change])).await.map_err(|error| Status::unavailable(format!(
                     "admission failed after {} events: {:#}", error.accepted, error.error)))?;
                 events_processed = next;
                 // The published SourceService reports a cumulative accepted

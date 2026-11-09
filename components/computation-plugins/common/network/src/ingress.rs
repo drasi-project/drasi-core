@@ -8,6 +8,7 @@ use drasi_computation_contracts::{
     ComponentDescriptor, GraphChangeCodec, GraphProducerIdentity, GraphProducerProgress,
     OutputEnvelope, PortId,
 };
+use drasi_computation_plugin_sdk::telemetry::{ExecutionContext, ExecutionScope};
 use drasi_computation_plugin_sdk::{NativeAdmission, Scope};
 use drasi_core_types::models::SourceChange;
 use drasi_http_common::adaptive_batcher::{AdaptiveBatchConfig, ThroughputMonitor};
@@ -30,6 +31,7 @@ pub struct AdmissionError {
 pub struct Ingress {
     pub config: IngressConfig,
     pub cancel: CancellationToken,
+    pub execution_scope: ExecutionScope,
     sender: Option<mpsc::Sender<OutputEnvelope>>,
     mode: AdmissionMode,
     requests: Arc<Semaphore>,
@@ -271,6 +273,7 @@ impl SourceRuntime {
         let cancel = CancellationToken::new();
         let ingress = Arc::new(Ingress {
             config: self.config.clone(),
+            execution_scope: ExecutionScope::capture().with_context(ExecutionContext::default()),
             sender,
             cancel: cancel.clone(),
             mode: self.mode.clone(),

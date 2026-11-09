@@ -130,6 +130,37 @@ produced under the current operation. Raw constructors are context-free. The
 host fills a missing processing-output context from that callback's actual
 operation; it never borrows a later unrelated caller's trace.
 
+For sources receiving distributed tracing metadata, the shared SDK owns W3C
+extraction and validation. Pass the transport's `traceparent` and optional
+`tracestate` bytes to `ExecutionContext::from_w3c_headers`, or bind a receiving
+`ExecutionScope` with `with_w3c_headers`:
+
+```rust,ignore
+let request_scope = receiver_scope.with_w3c_headers(traceparent, tracestate);
+request_scope.scope(async {
+    // Publication captures this event's incoming context, not the listener's.
+    publish(output.with_current_context()).await
+}).await
+```
+
+The incoming trace ID, sender's span ID, sampling flags and bounded trace state
+are preserved. Framework spans get new local span IDs under that remote parent.
+Unsampled parents remain unsampled. Missing context clears any earlier parent;
+malformed metadata logs a warning and leaves the event context-free so ordinary
+ingestion continues and enabled framework tracing can start a fresh trace.
+No exporter or OTel feature is required. HTTP headers and gRPC metadata use this
+same API, including batches, webhooks, streams and durable admission. A stream's
+request metadata applies to every event in that stream. Other source transports
+can supply the same carrier or construct `ExecutionContext::new(TraceContextV1)`
+from their documented metadata; arbitrary payload fields are not inferred.
+Sources with no incoming carrier (for example database CDC without producer
+trace metadata) retain normal new-root behavior. Context stays transient and
+does not enter event payloads, WAL records or receipt digests.
+The host uses the negotiated context transport for source `next()` even when
+the caller is context-free and local span collection is disabled: a source
+can discover a parent only after receiving an external event. Base-only
+plugins retain their existing context-free operation path.
+
 Use the shared `spawn_owned_component_worker` for a long-lived worker: it
 captures the component binding but clears the startup parent. A bounded child
 operation, such as a snapshot, uses `spawn_owned_scoped_worker` or

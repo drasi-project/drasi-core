@@ -35,6 +35,7 @@ use tonic::{Request, Response, Status};
 
 use drasi_core::models::SourceChange;
 use drasi_lib::channels::{SourceEvent, SourceEventWrapper};
+use drasi_lib::observability::ExecutionScope;
 use drasi_lib::sources::base::SourceBase;
 use drasi_lib::wal::{WalError, WalProvider};
 
@@ -279,6 +280,26 @@ struct OtlpGrpcService {
     runtime: OtelRuntime,
 }
 
+fn grpc_scope<T>(request: &Request<T>) -> ExecutionScope {
+    ExecutionScope::capture().with_w3c_headers(
+        request
+            .metadata()
+            .get("traceparent")
+            .map(|value| value.as_encoded_bytes()),
+        request
+            .metadata()
+            .get("tracestate")
+            .map(|value| value.as_encoded_bytes()),
+    )
+}
+
+fn http_scope(headers: &HeaderMap) -> ExecutionScope {
+    ExecutionScope::capture().with_w3c_headers(
+        headers.get("traceparent").map(|value| value.as_bytes()),
+        headers.get("tracestate").map(|value| value.as_bytes()),
+    )
+}
+
 #[tonic::async_trait]
 impl MetricsService for OtlpGrpcService {
     async fn export(
@@ -287,9 +308,9 @@ impl MetricsService for OtlpGrpcService {
     ) -> Result<Response<ExportMetricsServiceResponse>, Status> {
         let auth = self.runtime.expected_auth().await?;
         authorize_grpc(&request, auth.as_ref())?;
-        let stats = self
-            .runtime
-            .handle_metrics(request.into_inner())
+        let scope = grpc_scope(&request);
+        let stats = scope
+            .scope(self.runtime.handle_metrics(request.into_inner()))
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(metrics_partial(stats)))
@@ -304,9 +325,9 @@ impl TraceService for OtlpGrpcService {
     ) -> Result<Response<ExportTraceServiceResponse>, Status> {
         let auth = self.runtime.expected_auth().await?;
         authorize_grpc(&request, auth.as_ref())?;
-        let stats = self
-            .runtime
-            .handle_traces(request.into_inner())
+        let scope = grpc_scope(&request);
+        let stats = scope
+            .scope(self.runtime.handle_traces(request.into_inner()))
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(traces_partial(stats)))
@@ -321,9 +342,9 @@ impl LogsService for OtlpGrpcService {
     ) -> Result<Response<ExportLogsServiceResponse>, Status> {
         let auth = self.runtime.expected_auth().await?;
         authorize_grpc(&request, auth.as_ref())?;
-        let stats = self
-            .runtime
-            .handle_logs(request.into_inner())
+        let scope = grpc_scope(&request);
+        let stats = scope
+            .scope(self.runtime.handle_logs(request.into_inner()))
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(logs_partial(stats)))
@@ -520,8 +541,8 @@ async fn http_metrics(
     authorize_http_request(&runtime, &headers, &body).await?;
     let request =
         ExportMetricsServiceRequest::decode(body.as_ref()).map_err(|_| StatusCode::BAD_REQUEST)?;
-    runtime
-        .handle_metrics(request)
+    http_scope(&headers)
+        .scope(runtime.handle_metrics(request))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::OK)
@@ -535,8 +556,8 @@ async fn http_traces(
     authorize_http_request(&runtime, &headers, &body).await?;
     let request =
         ExportTraceServiceRequest::decode(body.as_ref()).map_err(|_| StatusCode::BAD_REQUEST)?;
-    runtime
-        .handle_traces(request)
+    http_scope(&headers)
+        .scope(runtime.handle_traces(request))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::OK)
@@ -550,8 +571,8 @@ async fn http_logs(
     authorize_http_request(&runtime, &headers, &body).await?;
     let request =
         ExportLogsServiceRequest::decode(body.as_ref()).map_err(|_| StatusCode::BAD_REQUEST)?;
-    runtime
-        .handle_logs(request)
+    http_scope(&headers)
+        .scope(runtime.handle_logs(request))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::OK)
@@ -644,6 +665,35 @@ mod tests {
     };
     use crate::otlp::proto::resource::v1::Resource;
     use drasi_lib::sources::base::SourceBaseParams;
+
+    #[tokio::test]
+    async fn incoming_w3c_otlp_transport_context_is_not_payload_trace_data() {
+        use drasi_lib::observability::ExecutionContext;
+
+        let parent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00";
+        let mut headers = HeaderMap::new();
+        headers.insert("traceparent", parent.parse().unwrap());
+        headers.insert("tracestate", "vendor=value".parse().unwrap());
+        let mut request = Request::new(ExportTraceServiceRequest::default());
+        request
+            .metadata_mut()
+            .insert("traceparent", parent.parse().unwrap());
+        request
+            .metadata_mut()
+            .insert("tracestate", "vendor=value".parse().unwrap());
+        let expected =
+            ExecutionContext::from_w3c_headers(Some(parent.as_bytes()), Some(b"vendor=value"));
+        for scope in [http_scope(&headers), grpc_scope(&request)] {
+            scope
+                .scope(async {
+                    tokio::task::yield_now().await;
+                    assert_eq!(ExecutionContext::current(), expected);
+                })
+                .await;
+        }
+        assert!(http_scope(&HeaderMap::new()).context().is_empty());
+        assert!(grpc_scope(&Request::new(())).context().is_empty());
+    }
 
     #[tokio::test]
     async fn cancelled_receiver_releases_both_listener_futures() {

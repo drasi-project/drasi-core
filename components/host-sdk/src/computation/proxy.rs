@@ -425,7 +425,10 @@ impl RemoteComponent {
                 .collect::<Vec<_>>()
         });
         let contexts = stripped.as_deref().unwrap_or(contexts);
+        // A source can discover an upstream parent while next() is running,
+        // even when its host caller has no context or local tracing adapter.
         let requested = self.context_enabled
+            || (code == abi::operation::NEXT && extension.is_some())
             || !current.is_empty()
             || contexts.iter().any(|context| !context.is_empty());
         anyhow::ensure!(

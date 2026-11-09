@@ -29,7 +29,7 @@ def count(span, key, expected):
     require(int(value["intValue"]) == expected, f"{span['name']}.{key} != {expected}")
 
 
-def verify(data, source, trace_id, profile="debug", scenario="follow"):
+def verify(data, source, trace_id, profile="debug", scenario="follow", parent_span_id=None):
     for resource in data["result"]["resourceSpans"]:
         identity = {entry["key"]: entry["value"] for entry in resource["resource"].get("attributes", [])}
         require(identity.get("service.name", {}).get("stringValue") == "drasi-observability-demo", "wrong exported service.name")
@@ -71,7 +71,11 @@ def verify(data, source, trace_id, profile="debug", scenario="follow"):
         return matching[0]
     processing = component_span("component.process", f"{source}-query")
     handlers = [component_span("sink.handle", component) for component in outputs]
-    require(not publication.get("parentSpanId"), "source publication must be the trace root")
+    if parent_span_id:
+        require(publication.get("parentSpanId") == parent_span_id, "source publication did not preserve the incoming parent span")
+        require(all(span["spanId"] != parent_span_id for span in spans), "Drasi must create new local span IDs")
+    else:
+        require(not publication.get("parentSpanId"), "source publication must be the trace root")
     require(text(publication, "component_id") == source, "wrong source identity")
     require(text(processing, "component_id") == f"{source}-query", "wrong query identity")
     require(processing.get("parentSpanId") == publication["spanId"], "query parent is not publication")
@@ -108,10 +112,15 @@ def main():
     parser.add_argument("--file", type=Path, help="verify an archived Jaeger v3 response instead")
     parser.add_argument("--profile", choices=["basic", "debug", "persistence"], default="debug")
     parser.add_argument("--scenario", choices=["follow", "controls", "latency", "postgres"], default="follow")
+    parser.add_argument("--parent-span-id", help="expected remote parent of source.publish")
     args = parser.parse_args()
     trace_id = args.trace_id.lower()
     if not re.fullmatch(r"[0-9a-f]{32}", trace_id):
         parser.error("trace_id must contain 32 hexadecimal characters")
+    if args.parent_span_id and (
+        not re.fullmatch(r"[0-9a-f]{16}", args.parent_span_id) or args.parent_span_id == "0" * 16
+    ):
+        parser.error("parent-span-id must contain 16 lowercase hexadecimal characters and be nonzero")
     try:
         if args.file:
             with args.file.open(encoding="utf-8") as response:
@@ -119,10 +128,12 @@ def main():
         else:
             with urlopen(f"{args.jaeger}/api/v3/traces/{trace_id}", timeout=10) as response:
                 data = json.load(response)
-        total = verify(data, args.source, trace_id, args.profile, args.scenario)
+        total = verify(data, args.source, trace_id, args.profile, args.scenario, args.parent_span_id)
     except (OSError, URLError, ValueError, KeyError) as error:
         parser.exit(1, f"Trace verification failed: {error}\n")
     print(f"PASS {args.source}: {total} spans, one trace, correct parentage/counts, completion=handled")
+    if args.parent_span_id:
+        print(f"PASS incoming context: trace_id={trace_id}, remote_parent={args.parent_span_id}, new local span IDs")
     print(f"Archive: {args.file}" if args.file else f"{args.jaeger}/trace/{trace_id}")
 
 

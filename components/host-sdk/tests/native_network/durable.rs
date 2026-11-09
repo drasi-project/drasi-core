@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use drasi_computation_source_grpc::proto::admission as proto;
 use drasi_core::{computation::ComputationIndexProvider, interface::FailureMode};
 use drasi_index_rocksdb::RocksDbIndexProvider;
+use drasi_lib::observability::ExecutionContext;
 use std::{collections::BTreeMap, future::Future, num::NonZeroUsize};
 
 struct CommitGate {
@@ -427,6 +428,7 @@ async fn both_native_network_protocols_recover_after_process_exit_without_client
 struct Capture {
     descriptor: ComponentDescriptor,
     seen: Arc<Mutex<Vec<i64>>>,
+    contexts: Arc<Mutex<Vec<ExecutionContext>>>,
 }
 #[async_trait]
 impl ComputationComponent for Capture {
@@ -454,6 +456,10 @@ impl EnvelopeSink for Capture {
             .lock()
             .expect("capture lock")
             .push(source_value(&input.envelope)?);
+        self.contexts
+            .lock()
+            .expect("context capture lock")
+            .push(input.execution_context);
         Ok(())
     }
 }
@@ -461,6 +467,7 @@ struct Harness {
     graph: ComputationGraph,
     channel: Arc<QosChannel>,
     seen: Arc<Mutex<Vec<i64>>>,
+    contexts: Arc<Mutex<Vec<ExecutionContext>>>,
 }
 impl Harness {
     async fn new(path: &Path, port: u16, grpc: bool) -> Result<Self> {
@@ -523,6 +530,7 @@ impl Harness {
             .dependencies
             .insert("admission".into(), vec![resource.clone()]);
         let seen = Arc::new(Mutex::new(Vec::new()));
+        let contexts = Arc::new(Mutex::new(Vec::new()));
         let source = Endpoint::new(
             ComponentId::try_new("facilities-db")?,
             PortId::try_new("out")?,
@@ -548,6 +556,7 @@ impl Harness {
                     )],
                 )?,
                 seen: seen.clone(),
+                contexts: contexts.clone(),
             }))
             .bind_stream(source.clone(), definition.stream.clone())
             .connect(
@@ -559,6 +568,7 @@ impl Harness {
             graph,
             channel,
             seen,
+            contexts,
         })
     }
     async fn drive<F, W, T>(&mut self, consumers: bool, work: F) -> Result<T>
@@ -634,6 +644,84 @@ async fn durable_source_rejects_configured_stream_mismatch_before_listening() ->
         assert_eq!(harness.channel.progress().await?.accepted, 0);
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
         drop(listener);
+        harness.shutdown().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn incoming_durable_network_context_survives_admission_callbacks() -> Result<()> {
+    let parent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00";
+    let expected =
+        ExecutionContext::from_w3c_headers(Some(parent.as_bytes()), Some(b"vendor=value"));
+    for grpc in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let port = free_port()?;
+        let mut harness = Harness::new(directory.path(), port, grpc).await?;
+        let contexts = harness.contexts.clone();
+        let channel = harness.channel.clone();
+        harness
+            .drive(true, |_| async {
+                if grpc {
+                    let mut client = Client::connect(format!("http://127.0.0.1:{port}")).await?;
+                    let session = register(&mut client).await?;
+                    let mut incoming = tonic::Request::new(request(&session, 1, 1));
+                    incoming
+                        .metadata_mut()
+                        .insert("traceparent", parent.parse()?);
+                    incoming
+                        .metadata_mut()
+                        .insert("tracestate", "vendor=value".parse()?);
+                    assert!(matches!(
+                        client.admit(incoming).await?.into_inner().result,
+                        Some(proto::admit_response::Result::Receipt(_))
+                    ));
+                    let response = client.admit(request(&session, 2, 2)).await?.into_inner();
+                    assert!(matches!(
+                        response.result,
+                        Some(proto::admit_response::Result::Receipt(_))
+                    ));
+                } else {
+                    let client = reqwest::Client::builder().timeout(DEADLINE).build()?;
+                    let base =
+                        format!("http://127.0.0.1:{port}/sources/facilities-db/admission/v1");
+                    let (_, session) = post(
+                        &client,
+                        &base,
+                        "producers/register",
+                        json!({"producer":"client"}),
+                    )
+                    .await?;
+                    let outcome = client
+                        .post(format!("{base}/events"))
+                        .header("traceparent", parent)
+                        .header("tracestate", "vendor=value")
+                        .json(&json!({"session":session,"sequence":1,"event":http_event(1)}))
+                        .send()
+                        .await?
+                        .error_for_status()?
+                        .json::<Value>()
+                        .await?;
+                    assert!(outcome["error"].is_null(), "{outcome}");
+                    let (status, outcome) = post(
+                        &client,
+                        &base,
+                        "events",
+                        json!({"session":session,"sequence":2,"event":http_event(2)}),
+                    )
+                    .await?;
+                    assert_eq!(status, StatusCode::OK, "{outcome}");
+                }
+                while channel.progress().await?.processed["consumer"] != 2 {
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(
+                    *contexts.lock().expect("context capture lock"),
+                    vec![expected.clone(), ExecutionContext::default()]
+                );
+                Ok(())
+            })
+            .await?;
         harness.shutdown().await?;
     }
     Ok(())
