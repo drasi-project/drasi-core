@@ -19,9 +19,16 @@
   button { background: #658780; color: white; cursor: pointer; margin: .25rem; }
   button:disabled { opacity: .5; cursor: not-allowed; }
   .controls { display: flex; flex-wrap: wrap; gap: .75rem; }
+  .log-time { white-space: nowrap; }
+  .log-component, .log-fields { display: block; margin-top: .35rem; }
+  .log-fields { color: #52646c; overflow-wrap: anywhere; }
+  .log-context { margin-top: .6rem; }
+  .log-context code { display: block; overflow-wrap: anywhere; font-size: .75rem; }
+  .log-error { background: #f4e3df; color: #943d31; }
+  #logs .pill { font-size: .7rem; margin-right: .4rem; }
 </style>
 <h1>Drasi observability demo suite</h1>
-<p class="muted">Real HTTP and PostgreSQL sources, continuous queries, and a separately loaded native plugin.</p>
+<p id="subtitle" class="muted">One HTTP source, a continuous query, and an application reaction.</p>
 <p id="error" hidden></p>
 <section>
   <h2 id="scenario-title">Loading scenario...</h2>
@@ -37,68 +44,80 @@
     <button data-action="release" hidden>Release slow sink</button>
     <button data-action="reset">Reset experiment</button>
   </div>
-  <p id="action-result" class="muted">Actions send real HTTP events. Source acceptance is not proof of handling.</p>
+  <p id="input-note" class="muted">All input buttons send real HTTP events. Source acceptance is not proof of handling.</p>
+  <p id="action-result" class="muted"></p>
+  <div id="sql-input" hidden>
+    <h3>Send changes through SQL</h3>
+    <p>This optional demo has only a PostgreSQL source. Run this command in a terminal to insert, update, and delete one row; each statement commits separately.</p>
+    <pre id="sql-command"></pre>
+  </div>
   <p id="experiment" class="muted"></p>
   <table><thead><tr><th>Observation since reset</th><th>Expected</th><th>Observed</th></tr></thead><tbody id="observations"></tbody></table>
-  <p class="muted">Reset releases pending handling, deletes only dashboard-owned nodes, and establishes a new baseline. It does not reset cumulative metrics or clear PostgreSQL/manual inputs.</p>
+  <p id="reset-note" class="muted">Reset releases pending handling, deletes only dashboard-owned HTTP nodes, and establishes a new baseline. It does not reset cumulative metrics or clear manual inputs.</p>
   <details>
     <summary>Select another scenario or signal policy</summary>
     <p>Policies are startup settings, not pretend live toggles. Stop the runner with Ctrl-C, then use the generated command. The same seeded workload runs in every policy.</p>
     <div class="controls">
-      <label>Scenario <select id="scenario-choice"><option value="follow">Follow one change</option><option value="controls">Signal controls</option><option value="latency">Latency lab</option></select></label>
+      <label>Demo <select id="scenario-choice"><option value="follow">Main: follow one HTTP change</option><option value="controls">Main: HTTP signal controls</option><option value="latency">Main: HTTP latency lab</option><option value="postgres">Optional: PostgreSQL CDC</option></select></label>
       <label>Profile <select id="profile-choice"><option>debug</option><option>basic</option><option>persistence</option><option>off</option></select></label>
       <label>Tracing <select id="trace-choice"><option value="true">Enabled</option><option value="false">Disabled</option></select></label>
       <label>Sampling <select id="sampling-choice"><option>always</option><option>never</option></select></label>
       <label>Metrics <select id="metric-choice"><option value="true">Enabled</option><option value="false">Disabled</option></select></label>
       <label>Logs <select id="log-choice"><option>info</option><option>warn</option><option>off</option></select></label>
-      <label>Metric exclusion <select id="exclude-choice"><option value="">None</option><option>drasi.query</option><option>inspection.duration</option></select></label>
+      <label>Metric exclusion <select id="exclude-choice"><option value="">None</option><option>drasi.query</option><option>drasi.component</option></select></label>
     </div>
     <pre id="command"></pre>
   </details>
 </section>
 <section>
   <h2>Connected pipeline</h2>
-  <pre id="topology">HTTP / PostgreSQL → continuous query → native inspector (.dylib / .so / .dll) → handled callback</pre>
-  <p>The host owns tracing, logging, metrics, and export. The plugin measures record-image inspection, not another copy of framework throughput.</p>
-  <p><span id="sampling" class="pill">Loading…</span> <a id="jaeger" href="#">Open Jaeger</a> · <a href="/metrics">Prometheus metrics</a> · <a href="/logs">JSON logs</a></p>
-  <small id="plugin" class="muted"></small>
+  <pre id="topology">HTTP → continuous query → application reaction (handled callback)</pre>
+  <p>One instance owns the source, query, and reaction. The host owns tracing, logging, metrics, and export.</p>
+  <p><span id="service" class="pill">Loading service…</span> <span id="sampling" class="pill">Loading…</span> <a id="jaeger" href="#">Open Jaeger</a> · <a href="/metrics">Prometheus metrics</a> · <a href="/logs">JSON logs</a></p>
+  <small id="identity" class="muted"></small>
   <p id="health" class="muted"></p>
 </section>
 <section>
   <h2>Traces</h2>
-  <p>Each sampled trace includes <code>plugin.inspect</code> from the native library with its original span ID and timing. Click a trace after sending an event.</p>
+  <p>Each sampled trace follows source publication, query processing, and actual reaction handling. Click a trace after sending an event.</p>
   <div id="traces"></div>
   <p id="no-traces" class="muted">Waiting for an inspected result…</p>
 </section>
 <section>
   <h2>Live metrics</h2>
-  <p>Scoped plugin counters, gauges, and histograms remain enabled when traces are not sampled. Labels are assigned by the host; durations are in seconds.</p>
-  <label><input id="all" type="checkbox"> Include framework query, component, and queue metrics</label>
+  <p>Framework counters distinguish source inputs, query results, and handled outputs. Metrics are independent of trace sampling; durations are in seconds.</p>
+  <label><input id="all" type="checkbox"> Include all component and queue metrics</label>
   <pre id="metrics">Waiting for metrics…</pre>
 </section>
 <section>
-  <h2>Correlated native logs</h2>
-  <p>Original plugin timestamps, safe fields, and trace/span IDs arrive through the host log runtime. No record payloads or credentials are displayed.</p>
-  <table><thead><tr><th>Time / component</th><th>Native log</th><th>Trace</th></tr></thead><tbody id="logs"></tbody></table>
+  <h2>Correlated component logs</h2>
+  <p>Read which query results the application reaction handled, then open its trace in Jaeger. Newest first; times are local (hover for the original UTC timestamp). Handling logs show counts and operation kinds, not record payloads.</p>
+  <p id="no-logs" class="muted">Waiting for component logs…</p>
+  <table><thead><tr><th>When / component</th><th>What happened</th><th>Related trace</th></tr></thead><tbody id="logs"></tbody></table>
 </section>
 <script>
   let latestMetrics = "";
   let configured = false;
   let actionBusy = false;
   const stories = {
-    follow: ["1. Follow one change", "Insert, update, and delete a node. Follow its real source/query/native-plugin/handled-callback trace and correlated logs. PostgreSQL remains available for manual SQL."],
+    follow: ["1. Follow one HTTP change", "Insert, update, and delete a node through the buttons below. Follow one HTTP source → query → application reaction pipeline. No PostgreSQL source or database is running in this demo."],
     controls: ["2. Signal controls", "Run the same workload under different startup policies. Sampling never suppresses metric collection; disabling tracing does not disable logging. Basic removes debug spans; Persistence adds storage metrics to Basic (not Debug), and exclusions remove only matching metrics."],
     latency: ["3. Why is my alert slow?", "One live source input creates ten query result rows and fans out to independent fast and slow handled sinks. Pause the slow sink, send a bounded burst, and release it: queued/accepted work is not handled work. Each fully handled envelope produces one latency observation per sink, not ten."],
+    postgres: ["Optional: PostgreSQL CDC", "Insert, update, and delete rows through SQL. Follow one PostgreSQL replication → query → application reaction pipeline. This is a live-change demonstration, not a bootstrap snapshot; no HTTP source is running."],
   };
+  const makeTargets = { follow: "observability-demo", controls: "observability-demo-controls", latency: "observability-demo-latency", postgres: "observability-demo-postgres" };
   const element = id => document.getElementById(id);
   function showMetrics() {
     element("metrics").textContent = latestMetrics.split("\n")
-      .filter(line => element("all").checked || line.includes("drasi_plugin_"))
-      .join("\n") || "No plugin metric series yet.";
+      .filter(line => element("all").checked || primaryMetric(line))
+      .join("\n") || "No framework metric series yet.";
+  }
+  function primaryMetric(line) {
+    return /^(?:# (?:HELP|TYPE) )?(?:drasi_query_|drasi_source_events_dispatched|drasi_component_inputs_processed)/.test(line);
   }
   element("all").addEventListener("change", showMetrics);
   function command() {
-    element("command").textContent = `DEMO_SCENARIO=${element("scenario-choice").value} TELEMETRY_PROFILE=${element("profile-choice").value} TRACE_ENABLED=${element("trace-choice").value} TRACE_SAMPLING=${element("sampling-choice").value} METRICS_ENABLED=${element("metric-choice").value} DEMO_LOG_LEVEL=${element("log-choice").value} METRIC_EXCLUDE='${element("exclude-choice").value}' make observability-demo`;
+    element("command").textContent = `TELEMETRY_PROFILE=${element("profile-choice").value} TRACE_ENABLED=${element("trace-choice").value} TRACE_SAMPLING=${element("sampling-choice").value} METRICS_ENABLED=${element("metric-choice").value} DEMO_LOG_LEVEL=${element("log-choice").value} METRIC_EXCLUDE='${element("exclude-choice").value}' make ${makeTargets[element("scenario-choice").value]}`;
   }
   document.querySelectorAll("select").forEach(select => select.addEventListener("change", command));
   document.querySelectorAll("[data-action]").forEach(button => button.addEventListener("click", async () => {
@@ -123,8 +142,119 @@
     return text.split("\n").filter(line => line.startsWith(`${name}{`) && (!component || line.includes(`component_id="${component}"`)))
       .reduce((sum, line) => sum + Number(line.slice(line.lastIndexOf(" ") + 1)), 0);
   }
-  function showScenario(state, metrics) {
-    const config = state.config, latency = config.scenario === "latency";
+  function logAttributeValue(attribute) {
+    if (!attribute || typeof attribute !== "object" || Array.isArray(attribute)) {
+      throw new Error("Invalid component log attribute");
+    }
+    const entries = Object.entries(attribute);
+    if (entries.length !== 1) throw new Error("Component log attribute must have one type");
+    const [type, value] = entries[0];
+    if ((type === "I64" && Number.isInteger(value))
+      || (type === "F64" && typeof value === "number" && Number.isFinite(value))
+      || (type === "Bool" && typeof value === "boolean")
+      || (type === "String" && typeof value === "string")) return value;
+    throw new Error(`Unsupported component log attribute type/value: ${type}`);
+  }
+  function formatLogField(name, attribute) {
+    const value = logAttributeValue(attribute);
+    if (name === "result_changes" && typeof value === "number") return `${value.toLocaleString()} result change${value === 1 ? "" : "s"} handled`;
+    if (["added", "updated", "deleted"].includes(name) && typeof value === "number") return `${value.toLocaleString()} ${name}`;
+    if (name === "query_id") return `Query: ${value}`;
+    return `${name.replaceAll("_", " ")}: ${String(value)}`;
+  }
+  function formatLogTimestamp(timestamp) {
+    if (typeof timestamp !== "string") throw new Error("Invalid component log timestamp");
+    const date = new Date(timestamp);
+    if (Number.isNaN(date.getTime())) throw new Error("Invalid component log timestamp");
+    return date.toLocaleString(undefined, {
+      year: "numeric", month: "short", day: "numeric",
+      hour: "2-digit", minute: "2-digit", second: "2-digit", timeZoneName: "short",
+    });
+  }
+  function traceUrl(jaeger, traceId) {
+    if (!/^[0-9a-f]{32}$/i.test(traceId)) throw new Error("Invalid trace ID");
+    const url = new URL(jaeger);
+    if (!["http:", "https:"].includes(url.protocol)) throw new Error("Jaeger URL must use HTTP or HTTPS");
+    url.pathname = `${url.pathname.replace(/\/$/, "")}/trace/${traceId}`;
+    url.search = "";
+    url.hash = "";
+    return url.href;
+  }
+  function textElement(tag, text, className = "") {
+    const node = document.createElement(tag);
+    node.textContent = text;
+    node.className = className;
+    return node;
+  }
+  function showLogs(logs, status) {
+    const expanded = new Set([...element("logs").querySelectorAll("details[open]")].map(details => details.dataset.logKey));
+    element("logs").replaceChildren();
+    element("no-logs").hidden = logs.length > 0;
+    element("no-logs").textContent = status.config.log_level === "off"
+      ? "Logging is disabled by the startup policy. Traces and metrics are controlled independently."
+      : "No component logs yet at the configured log level.";
+    for (const log of [...logs].reverse()) {
+      const row = document.createElement("tr");
+      const identity = document.createElement("td");
+      const time = textElement("time", formatLogTimestamp(log.timestamp), "log-time");
+      time.dateTime = log.timestamp;
+      time.title = `Original UTC timestamp: ${log.timestamp}`;
+      identity.append(time, textElement("strong", log.component, "log-component"));
+
+      const event = document.createElement("td");
+      const levelClass = log.level === "ERROR" ? "log-error" : log.level === "WARN" ? "warning" : "";
+      event.append(textElement("span", log.level, `pill ${levelClass}`));
+      event.append(textElement("strong", log.message === "Handled query result changes" ? "Query results handled" : log.message));
+      const attributes = log.attributes ?? [];
+      if (!Array.isArray(attributes)) throw new Error("Component log attributes must be a list");
+      const fields = attributes.map(entry => {
+        if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") {
+          throw new Error("Invalid component log field");
+        }
+        if (["added", "updated", "deleted"].includes(entry[0]) && logAttributeValue(entry[1]) === 0) return null;
+        return formatLogField(entry[0], entry[1]);
+      }).filter(field => field !== null);
+      if (fields.length) event.append(textElement("span", fields.join(" · "), "log-fields"));
+      if (log.target) event.append(textElement("small", `Target: ${log.target}`, "log-fields"));
+
+      const trace = document.createElement("td");
+      if (log.trace_id) {
+        if (log.sampled) {
+          const link = textElement("a", "Open trace");
+          link.href = traceUrl(status.jaeger, log.trace_id);
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          trace.append(link);
+        } else {
+          trace.append(textElement("span", "Unsampled — not exported to Jaeger", "muted"));
+        }
+        const details = document.createElement("details");
+        details.className = "log-context";
+        details.dataset.logKey = JSON.stringify([log.timestamp, log.component, log.span_id, log.message]);
+        details.open = expanded.has(details.dataset.logKey);
+        details.append(
+          textElement("summary", "Trace context"),
+          textElement("code", `Trace ID: ${log.trace_id}`),
+          textElement("code", `Span ID: ${log.span_id}`),
+          textElement("small", log.sampled ? "Sampled trace" : "Unsampled context"),
+        );
+        trace.append(details);
+      } else {
+        trace.append(textElement("span", status.config.tracing ? "No trace context" : "Tracing disabled", "muted"));
+      }
+      row.append(identity, event, trace);
+      element("logs").append(row);
+    }
+  }
+  function showScenario(state, metrics, status) {
+    const config = state.config, latency = config.scenario === "latency", postgres = config.source === "postgres";
+    element("subtitle").textContent = `One ${postgres ? "PostgreSQL CDC" : "HTTP"} source, a continuous query, and an application reaction.`;
+    element("input-note").textContent = postgres ? "Inputs come from SQL only. The reset button only resets the observation baseline." : "All input buttons send real HTTP events. Source acceptance is not proof of handling.";
+    element("sql-input").hidden = !postgres;
+    element("sql-command").textContent = status.postgres_command || "";
+    element("reset-note").textContent = postgres
+      ? "Reset establishes a new observation baseline. It does not delete database rows, erase logs, or reset cumulative metrics."
+      : "Reset releases pending handling, deletes only dashboard-owned HTTP nodes, and establishes a new baseline. It does not reset cumulative metrics or clear manual inputs.";
     element("scenario-title").textContent = stories[config.scenario][0];
     element("story").textContent = stories[config.scenario][1];
     element("policy").textContent = `Effective policy: ${config.profile} · tracing ${config.tracing ? "on" : "off"} · sampling ${config.sampling} · metrics ${config.metrics ? "on" : "off"} · logs ${config.log_level} · exclusion ${config.metric_exclusion || "none"} · handled-branch timing ${config.handled_branch_latency ? "on" : "off"}`;
@@ -138,12 +268,14 @@
       command(); configured = true;
     }
     element("topology").textContent = latency
-      ? "HTTP → query (10-row fan-out) → native inspector → fast handled sink / slow handled sink (300 ms; pausable)\nPostgreSQL → query → native inspector → handled callback"
-      : "HTTP / PostgreSQL → continuous query → native inspector (.dylib / .so / .dll) → handled callback";
-    element("experiment").textContent = `Dashboard nodes: ${state.records}/${state.max_records} · inputs sent since reset: ${state.issued} · slow sink: ${state.paused ? "PAUSED" : "released"}`;
+      ? "HTTP → query (10-row fan-out) → fast / slow application reactions (300 ms slow handling; pausable)"
+      : `${postgres ? "PostgreSQL logical replication" : "HTTP"} → continuous query → application reaction (handled callback)`;
+    element("experiment").textContent = postgres ? "SQL-driven PostgreSQL pipeline; no HTTP source or dashboard-owned nodes."
+      : `Dashboard nodes: ${state.records}/${state.max_records} · inputs sent since reset: ${state.issued}${latency ? " · slow sink: " + (state.paused ? "PAUSED" : "released") : ""}`;
     for (const button of document.querySelectorAll("[data-action]")) {
       const name = button.dataset.action;
-      button.hidden = ["pause", "release", "prepare"].includes(name) && (!latency || (name === "prepare" && state.prepared));
+      button.hidden = (postgres && name !== "reset") || (["pause", "release", "prepare"].includes(name) && (!latency || (name === "prepare" && state.prepared)));
+      if (name === "reset") button.textContent = postgres ? "Reset observation baseline" : "Reset experiment";
       button.disabled = actionBusy || (["update", "delete"].includes(name) && state.records === 0)
         || (["insert", "burst"].includes(name) && ((latency && !state.prepared) || state.records + (name === "burst" ? 3 : 1) > state.max_records));
     }
@@ -151,21 +283,22 @@
     const diff = (name, component) => total(metrics, name, component) - total(baseline, name, component);
     const eligibility = (name, expected) => !config.metrics ? "metrics disabled"
       : config.metric_exclusion && name.includes(config.metric_exclusion) ? "excluded by policy" : expected;
+    const query = `${config.source}-query`;
     const rows = [
-      ["Query input envelopes", eligibility("drasi.query.events_processed", state.issued), diff("drasi_query_events_processed", "http-query")],
-      ["New query result-row changes", eligibility("drasi.query.results_emitted", latency ? "10 per insert/delete; updates can emit paired changes" : "depends on query diff, not envelope count"), diff("drasi_query_results_emitted", "http-query")],
+      ["Query input envelopes", eligibility("drasi.query.events_processed", postgres ? "one per source envelope from SQL" : state.issued), diff("drasi_query_events_processed", query)],
+      ["New query result-row changes", eligibility("drasi.query.results_emitted", latency ? "10 per insert/delete; updates can emit paired changes" : "depends on query diff, not envelope count"), diff("drasi_query_results_emitted", query)],
       ["Physical queue depth", eligibility("drasi.queue.depth", "pending work can grow while slow handling is paused"), total(metrics, "drasi_queue_depth")],
     ];
-    for (const component of latency ? ["http-fast", "http-slow"] : ["http-output"]) {
+    for (const component of latency ? ["http-fast", "http-slow"] : [`${config.source}-output`]) {
       const observed = state.since_reset[component] || { envelopes: 0, rows: 0 };
-      rows.push([`${component}: handled envelopes / rows`, `${state.paused && component === "http-slow" ? "no new handling" : state.issued + " envelopes"}`, `${observed.envelopes} / ${observed.rows}`]);
+      rows.push([`${component}: handled envelopes / rows`, postgres ? "actual completed SQL-driven output" : `${state.paused && component === "http-slow" ? "no new handling" : state.issued + " envelopes"}`, `${observed.envelopes} / ${observed.rows}`]);
       const count = diff("drasi_pipeline_end_to_end_duration_count", component);
       rows.push([`${component}: latency samples`, latency ? `${observed.envelopes} (one per completed envelope)` : "0: opt-in remains off", count]);
       if (count) rows.push([`${component}: mean handled-branch latency`, component === "http-slow" ? "includes pause/queue wait and 300 ms handling" : "independent branch duration", `${(diff("drasi_pipeline_end_to_end_duration_sum", component) / count * 1000).toFixed(2)} ms`]);
     }
     for (const [name, instrument] of [["Evaluator mean duration", "drasi_query_engine_duration"], ["Commit mean duration", "drasi_query_commit_duration"]]) {
-      const count = diff(`${instrument}_count`, "http-query");
-      rows.push([name, name.startsWith("Commit") ? "Persistence profile only" : "excludes commit/handler work", count ? `${(diff(`${instrument}_sum`, "http-query") / count * 1000).toFixed(3)} ms` : "no observations / excluded"]);
+      const count = diff(`${instrument}_count`, query);
+      rows.push([name, name.startsWith("Commit") ? "Persistence profile only" : "excludes commit/handler work", count ? `${(diff(`${instrument}_sum`, query) / count * 1000).toFixed(3)} ms` : "no observations / excluded"]);
     }
     element("observations").replaceChildren();
     for (const values of rows) {
@@ -182,51 +315,40 @@
   async function refresh() {
     try {
       const [status, metrics, logs, scenario] = await Promise.all([get("/status"), get("/metrics", false), get("/logs"), get("/scenario")]);
-      showScenario(scenario, metrics);
+      showScenario(scenario, metrics, status);
+      element("service").textContent = `Service: ${status.service}`;
       element("sampling").textContent = `Trace sampling: ${status.sampling}`;
       element("sampling").className = status.sampling === "never" ? "pill warning" : "pill";
       element("jaeger").href = status.jaeger;
-      element("plugin").textContent = `Loaded native library: ${status.plugin_path} · capabilities: ${status.plugin_capabilities}`;
+      element("identity").textContent = `Instance: ${status.instance} · source: ${status.config.source}`;
       const lost = Object.values(status.span_losses).reduce((sum, count) => sum + count, 0);
       element("health").textContent = status.span_buffer.error
         ? `Collection error: ${status.span_buffer.error}`
-        : `Native span buffer: ${status.span_buffer.records} records / ${status.span_buffer.bytes} bytes · span losses: ${lost} · log drops: ${status.log_losses.full + status.log_losses.closed}`;
+        : `Native source span buffer: ${status.span_buffer.records} records / ${status.span_buffer.bytes} bytes · span losses: ${lost} · log drops: ${status.log_losses.full + status.log_losses.closed}`;
       latestMetrics = metrics;
       showMetrics();
-      element("logs").replaceChildren();
+      showLogs(logs, status);
       element("traces").replaceChildren();
       const traces = new Set();
+      if (status.config.tracing && status.sampling === "always") {
+        for (const [component, observed] of Object.entries(scenario.handled)) {
+          if (!observed.trace_id || traces.has(observed.trace_id)) continue;
+          traces.add(observed.trace_id);
+          const link = document.createElement("a");
+          link.href = traceUrl(status.jaeger, observed.trace_id);
+          link.textContent = `${component}: ${observed.trace_id.slice(0, 12)}…`;
+          link.target = "_blank"; link.rel = "noopener noreferrer";
+          element("traces").append(link);
+        }
+      }
       for (const log of [...logs].reverse()) {
-        const row = document.createElement("tr");
-        for (const text of [
-          `${log.timestamp}\n${log.component}`,
-          `${log.level} ${log.message}\n${JSON.stringify(log.attributes || [])}`,
-          log.trace_id ? `${log.sampled ? "sampled" : "unsampled"}\n${log.trace_id}\nspan: ${log.span_id}` : "Lifecycle / no event trace",
-        ]) {
-          const cell = document.createElement("td");
-          cell.textContent = text;
-          cell.style.whiteSpace = "pre-wrap";
-          row.append(cell);
-        }
-        if (status.config.tracing && status.sampling === "always") {
-          for (const [component, observed] of Object.entries(scenario.handled)) {
-            if (!observed.trace_id || traces.has(observed.trace_id)) continue;
-            traces.add(observed.trace_id);
-            const link = document.createElement("a");
-            link.href = `${status.jaeger}/trace/${observed.trace_id}`;
-            link.textContent = `${component}: ${observed.trace_id.slice(0, 12)}…`;
-            link.target = "_blank"; link.rel = "noopener";
-            element("traces").append(link);
-          }
-        }
-        element("logs").append(row);
         if (log.sampled && log.trace_id && !traces.has(log.trace_id)) {
           traces.add(log.trace_id);
           const link = document.createElement("a");
-          link.href = `${status.jaeger}/trace/${log.trace_id}`;
+          link.href = traceUrl(status.jaeger, log.trace_id);
           link.textContent = `${log.component}: ${log.trace_id.slice(0, 12)}…`;
           link.target = "_blank";
-          link.rel = "noopener";
+          link.rel = "noopener noreferrer";
           element("traces").append(link);
         }
       }

@@ -1,7 +1,7 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! Real sources, queries, native plugin telemetry, and handled callbacks.
+//! One source, continuous query, and handled application reaction per demo.
 //! See ../README.md for the one-command dashboard and Jaeger setup.
 
 mod dashboard;
@@ -10,13 +10,14 @@ mod scenarios;
 use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use drasi_core::computation::InMemoryComputationProvider;
-use drasi_host_sdk::computation::{self, NativePlugin};
+use drasi_host_sdk::computation::NativePlugin;
 use drasi_lib::{
     computation::v1::*,
     error::OperationFailures,
     observability::{
-        ComponentLogRuntime, ExecutionContext, LogPolicy, MetricRegistrationContext,
-        NativeSpanCollector, OpenTelemetryContextAdapter, OpenTelemetrySpanProcessor,
+        ComponentLogRuntime, ComponentLogType, ExecutionContext, ExecutionScope, LogLevel,
+        LogMessage, LogMetadata, LogPolicy, MetricRegistrationContext, NativeSpanCollector,
+        OpenTelemetryContextAdapter, OpenTelemetrySpanProcessor, TelemetryAttribute,
         TelemetryOptions, TELEMETRY_TARGET,
     },
     DrasiLib,
@@ -30,11 +31,11 @@ use opentelemetry_sdk::{
     Resource,
 };
 use serde_json::{json, Value};
-use std::{env, num::NonZeroUsize, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
+use std::{env, num::NonZeroUsize, str::FromStr, sync::Arc, time::Duration};
 use tracing_subscriber::{filter::filter_fn, prelude::*};
 
 const INSTANCE: &str = "source-trace-demo";
-const SERVICE: &str = "drasi-source-traces";
+const SERVICE: &str = "drasi-observability-demo";
 
 fn setting(name: &str, default: &str) -> Result<String> {
     match env::var(name) {
@@ -193,116 +194,95 @@ async fn run(
     config: scenarios::Config,
 ) -> Result<()> {
     let settings = config.settings()?;
-    let http = NativePlugin::from_definition(drasi_computation_source_http::plugin()?)?;
-    let postgres = NativePlugin::from_definition(drasi_computation_source_postgres::plugin()?)?;
-    let http_factory = http
-        .factories()
-        .first()
-        .context("HTTP source factory")?
-        .clone();
-    let postgres_factory = postgres
+    let source = config.source();
+    let source_plugin = NativePlugin::from_definition(if source == "postgres" {
+        drasi_computation_source_postgres::plugin()?
+    } else {
+        drasi_computation_source_http::plugin()?
+    })?;
+    let source_factory = source_plugin
         .factories()
         .iter()
         .find(|factory| {
-            factory.metadata().implementation.name.as_ref()
-                == drasi_computation_source_postgres::POSTGRES_ROWS
+            source == "http"
+                || factory.metadata().implementation.name.as_ref()
+                    == drasi_computation_source_postgres::POSTGRES_ROWS
         })
-        .context("PostgreSQL row source factory")?
+        .context("demo source factory")?
         .clone();
-    let plugin_path = match env::var_os("DEMO_PLUGIN_PATH") {
-        Some(path) => PathBuf::from(path),
-        None => {
-            let target = env::var_os("CARGO_TARGET_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../target")
-                });
-            target.join("debug").join(format!(
-                "{}drasi_observability_demo_plugin{}",
-                env::consts::DLL_PREFIX,
-                env::consts::DLL_SUFFIX,
-            ))
-        }
-    }
-    .canonicalize()
-    .context("demo native plugin is missing; use make observability-demo to build it")?;
-    let inspector = computation::load(&plugin_path).context("load demo inspector cdylib")?;
-    let inspector_factory = inspector
-        .factories()
-        .first()
-        .context("inspector factory")?
-        .clone();
-    let capabilities = inspector_factory.telemetry_capabilities();
-    ensure!(
-        capabilities & 15 == 15,
-        "demo inspector lacks shared telemetry capabilities"
-    );
-    let progress = Arc::new(QuerySourceProgress::new(
-        ComponentBatch::GRAPH_ID,
-        id("postgres-query")?,
-    )?);
-    let mut pg = postgres_factory.specification(
-        id("postgres")?,
-        json!({
-            "stream": stream("postgres")?, "settings": {}, "persistent": false,
-            "auto_create_slot": true, "start_from_slot": true, "reconnect_attempts": 0
-        }),
-    )?;
-    pg.configuration.insert(
-        "settings".into(),
-        ConfigurationValue::Reference {
-            resource: resource("postgres-settings")?,
-            key: "postgres".into(),
-            secret: true,
-        },
-    );
-    pg.dependencies.insert(
-        "source_progress".into(),
-        vec![resource("postgres-progress")?],
-    );
-    let http_port = port("HTTP_PORT", 19090)?;
+    let http_port = if source == "http" {
+        port("HTTP_PORT", 19090)?
+    } else {
+        19090
+    };
     let lab = Arc::new(scenarios::Lab::new(
         config,
         metric_handle.clone(),
         http_port,
     )?);
     let mut batch = ComponentBatch::builder();
-    for (name, role, handle) in [
-        (
-            "postgres-settings",
-            ResourceRole::SecretStore,
-            ResourceHandle::new(
+    let progress = if source == "postgres" {
+        let progress = Arc::new(QuerySourceProgress::new(
+            ComponentBatch::GRAPH_ID,
+            id("postgres-query")?,
+        )?);
+        for (name, role, handle) in [
+            (
+                "postgres-settings",
                 ResourceRole::SecretStore,
-                Arc::new(ConfigurationResolverResource(Arc::new(PostgresSettings))),
+                ResourceHandle::new(
+                    ResourceRole::SecretStore,
+                    Arc::new(ConfigurationResolverResource(Arc::new(PostgresSettings))),
+                ),
             ),
-        ),
-        (
-            "postgres-progress",
-            ResourceRole::Checkpoint,
-            ResourceHandle::new(
+            (
+                "postgres-progress",
                 ResourceRole::Checkpoint,
-                Arc::new(QuerySourceProgressResource(progress.clone())),
+                ResourceHandle::new(
+                    ResourceRole::Checkpoint,
+                    Arc::new(QuerySourceProgressResource(progress.clone())),
+                ),
             ),
-        ),
-    ] {
-        batch = batch
-            .declare_resource(ResourceSpecification {
-                id: resource(name)?,
-                role,
-                ownership: ResourceOwnership::Borrowed,
-                binding: name.into(),
-            })?
-            .provide_resource(resource(name)?, handle)?;
-    }
-    batch = batch
-        .component(http_factory.specification(id("http")?, json!({
+        ] {
+            batch = batch
+                .declare_resource(ResourceSpecification {
+                    id: resource(name)?,
+                    role,
+                    ownership: ResourceOwnership::Borrowed,
+                    binding: name.into(),
+                })?
+                .provide_resource(resource(name)?, handle)?;
+        }
+        let mut pg = source_factory.specification(
+            id("postgres")?,
+            json!({
+                "stream": stream("postgres")?, "settings": {}, "persistent": false,
+                "auto_create_slot": true, "start_from_slot": true, "reconnect_attempts": 0
+            }),
+        )?;
+        pg.configuration.insert(
+            "settings".into(),
+            ConfigurationValue::Reference {
+                resource: resource("postgres-settings")?,
+                key: "postgres".into(),
+                secret: true,
+            },
+        );
+        pg.dependencies.insert(
+            "source_progress".into(),
+            vec![resource("postgres-progress")?],
+        );
+        batch = batch.component(pg, source_factory);
+        Some(progress)
+    } else {
+        batch = batch.component(source_factory.specification(id("http")?, json!({
             "stream": stream("http")?, "sourceId": "http", "host": "127.0.0.1", "port": http_port
-        }))?, http_factory)
-        .component(pg, postgres_factory);
-    for source in ["http", "postgres"] {
+        }))?, source_factory);
+        None
+    };
+    {
         let query_id = format!("{source}-query");
         let output_id = format!("{source}-output");
-        let inspection_id = format!("{source}-inspect");
         let mut query = ContinuousQueryTransformer::new(
             ContinuousQueryDefinition {
                 graph_id: ComponentBatch::GRAPH_ID.into(),
@@ -320,24 +300,15 @@ async fn run(
         )
         .await?
         .with_recovery_scope(INSTANCE)?;
-        if source == "postgres" {
+        if let Some(progress) = progress {
             query = query.with_source_progress(progress.clone())?;
         }
         batch = batch
             .query(Box::new(query))
-            .component(
-                inspector_factory.specification(id(&inspection_id)?, json!({}))?,
-                inspector_factory.clone(),
-            )
             .bind_stream(endpoint(source, "out")?, stream(source)?)
             .bind_stream(endpoint(&query_id, "out")?, stream(&query_id)?)
-            .bind_stream(endpoint(&inspection_id, "out")?, stream(&inspection_id)?)
             .connect(
                 EdgeDefinition::new(endpoint(source, "out")?, endpoint(&query_id, "in")?),
-                Box::new(BoundedPipeConfig { capacity: 32 }),
-            )
-            .connect(
-                EdgeDefinition::new(endpoint(&query_id, "out")?, endpoint(&inspection_id, "in")?),
                 Box::new(BoundedPipeConfig { capacity: 32 }),
             );
         let outputs = if source == "http" && lab.config.scenario == "latency" {
@@ -347,12 +318,14 @@ async fn run(
         };
         for output in outputs {
             let observation = lab.clone();
+            let callback_logging = logging.clone();
             let component = output.clone();
             let reaction = NativeApplicationReaction::callback(
                 output.clone(),
                 QueryChangeCodec::schema().descriptor().clone(),
                 move |input| {
                     let observation = observation.clone();
+                    let callback_logging = callback_logging.clone();
                     let component = component.clone();
                     async move {
                         observation
@@ -375,12 +348,71 @@ async fn run(
                             println!("RESULT source={source} query={source}-query component={component} trace_id=none sampled=false changes={rows}");
                         }
                         observation.handled(&component, rows, &context)?;
+                        let (added, updated, deleted) =
+                            input.envelope.changes().operations().iter().fold(
+                                (0u64, 0u64, 0u64),
+                                |(added, updated, deleted), operation| match operation {
+                                    ChangeOperation::Added { .. } => (added + 1, updated, deleted),
+                                    ChangeOperation::Updated { .. } => {
+                                        (added, updated + 1, deleted)
+                                    }
+                                    ChangeOperation::Deleted { .. } => {
+                                        (added, updated, deleted + 1)
+                                    }
+                                },
+                            );
+                        if tracing::enabled!(target: "drasi_demo", tracing::Level::INFO) {
+                            let owner = ExecutionScope::current_component()
+                                .context("handling log has no owning component scope")?;
+                            let mut message = LogMessage::with_instance(
+                                LogLevel::Info,
+                                "Handled query result changes",
+                                owner.identity.instance_id(),
+                                owner
+                                    .identity
+                                    .component_id()
+                                    .context("handling log has no component identity")?
+                                    .as_str(),
+                                ComponentLogType::Sink,
+                            );
+                            message.metadata = Some(LogMetadata {
+                                graph_id: owner.identity.graph_id().into(),
+                                plugin_kind: String::new(),
+                                generation: owner.generation,
+                                target: "drasi_demo".into(),
+                                attributes: vec![
+                                    (
+                                        "query_id".into(),
+                                        TelemetryAttribute::String(format!("{source}-query")),
+                                    ),
+                                    (
+                                        "result_changes".into(),
+                                        TelemetryAttribute::I64(i64::try_from(rows)?),
+                                    ),
+                                    (
+                                        "added".into(),
+                                        TelemetryAttribute::I64(i64::try_from(added)?),
+                                    ),
+                                    (
+                                        "updated".into(),
+                                        TelemetryAttribute::I64(i64::try_from(updated)?),
+                                    ),
+                                    (
+                                        "deleted".into(),
+                                        TelemetryAttribute::I64(i64::try_from(deleted)?),
+                                    ),
+                                ],
+                                context: context.trace().cloned(),
+                            });
+                            // Capture loss is diagnosed by the log runtime, not a handling failure.
+                            callback_logging.try_log(message);
+                        }
                         Ok(())
                     }
                 },
             )?;
             batch = batch.sink(Box::new(reaction)).connect(
-                EdgeDefinition::new(endpoint(&inspection_id, "out")?, endpoint(&output, "in")?),
+                EdgeDefinition::new(endpoint(&query_id, "out")?, endpoint(&output, "in")?),
                 Box::new(BoundedPipeConfig {
                     capacity: if lab.config.scenario == "latency" {
                         2
@@ -397,7 +429,7 @@ async fn run(
         .with_telemetry(
             TelemetryOptions::new(settings)
                 .with_context_adapter(Arc::new(OpenTelemetryContextAdapter))
-                .with_trace_directives("drasi::telemetry=trace,drasi_demo_plugin=info")
+                .with_trace_directives("drasi::telemetry=trace,drasi_demo=info")
                 .with_metric_context(metrics)
                 .with_native_span_collector(native_spans.clone()),
         )
@@ -411,18 +443,34 @@ async fn run(
             metrics: metric_handle,
             logging: logging.clone(),
             spans: native_spans,
-            plugin: plugin_path,
-            capabilities,
             lab: lab.clone(),
             jaeger: setting("JAEGER_URL", "http://127.0.0.1:16689")?,
+            postgres_command: if source == "postgres" {
+                Some(format!(
+                    "{} exec -i {} psql -U postgres -v ON_ERROR_STOP=1 <<'SQL'\n\
+                    INSERT INTO trace_items VALUES (2, 'SQL demo', 7);\n\
+                    UPDATE trace_items SET value = 8 WHERE id = 2;\n\
+                    DELETE FROM trace_items WHERE id = 2;\nSQL",
+                    setting("CONTAINER_ENGINE", "podman")?,
+                    setting(
+                        "DEMO_POSTGRES_CONTAINER",
+                        &format!("drasi-otel-demo-postgres-{}", port("PGPORT", 15437)?)
+                    )?,
+                ))
+            } else {
+                None
+            },
         },
     )
     .await?;
     let mut dashboard_joined = false;
     let result = async {
         core.start().await?;
-        println!("READY HTTP http://127.0.0.1:{http_port}/sources/http/events");
-        println!("READY PostgreSQL publication/slot drasi_trace_demo; wait for its slot to be active before inserting");
+        if source == "http" {
+            println!("READY HTTP http://127.0.0.1:{http_port}/sources/http/events");
+        } else {
+            println!("READY PostgreSQL publication/slot drasi_trace_demo; wait for its slot to be active before inserting");
+        }
         println!("TRACES service={SERVICE}; each RESULT prints the trace ID to open in Jaeger");
         println!("DASHBOARD http://127.0.0.1:{dashboard_port}/ scenario={} sampling={}", lab.config.scenario, lab.config.sampling);
         println!("METRICS http://127.0.0.1:{dashboard_port}/metrics");

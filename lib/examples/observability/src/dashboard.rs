@@ -14,7 +14,7 @@ use drasi_lib::observability::{
 };
 use metrics_exporter_prometheus::PrometheusHandle;
 use serde_json::{json, Value};
-use std::{future::IntoFuture, path::PathBuf, sync::Arc, time::Duration};
+use std::{future::IntoFuture, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 
 #[derive(Clone)]
@@ -22,10 +22,9 @@ pub struct DashboardState {
     pub metrics: PrometheusHandle,
     pub logging: ComponentLogRuntime,
     pub spans: NativeSpanCollector,
-    pub plugin: PathBuf,
-    pub capabilities: u32,
     pub lab: Arc<super::scenarios::Lab>,
     pub jaeger: String,
+    pub postgres_command: Option<String>,
 }
 
 pub struct Dashboard {
@@ -100,12 +99,21 @@ async fn metric_text(
 
 async fn logs(State(state): State<DashboardState>) -> Json<Vec<Value>> {
     let mut logs = Vec::new();
-    for source in ["http", "postgres"] {
-        let key = ComponentLogKey::new(
-            super::INSTANCE,
-            ComponentLogType::Transformer,
-            format!("{source}-inspect"),
-        );
+    let source = state.lab.config.source();
+    let mut components = vec![
+        (ComponentLogType::Source, source.to_owned()),
+        (ComponentLogType::Query, format!("{source}-query")),
+    ];
+    if state.lab.config.scenario == "latency" {
+        components.extend([
+            (ComponentLogType::Sink, "http-fast".into()),
+            (ComponentLogType::Sink, "http-slow".into()),
+        ]);
+    } else {
+        components.push((ComponentLogType::Sink, format!("{source}-output")));
+    }
+    for (kind, component) in components {
+        let key = ComponentLogKey::new(super::INSTANCE, kind, component);
         for message in state.logging.registry().get_history_by_key(&key).await {
             let trace = message
                 .metadata
@@ -137,8 +145,7 @@ async fn status(State(state): State<DashboardState>) -> Json<Value> {
         "jaeger": state.jaeger,
         "sampling": state.lab.config.sampling,
         "config": state.lab.config.json(),
-        "plugin_path": state.plugin.display().to_string(),
-        "plugin_capabilities": state.capabilities,
+        "postgres_command": state.postgres_command,
         "span_buffer": match retained {
             Ok((records, bytes)) => json!({"records": records, "bytes": bytes}),
             Err(error) => json!({"error": error.to_string()}),

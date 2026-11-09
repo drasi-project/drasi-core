@@ -8,7 +8,7 @@ if [[ "${1:-}" == --suite-smoke ]]; then
     [[ $# -eq 1 ]] || { printf '%s\n' '--suite-smoke takes no other arguments.' >&2; exit 2; }
     for variant in follow controls controls-never controls-no-traces controls-basic \
         controls-persistence controls-off controls-no-metrics controls-no-logs controls-excluded \
-        latency latency-never latency-no-traces; do
+        latency latency-never latency-no-traces postgres; do
         scenario=controls; profile=debug; sampling=always; tracing=true; metrics=true; logs=info; exclusion=""
         case "$variant" in
             follow) scenario=follow ;;
@@ -24,6 +24,7 @@ if [[ "${1:-}" == --suite-smoke ]]; then
             latency) scenario=latency ;;
             latency-never) scenario=latency; sampling=never ;;
             latency-no-traces) scenario=latency; tracing=false ;;
+            postgres) scenario=postgres ;;
         esac
         printf '\n=== %s ===\n' "$variant"
         DEMO_SCENARIO="$scenario" TELEMETRY_PROFILE="$profile" TRACE_SAMPLING="$sampling" \
@@ -42,14 +43,14 @@ case "$1" in
         [[ $# -ge 2 ]] || { printf '%s\n' '--scenario requires a value.' >&2; exit 2; }
         scenario="$2"; shift 2 ;;
     --help)
-        printf 'Usage: bash %s [--smoke] [--scenario follow|controls|latency]\n       bash %s --suite-smoke\n' "$0" "$0"
+        printf 'Usage: bash %s [--smoke] [--scenario follow|controls|latency|postgres]\n       bash %s --suite-smoke\n' "$0" "$0"
         printf '%s\n' 'Start, seed, and verify the demo; Ctrl-C cleans up. --smoke exits after verification.'
         exit 0
         ;;
     *) printf 'Unknown argument: %s\n' "$1" >&2; exit 2 ;;
 esac
 done
-case "$scenario" in follow|controls|latency) ;; *) printf '%s\n' 'Unknown demo scenario.' >&2; exit 2 ;; esac
+case "$scenario" in follow|controls|latency|postgres) ;; *) printf '%s\n' 'Unknown demo scenario.' >&2; exit 2 ;; esac
 export DEMO_SCENARIO="$scenario"
 
 directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -60,6 +61,11 @@ pg_port="${PGPORT:-15437}"
 jaeger_port="${JAEGER_UI_PORT:-16689}"
 otlp_port="${OTLP_HTTP_PORT:-14318}"
 telemetry_port="${TELEMETRY_PORT:-19091}"
+input_source=http
+[[ "$scenario" != postgres ]] || input_source=postgres
+postgres_name="drasi-otel-demo-postgres-$pg_port"
+jaeger_name="drasi-otel-demo-jaeger-$jaeger_port"
+export DEMO_POSTGRES_CONTAINER="$postgres_name" CONTAINER_ENGINE="$engine"
 sampling="${TRACE_SAMPLING:-always}"
 profile="${TELEMETRY_PROFILE:-debug}"
 tracing="${TRACE_ENABLED:-true}"
@@ -73,43 +79,36 @@ esac
 target="${CARGO_TARGET_DIR:-"$root/target"}"
 case "$target" in /*) ;; *) target="$PWD/$target" ;; esac
 
-for command in "$engine" cargo curl openssl python3; do
+commands=("$engine" cargo curl python3)
+[[ "$scenario" != postgres ]] || commands+=(openssl)
+for command in "${commands[@]}"; do
     command -v "$command" >/dev/null || {
         printf 'Required command is missing: %s\n' "$command" >&2
         exit 1
     }
 done
 "$engine" info >/dev/null
-for name in drasi-otel-demo-postgres drasi-otel-demo-jaeger; do
+containers=("$jaeger_name")
+[[ "$scenario" != postgres ]] || containers+=("$postgres_name")
+for name in "${containers[@]}"; do
     if "$engine" container inspect "$name" >/dev/null 2>&1; then
         printf 'Container %s already exists; refusing to replace it.\n' "$name" >&2
         exit 1
     fi
 done
 
-printf '%s\n' 'Building the demo and its separate native plugin (the first build can take a few minutes)...'
-cargo build --manifest-path "$directory/native-plugin/Cargo.toml" --target-dir "$target" --locked --quiet
+printf '%s\n' 'Building the source-query-reaction demo (the first build can take a few minutes)...'
 cargo build --manifest-path "$directory/Cargo.toml" --target-dir "$target" --locked --quiet
-plugin_name="$(python3 - <<'PY'
-import sys
-print("drasi_observability_demo_plugin.dll" if sys.platform == "win32" else
-      "libdrasi_observability_demo_plugin.dylib" if sys.platform == "darwin" else
-      "libdrasi_observability_demo_plugin.so")
-PY
-)"
-plugin="$target/debug/$plugin_name"
-if [[ ! -f "$plugin" ]]; then
-    printf 'Native demo plugin was not built at %s.\n' "$plugin" >&2
-    exit 1
-fi
 
-python3 - "$http_port" "$pg_port" "$jaeger_port" "$otlp_port" "$telemetry_port" <<'PY'
+ports=("JAEGER_UI_PORT:$jaeger_port" "OTLP_HTTP_PORT:$otlp_port" "TELEMETRY_PORT:$telemetry_port")
+if [[ "$scenario" == postgres ]]; then ports+=("PGPORT:$pg_port"); else ports+=("HTTP_PORT:$http_port"); fi
+python3 - "${ports[@]}" <<'PY'
 import socket
 import sys
 
-names = ["HTTP_PORT", "PGPORT", "JAEGER_UI_PORT", "OTLP_HTTP_PORT", "TELEMETRY_PORT"]
 ports = []
-for name, raw in zip(names, sys.argv[1:]):
+for setting in sys.argv[1:]:
+    name, raw = setting.split(":", 1)
     try:
         port = int(raw)
         if not 1 <= port <= 65535:
@@ -204,42 +203,53 @@ wait_for() {
     fail "Timed out waiting for $description."
 }
 
-printf '%s\n' 'Starting isolated PostgreSQL and Jaeger containers...'
+password=""
+if [[ "$scenario" == postgres ]]; then
+printf '%s\n' 'Starting the optional PostgreSQL CDC database...'
 password="$(openssl rand -hex 24)"
 POSTGRES_PASSWORD="$password" "$engine" create --cidfile "$state/postgres.cid" \
-    --name drasi-otel-demo-postgres --env POSTGRES_PASSWORD \
+    --name "$postgres_name" --env POSTGRES_PASSWORD \
     --publish "127.0.0.1:$pg_port:5432" docker.io/library/postgres:15-alpine \
     -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10 >/dev/null
 postgres="$(cat "$state/postgres.cid")"
 "$engine" start "$postgres" >/dev/null
-"$engine" create --cidfile "$state/jaeger.cid" --name drasi-otel-demo-jaeger \
-    --publish "127.0.0.1:$jaeger_port:16686" --publish "127.0.0.1:$otlp_port:4318" \
-    cr.jaegertracing.io/jaegertracing/jaeger:2.22.0 >/dev/null
-jaeger="$(cat "$state/jaeger.cid")"
-"$engine" start "$jaeger" >/dev/null
-jaeger_url="http://127.0.0.1:$jaeger_port"
 wait_for PostgreSQL "$engine" exec "$postgres" pg_isready -U postgres
-wait_for Jaeger curl --fail --silent --show-error --max-time 2 "$jaeger_url/api/v3/services"
 "$engine" exec -i "$postgres" psql -U postgres -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
 CREATE TABLE trace_items (id INTEGER PRIMARY KEY, name TEXT NOT NULL, value INTEGER NOT NULL);
 ALTER TABLE trace_items REPLICA IDENTITY FULL;
 CREATE PUBLICATION drasi_trace_demo FOR TABLE trace_items;
 SQL
+fi
+printf '%s\n' 'Starting Jaeger for the selected single-source demo...'
+"$engine" create --cidfile "$state/jaeger.cid" --name "$jaeger_name" \
+    --publish "127.0.0.1:$jaeger_port:16686" --publish "127.0.0.1:$otlp_port:4318" \
+    cr.jaegertracing.io/jaegertracing/jaeger:2.22.0 >/dev/null
+jaeger="$(cat "$state/jaeger.cid")"
+"$engine" start "$jaeger" >/dev/null
+jaeger_url="http://127.0.0.1:$jaeger_port"
+wait_for Jaeger curl --fail --silent --show-error --max-time 2 "$jaeger_url/api/v3/services"
 
 PGPASSWORD="$password" PGPORT="$pg_port" HTTP_PORT="$http_port" \
     TELEMETRY_PORT="$telemetry_port" TRACE_SAMPLING="$sampling" \
-    DEMO_PLUGIN_PATH="$plugin" JAEGER_URL="$jaeger_url" \
+    JAEGER_URL="$jaeger_url" \
     OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="http://127.0.0.1:$otlp_port/v1/traces" \
     "$target/debug/drasi-source-traces-example" >"$log" 2>&1 &
 app_pid=$!
-wait_for 'HTTP source' curl --fail --silent --show-error --max-time 2 "http://127.0.0.1:$http_port/health"
+if [[ "$scenario" != postgres ]]; then
+    wait_for 'HTTP source' curl --fail --silent --show-error --max-time 2 "http://127.0.0.1:$http_port/health"
+fi
 telemetry_url="http://127.0.0.1:$telemetry_port"
 wait_for 'telemetry dashboard' curl --fail --silent --show-error --max-time 2 "$telemetry_url/health"
+printf '\nDashboard ready: %s/\nMetrics: %s/metrics\nCorrelated logs: %s/logs\nJaeger: %s/\nService: drasi-observability-demo\n' \
+    "$telemetry_url" "$telemetry_url" "$telemetry_url" "$jaeger_url"
+printf '%s\n' 'Automatic checks are running. Wait for "Demo is live" before sending dashboard events.'
 replication_active() {
     [[ "$("$engine" exec "$postgres" psql -U postgres -At -c \
         "SELECT active FROM pg_replication_slots WHERE slot_name='drasi_trace_demo';")" == t ]]
 }
-wait_for 'active PostgreSQL replication' replication_active
+if [[ "$scenario" == postgres ]]; then
+    wait_for 'active PostgreSQL replication' replication_active
+fi
 action() {
     curl --fail-with-body --silent --show-error --max-time 15 "$telemetry_url/action" \
         --header 'Content-Type: application/json' --data "{\"action\":\"$1\"}"
@@ -250,13 +260,17 @@ if [[ "$scenario" == latency ]]; then
     action pause
 fi
 
-printf '%s\n' 'Sending one real HTTP event and one PostgreSQL insert...'
-curl --fail-with-body --silent --show-error --max-time 10 \
-    "http://127.0.0.1:$http_port/sources/http/events" --header 'Content-Type: application/json' \
-    --data '{"operation":"insert","element":{"type":"node","id":"http-1","labels":["trace_items"],"properties":{"id":1,"name":"HTTP demo","value":7}}}'
-printf '\n'
-"$engine" exec "$postgres" psql -U postgres -v ON_ERROR_STOP=1 -c \
-    "INSERT INTO trace_items VALUES (1, 'PostgreSQL demo', 11);"
+if [[ "$scenario" == postgres ]]; then
+    printf '%s\n' 'Sending one live PostgreSQL insert (not a bootstrap snapshot)...'
+    "$engine" exec "$postgres" psql -U postgres -v ON_ERROR_STOP=1 -c \
+        "INSERT INTO trace_items VALUES (1, 'PostgreSQL demo', 11);"
+else
+    printf '%s\n' 'Sending one real HTTP event (no PostgreSQL source or database)...'
+    curl --fail-with-body --silent --show-error --max-time 10 \
+        "http://127.0.0.1:$http_port/sources/http/events" --header 'Content-Type: application/json' \
+        --data '{"operation":"insert","element":{"type":"node","id":"http-1","labels":["trace_items"],"properties":{"id":1,"name":"HTTP demo","value":7}}}'
+    printf '\n'
+fi
 if [[ "$scenario" == latency ]]; then
     wait_for 'fast handling without slow completion' python3 "$directory/verify_scenarios.py" --url "$telemetry_url" --check paused-seed
     python3 "$directory/verify_scenarios.py" --url "$telemetry_url" --check paused-seed
@@ -269,7 +283,7 @@ trace_id() {
     }' "$log"
 }
 has_trace_id() { [[ -n "$(trace_id "$1")" ]]; }
-for source in http postgres; do
+for source in "$input_source"; do
     wait_for "$source callback" has_trace_id "$source"
     trace="$(trace_id "$source")"
     if [[ "$sampling" == always && "$tracing" == true ]]; then
@@ -279,15 +293,29 @@ for source in http postgres; do
         printf 'NO EXPORT %s: context=%s tracing=%s sampling=%s; no Jaeger event trace is expected.\n' "$source" "$trace" "$tracing" "$sampling"
     fi
 done
-wait_for 'native metrics and correlated logs' python3 "$directory/verify_telemetry.py" --url "$telemetry_url" --sampling "$sampling"
+wait_for 'framework metrics and correlated handling logs' python3 "$directory/verify_telemetry.py" --url "$telemetry_url" --sampling "$sampling"
 python3 "$directory/verify_telemetry.py" --url "$telemetry_url" --sampling "$sampling"
-python3 "$directory/verify_scenarios.py" --url "$telemetry_url" --exercise
+if [[ "$scenario" == postgres ]]; then
+    action reset
+    for statement in \
+        "INSERT INTO trace_items VALUES (2, 'SQL demo', 7);" \
+        "UPDATE trace_items SET value = 8 WHERE id = 2;" \
+        "DELETE FROM trace_items WHERE id = 2;"; do
+        "$engine" exec "$postgres" psql -U postgres -v ON_ERROR_STOP=1 -c "$statement" >/dev/null
+    done
+    wait_for 'SQL insert/update/delete handling' python3 "$directory/verify_scenarios.py" --url "$telemetry_url" --check actions
+    python3 "$directory/verify_scenarios.py" --url "$telemetry_url" --check actions
+    action reset
+    printf '\nSQL input: %s exec -it %s psql -U postgres\n' "$engine" "$postgres_name"
+else
+    python3 "$directory/verify_scenarios.py" --url "$telemetry_url" --exercise
+fi
 
-printf '\nDashboard: %s\nMetrics: %s/metrics\nCorrelated logs: %s/logs\nJaeger: %s\nService: drasi-source-traces\n' \
+printf '\nDashboard: %s\nMetrics: %s/metrics\nCorrelated logs: %s/logs\nJaeger: %s\nService: drasi-observability-demo\n' \
     "$telemetry_url" "$telemetry_url" "$telemetry_url" "$jaeger_url"
 cat "$log"
 if [[ "$smoke" -eq 1 ]]; then exit 0; fi
-printf '\n%s\n' 'Demo is live. Open either trace URL above. Press Ctrl-C to stop and clean up.'
+printf '\n%s\n' 'Demo is live. Open its trace links above. Press Ctrl-C to stop and clean up.'
 if wait "$app_pid"; then
     app_pid=""
 else

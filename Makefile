@@ -7,6 +7,7 @@ RUSTFLAGS := -Dwarnings
 
 .PHONY: clippy clippy-fix help build-test-plugins test-host-sdk check-native-dependencies \
        build-native-context-fixtures test-native-context observability-demo observability-demo-smoke observability-demo-suite-smoke \
+       observability-demo-controls observability-demo-latency observability-demo-postgres observability-demo-postgres-smoke \
        build-native-telemetry-fixtures test-native-telemetry \
        build-native-plugins build-native-standard-plugins build-native-network-plugins build-native-mysql-plugins build-native-postgres-plugins build-native-sqlite-plugins test-native-network test-native-mysql test-native-sqlite \
        build-plugins build-plugins-release list-plugins \
@@ -22,7 +23,11 @@ help:
 	@echo "  test-host-sdk             - Build test plugins and run host-sdk integration tests"
 	@echo "  test-native-context       - Build SDK-only context fixtures and qualify the native context ABI"
 	@echo "  test-native-telemetry     - Build real SDK libraries and qualify shared telemetry"
-	@echo "  observability-demo        - Run native telemetry demo with dashboard/Jaeger; Ctrl-C cleans up"
+	@echo "  observability-demo        - Run the main HTTP-only telemetry demo; Ctrl-C cleans up"
+	@echo "  observability-demo-controls - Run HTTP-only signal controls"
+	@echo "  observability-demo-latency - Run HTTP-only fast/slow handled-branch latency"
+	@echo "  observability-demo-postgres - Run the optional PostgreSQL-only CDC demo"
+	@echo "  observability-demo-postgres-smoke - Verify optional PostgreSQL CDC and clean up"
 	@echo "  observability-demo-smoke  - Verify demo traces/metrics/logs and clean up automatically"
 	@echo "  observability-demo-suite-smoke - Verify all three scenarios and the signal-policy matrix"
 	@echo "  build-native-plugins      - Build all native plugin libraries (host-loaded, no query engine dependency)"
@@ -153,6 +158,18 @@ observability-demo:
 
 observability-demo-smoke:
 	bash lib/examples/observability/demo.sh --smoke
+
+observability-demo-controls:
+	bash lib/examples/observability/demo.sh --scenario controls
+
+observability-demo-latency:
+	bash lib/examples/observability/demo.sh --scenario latency
+
+observability-demo-postgres:
+	bash lib/examples/observability/demo.sh --scenario postgres
+
+observability-demo-postgres-smoke:
+	bash lib/examples/observability/demo.sh --scenario postgres --smoke
 
 observability-demo-suite-smoke:
 	bash lib/examples/observability/demo.sh --suite-smoke

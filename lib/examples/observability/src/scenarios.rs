@@ -40,8 +40,11 @@ impl Config {
         }
         let scenario = super::setting("DEMO_SCENARIO", "follow")?;
         ensure!(
-            matches!(scenario.as_str(), "follow" | "controls" | "latency"),
-            "DEMO_SCENARIO must be follow, controls, or latency"
+            matches!(
+                scenario.as_str(),
+                "follow" | "controls" | "latency" | "postgres"
+            ),
+            "DEMO_SCENARIO must be follow, controls, latency, or postgres"
         );
         let profile = super::setting("TELEMETRY_PROFILE", "debug")?;
         let parsed: TelemetryProfile = profile.parse()?;
@@ -65,6 +68,14 @@ impl Config {
             "latency requires metrics and no metric exclusions; tracing may be disabled"
         );
         Ok(config)
+    }
+
+    pub fn source(&self) -> &'static str {
+        if self.scenario == "postgres" {
+            "postgres"
+        } else {
+            "http"
+        }
     }
 
     pub fn settings(&self) -> Result<TelemetrySettings> {
@@ -96,6 +107,7 @@ impl Config {
     pub fn json(&self) -> Value {
         json!({
             "scenario": self.scenario, "profile": self.profile,
+            "source": self.source(),
             "sampling": self.sampling, "tracing": self.tracing,
             "metrics": self.metrics, "log_level": self.logs,
             "metric_exclusion": self.exclusion,
@@ -331,7 +343,11 @@ impl Lab {
         let components = if self.config.scenario == "latency" {
             vec!["http-fast", "http-slow"]
         } else {
-            vec!["http-output"]
+            vec![if self.config.source() == "postgres" {
+                "postgres-output"
+            } else {
+                "http-output"
+            }]
         };
         Ok(components
             .into_iter()
@@ -350,6 +366,10 @@ impl Lab {
         ensure!(
             !self.closing.load(Ordering::Acquire),
             "demo is shutting down"
+        );
+        ensure!(
+            self.config.source() != "postgres" || action == "reset",
+            "the PostgreSQL demo takes input through SQL, not HTTP dashboard actions"
         );
         if matches!(action, "pause" | "release") {
             ensure!(
@@ -518,6 +538,25 @@ mod tests {
             },
         );
         assert_eq!(lab.targets(&Session::default()).unwrap()["http-slow"], 1);
+    }
+
+    #[tokio::test]
+    async fn optional_postgres_has_only_its_own_observation_and_no_http_actions() {
+        let lab = lab("postgres");
+        assert_eq!(lab.config.source(), "postgres");
+        assert_eq!(lab.config.json()["source"], "postgres");
+        assert_eq!(
+            lab.targets(&Session::default()).unwrap(),
+            [("postgres-output".into(), 0)].into()
+        );
+        assert!(lab
+            .action("insert")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("SQL"));
+        assert!(lab.action("prepare").await.is_err());
+        assert!(lab.action("reset").await.is_ok());
     }
 
     #[test]

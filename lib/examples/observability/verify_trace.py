@@ -30,6 +30,9 @@ def count(span, key, expected):
 
 
 def verify(data, source, trace_id, profile="debug", scenario="follow"):
+    for resource in data["result"]["resourceSpans"]:
+        identity = {entry["key"]: entry["value"] for entry in resource["resource"].get("attributes", [])}
+        require(identity.get("service.name", {}).get("stringValue") == "drasi-observability-demo", "wrong exported service.name")
     spans = [
         span
         for resource in data["result"]["resourceSpans"]
@@ -41,12 +44,11 @@ def verify(data, source, trace_id, profile="debug", scenario="follow"):
     outputs = ["http-fast", "http-slow"] if latency else [f"{source}-output"]
     expected = Counter({
         "source.publish": 1,
-        "component.process": 2,
+        "component.process": 1,
         "query.evaluate": 1,
         "query.commit": 1,
-        "pipe.send": 4 if latency else 3,
-        "component.confirm_outputs": 2,
-        "plugin.inspect": 1,
+        "pipe.send": 1 + len(outputs),
+        "component.confirm_outputs": 1,
         "sink.handle": len(outputs),
     })
     if profile != "debug":
@@ -68,8 +70,6 @@ def verify(data, source, trace_id, profile="debug", scenario="follow"):
         require(len(matching) == 1, f"expected one {name} for {component}")
         return matching[0]
     processing = component_span("component.process", f"{source}-query")
-    inspection = component_span("component.process", f"{source}-inspect")
-    native = one["plugin.inspect"]
     handlers = [component_span("sink.handle", component) for component in outputs]
     require(not publication.get("parentSpanId"), "source publication must be the trace root")
     require(text(publication, "component_id") == source, "wrong source identity")
@@ -78,33 +78,25 @@ def verify(data, source, trace_id, profile="debug", scenario="follow"):
     if profile == "debug":
         for name in ["query.evaluate", "query.commit"]:
             require(one[name].get("parentSpanId") == processing["spanId"], f"wrong {name} parent")
-    require(inspection.get("parentSpanId") == processing["spanId"], "native processing is not connected to the query")
-    require(native.get("parentSpanId") == inspection["spanId"], "plugin span is not a child of native processing")
-    require(text(native, "component_id") == f"{source}-inspect", "native span lost its host identity")
-    require(text(native, "plugin_kind") == "drasi-demo-inspector", "wrong native plugin identity")
     if profile == "debug":
-        for component, parent in [(f"{source}-query", processing), (f"{source}-inspect", inspection)]:
-            require(component_span("component.confirm_outputs", component).get("parentSpanId") == parent["spanId"], f"wrong confirmation parent for {component}")
+        require(component_span("component.confirm_outputs", f"{source}-query").get("parentSpanId") == processing["spanId"], "wrong query confirmation parent")
         require(
             Counter(span.get("parentSpanId") for span in spans if span["name"] == "pipe.send")
-            == Counter([publication["spanId"], processing["spanId"]] + [native["spanId"]] * len(outputs)),
+            == Counter([publication["spanId"]] + [processing["spanId"]] * len(outputs)),
             "wrong pipe acceptance parents",
         )
     for handling in handlers:
-        require(handling.get("parentSpanId") == native["spanId"], "handled callback did not inherit plugin output context")
+        require(handling.get("parentSpanId") == processing["spanId"], "reaction handling did not inherit query output context")
         require(text(handling, "completion") == "handled", "sink only confirms acceptance")
         require(text(handling, "component_kind") == "reaction", "wrong sink semantic identity")
         count(handling, "input_count", 1)
+        count(handling, "change_count", rows)
     count(publication, "output_count", 1)
     count(processing, "input_count", 1)
     count(processing, "output_count", 1)
-    count(inspection, "input_count", 1)
-    count(inspection, "output_count", 1)
     if profile == "debug":
         count(one["query.evaluate"], "change_count", 1)
         count(one["query.evaluate"], "result_change_count", rows)
-    count(native, "record_images", rows)
-    require(int(attributes(native).get("record_bytes", {}).get("intValue", "0")) > 0, "native byte inspection missing")
     return len(spans)
 
 
@@ -115,7 +107,7 @@ def main():
     parser.add_argument("--jaeger", default="http://127.0.0.1:16689")
     parser.add_argument("--file", type=Path, help="verify an archived Jaeger v3 response instead")
     parser.add_argument("--profile", choices=["basic", "debug", "persistence"], default="debug")
-    parser.add_argument("--scenario", choices=["follow", "controls", "latency"], default="follow")
+    parser.add_argument("--scenario", choices=["follow", "controls", "latency", "postgres"], default="follow")
     args = parser.parse_args()
     trace_id = args.trace_id.lower()
     if not re.fullmatch(r"[0-9a-f]{32}", trace_id):

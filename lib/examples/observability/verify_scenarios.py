@@ -30,7 +30,8 @@ def check(state, metrics, phase):
     config = state["config"]
     baseline = state["baseline_metrics"]
     latency = config["scenario"] == "latency"
-    components = ["http-fast", "http-slow"] if latency else ["http-output"]
+    source = config["source"]
+    components = ["http-fast", "http-slow"] if latency else [f"{source}-output"]
     expected = 1 if phase == "paused-seed" else (4 if latency else 3)
     require(state["paused"] == phase.startswith("paused"), "wrong pause state")
     for component in components:
@@ -42,7 +43,7 @@ def check(state, metrics, phase):
             samples = delta(metrics, baseline, "drasi_pipeline_end_to_end_duration_count", component_id=component, query_id="http-query", phase="steady")
             require(samples == completed, f"{component}: latency must observe envelopes, not rows or acceptance")
     if config["metrics"] and not (config["metric_exclusion"] and config["metric_exclusion"] in "drasi.query.events_processed"):
-        require(delta(metrics, baseline, "drasi_query_events_processed", component_id="http-query", query_id="http-query", phase="steady") == expected, "query input envelope count differs")
+        require(delta(metrics, baseline, "drasi_query_events_processed", component_id=f"{source}-query", query_id=f"{source}-query", phase="steady") == expected, "query input envelope count differs")
     if latency:
         require(delta(metrics, baseline, "drasi_query_results_emitted", component_id="http-query", query_id="http-query") == expected * 10, "query result-row count differs")
         if phase == "paused-burst":
@@ -80,6 +81,7 @@ def wait(url, phase):
 
 def exercise(url):
     state = fetch(url, "/scenario")
+    require(state["config"]["source"] == "http", "PostgreSQL input must be exercised through SQL")
     latency = state["config"]["scenario"] == "latency"
     action(url, "reset")
     if latency:

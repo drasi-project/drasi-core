@@ -11,7 +11,7 @@ from verify_trace import verify
 class ScenarioVerificationTests(unittest.TestCase):
     def setUp(self):
         self.state = {
-            "config": {"scenario": "latency", "metrics": True, "metric_exclusion": "", "slow_delay_ms": 300},
+            "config": {"scenario": "latency", "source": "http", "metrics": True, "metric_exclusion": "", "slow_delay_ms": 300},
             "baseline_metrics": "",
             "paused": True,
             "since_reset": {
@@ -62,6 +62,17 @@ class ScenarioVerificationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             sample(metrics, "drasi_query_events_processed", "http-query")
 
+    def test_optional_sql_checks_use_postgres_not_http(self):
+        state = {
+            "config": {"scenario": "postgres", "source": "postgres", "metrics": True, "metric_exclusion": ""},
+            "baseline_metrics": "", "paused": False,
+            "since_reset": {"postgres-output": {"envelopes": 3, "rows": 3}},
+        }
+        metrics = 'drasi_query_events_processed{component_id="postgres-query",query_id="postgres-query",phase="steady"} 3'
+        check(state, metrics, "actions")
+        with self.assertRaisesRegex(ValueError, "query input envelope"):
+            check(state, metrics.replace("postgres-query", "http-query"), "actions")
+
 
 class TraceProfileTests(unittest.TestCase):
     def trace(self):
@@ -81,24 +92,29 @@ class TraceProfileTests(unittest.TestCase):
         spans = [
             span("source.publish", 1, None, component_id="http", output_count=1),
             span("component.process", 2, 1, component_id="http-query", input_count=1, output_count=1),
-            span("component.process", 3, 2, component_id="http-inspect", input_count=1, output_count=1),
-            span("plugin.inspect", 4, 3, component_id="http-inspect", plugin_kind="drasi-demo-inspector", record_images=1, record_bytes=42),
-            span("sink.handle", 5, 4, component_id="http-output", component_kind="reaction", completion="handled", input_count=1),
+            span("sink.handle", 3, 2, component_id="http-output", component_kind="reaction", completion="handled", input_count=1, change_count=1),
         ]
-        return {"result": {"resourceSpans": [{"scopeSpans": [{"spans": spans}]}]}}, trace_id
+        resource = {"attributes": [{"key": "service.name", "value": {"stringValue": "drasi-observability-demo"}}]}
+        return {"result": {"resourceSpans": [{"resource": resource, "scopeSpans": [{"spans": spans}]}]}}, trace_id
 
     def test_basic_and_persistence_have_basic_not_debug_spans(self):
         data, trace_id = self.trace()
         for profile in ["basic", "persistence"]:
             with self.subTest(profile=profile):
-                self.assertEqual(verify(data, "http", trace_id, profile, "controls"), 5)
+                self.assertEqual(verify(data, "http", trace_id, profile, "controls"), 3)
         with self.assertRaisesRegex(ValueError, "span counts"):
             verify(data, "http", trace_id, "debug", "controls")
 
-    def test_native_output_parentage_remains_required(self):
+    def test_reaction_inherits_query_output_context(self):
         data, trace_id = self.trace()
-        data["result"]["resourceSpans"][0]["scopeSpans"][0]["spans"][-1]["parentSpanId"] = "2".zfill(16)
-        with self.assertRaisesRegex(ValueError, "plugin output context"):
+        data["result"]["resourceSpans"][0]["scopeSpans"][0]["spans"][-1]["parentSpanId"] = "1".zfill(16)
+        with self.assertRaisesRegex(ValueError, "query output context"):
+            verify(data, "http", trace_id, "basic", "controls")
+
+    def test_exported_service_name_is_verified(self):
+        data, trace_id = self.trace()
+        data["result"]["resourceSpans"][0]["resource"]["attributes"][0]["value"]["stringValue"] = "old-service"
+        with self.assertRaisesRegex(ValueError, "service.name"):
             verify(data, "http", trace_id, "basic", "controls")
 
 
