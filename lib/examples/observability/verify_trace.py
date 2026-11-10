@@ -52,16 +52,16 @@ def verify(data, source, trace_id, profile="debug", scenario="follow", parent_sp
         "query.prepare_output": 1,
         "query.finalize": 1,
         "pipe.send": 1 + len(outputs),
-        "component.confirm_outputs": 1,
+        "query.confirm_outputs": 1,
         "sink.handle": len(outputs),
     })
     if transformer:
         expected["transformer.process"] = 1
         expected["pipe.send"] += 1
-        expected["component.confirm_outputs"] += 1
+        expected["transformer.confirm_outputs"] = 1
     if profile != "debug":
-        for name in ["query.evaluate", "query.commit", "query.prepare_input", "query.prepare_output", "query.finalize", "pipe.send", "component.confirm_outputs"]:
-            del expected[name]
+        for name in ["query.evaluate", "query.commit", "query.prepare_input", "query.prepare_output", "query.finalize", "pipe.send", "query.confirm_outputs", "transformer.confirm_outputs"]:
+            expected.pop(name, None)
     actual = Counter(span["name"] for span in spans)
     require(actual == expected, f"unexpected span counts: observed {dict(actual)}, expected {dict(expected)}")
     require({span["traceId"] for span in spans} == {trace_id}, "trace IDs differ")
@@ -71,7 +71,7 @@ def verify(data, source, trace_id, profile="debug", scenario="follow", parent_sp
         all(int(span["endTimeUnixNano"]) >= int(span["startTimeUnixNano"]) for span in spans),
         "invalid span timing",
     )
-    one = {span["name"]: span for span in spans if span["name"] not in ["pipe.send", "query.process", "component.confirm_outputs"]}
+    one = {span["name"]: span for span in spans if span["name"] not in ["pipe.send", "query.process"]}
     publication = one["source.publish"]
     def component_span(name, component):
         matching = [span for span in spans if span["name"] == name and text(span, "component_id") == component]
@@ -111,9 +111,9 @@ def verify(data, source, trace_id, profile="debug", scenario="follow", parent_sp
             for before, after in zip(boundaries, boundaries[1:])
         ), "query phase boundaries overlap or are out of order")
     if profile == "debug":
-        require(component_span("component.confirm_outputs", f"{source}-query").get("parentSpanId") == processing["spanId"], "wrong query confirmation parent")
+        require(component_span("query.confirm_outputs", f"{source}-query").get("parentSpanId") == processing["spanId"], "wrong query confirmation parent")
         if transforming:
-            require(component_span("component.confirm_outputs", "http-transform").get("parentSpanId") == transforming["spanId"], "wrong transformer confirmation parent")
+            require(component_span("transformer.confirm_outputs", "http-transform").get("parentSpanId") == transforming["spanId"], "wrong transformer confirmation parent")
         require(
             Counter(span.get("parentSpanId") for span in spans if span["name"] == "pipe.send")
             == Counter([publication["spanId"]] * (2 if transformer else 1) + [processing["spanId"]] * len(outputs)),

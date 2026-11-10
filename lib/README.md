@@ -866,6 +866,12 @@ transformers use `transformer.process`, and bounded service work retains
 callback. Query and transformer processing were previously named `component.process`:
 update span-name filters and saved searches accordingly. Component identities, causal
 parentage, timing boundaries and metric names/labels are unchanged.
+Debug output confirmation similarly uses `query.confirm_outputs` or
+`transformer.confirm_outputs`, with `component.confirm_outputs` retained for
+unclassified components. Update filters that used the generic confirmation name.
+This is the producing component's hook after outgoing acceptance, not proof
+that downstream reactions have completed. The metric operation label remains
+`confirm_outputs`.
 Graph-owned operation spans for components constructed from a registered
 factory specification also include `implementation`, the host-assigned
 implementation name (for example `drasi.standard/arithmetic`). Directly

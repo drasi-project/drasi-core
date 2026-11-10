@@ -117,7 +117,7 @@ path:
 source.publish                    (http)
   pipe.send                       (http)
   transformer.process             (http-transform)
-    component.confirm_outputs     (http-transform)
+    transformer.confirm_outputs   (http-transform)
   pipe.send                       (http-transform)
   query.process                   (http-query)
     query.prepare_input
@@ -126,7 +126,7 @@ source.publish                    (http)
     query.commit
     query.finalize
     pipe.send
-    component.confirm_outputs
+    query.confirm_outputs
     sink.handle                   (http-output; completion=handled)
 ```
 
@@ -142,7 +142,8 @@ source.publish                    (http)
 - `query.commit`: the query's commit operation.
 - `query.finalize`: post-commit bookkeeping and live result/output preparation.
 - `pipe.send`: downstream acceptance, distinct from handling.
-- `component.confirm_outputs`: each producing component's own output confirmation.
+- `transformer.confirm_outputs` / `query.confirm_outputs`: the producing
+  component's hook after outgoing acceptance, not downstream reaction completion.
 - `sink.handle`: the actual application reaction.
 - Component identities, parentage, successful outcomes, and durations.
 

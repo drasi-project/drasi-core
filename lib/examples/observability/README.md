@@ -120,7 +120,7 @@ The current Debug trace has **14 spans**:
 source.publish                         (http)
   pipe.send                            (http)
   transformer.process                  (http-transform)
-    component.confirm_outputs          (http-transform)
+    transformer.confirm_outputs        (http-transform)
   pipe.send                            (http-transform)
   query.process                        (http-query)
     query.prepare_input
@@ -129,7 +129,7 @@ source.publish                         (http)
     query.commit
     query.finalize
     pipe.send                          (http-query)
-    component.confirm_outputs          (http-query)
+    query.confirm_outputs              (http-query)
     sink.handle                        (http-output; completion=handled)
 ```
 
@@ -166,8 +166,9 @@ Debug adds three bounded child spans to the query's existing processing span:
 | `query.finalize` | Post-commit watermarks, live profiling metadata, result-cache publication and output-envelope preparation |
 
 These are elapsed-time measurement windows, including waits/scheduling during
-that work, **not CPU-time measurements**. Each valid fresh input gets one of each,
-even when it produces many result rows. Basic/Off/Persistence do not collect
+that work, **not CPU-time measurements**. Each sampled, successfully processed
+fresh input in this demo gets one of each, even when it produces many result rows.
+Basic/Off/Persistence do not collect
 these additional spans, and no new metric instruments are added. Outgoing
 context stays attached to `query.process`, so reaction handling does not become
 a child of `query.finalize`.
@@ -402,7 +403,7 @@ Each available event produces one connected trace through the selected source:
 source.publish
   pipe.send (source)
   transformer.process (arithmetic transformer)
-    component.confirm_outputs (transformer)
+    transformer.confirm_outputs (transformer)
   pipe.send (transformer)
   query.process (query)
     query.prepare_input
@@ -411,7 +412,7 @@ source.publish
     query.commit
     query.finalize
     pipe.send
-    component.confirm_outputs
+    query.confirm_outputs
     sink.handle (application reaction, completion=handled)
 ```
 
@@ -434,6 +435,12 @@ callback; `query.evaluate` remains evaluator-only. Transformers use
 Component identities, causal parentage, timing boundaries and metric
 names/labels are unchanged. Update query/transformer span-name filters or saved
 searches that used `component.process`; older traces keep their original names.
+Debug output confirmation follows the producing component's semantic kind:
+`query.confirm_outputs` or `transformer.confirm_outputs`, retaining
+`component.confirm_outputs` only for unclassified components. Update saved
+confirmation-name filters too. These hooks run after outgoing acceptance, not
+after every downstream reaction finishes; the metric operation label remains
+`confirm_outputs`.
 
 Useful framework measurements:
 

@@ -136,6 +136,18 @@ impl ObservedOperation {
             Self::Transform | Self::Continue => "component.process",
             Self::Handle => "sink.handle",
             Self::HandleBatch => "sink.handle_batch",
+            Self::Confirm
+                if scope.and_then(TelemetryScope::semantic_kind)
+                    == Some(ComponentSemanticKind::Query) =>
+            {
+                "query.confirm_outputs"
+            }
+            Self::Confirm
+                if scope.and_then(TelemetryScope::semantic_kind)
+                    == Some(ComponentSemanticKind::Transformer) =>
+            {
+                "transformer.confirm_outputs"
+            }
             Self::Confirm => "component.confirm_outputs",
             Self::Acknowledge => "pipe.acknowledge",
             Self::Start => "component.start",
@@ -1230,6 +1242,16 @@ fn operation_span(
         ObservedOperation::Transform | ObservedOperation::Continue => span!("component.process"),
         ObservedOperation::Handle => span!("sink.handle"),
         ObservedOperation::HandleBatch => span!("sink.handle_batch"),
+        ObservedOperation::Confirm
+            if operation.span_name(scope) == Some("query.confirm_outputs") =>
+        {
+            span!("query.confirm_outputs")
+        }
+        ObservedOperation::Confirm
+            if operation.span_name(scope) == Some("transformer.confirm_outputs") =>
+        {
+            span!("transformer.confirm_outputs")
+        }
         ObservedOperation::Confirm => span!("component.confirm_outputs"),
         ObservedOperation::Acknowledge => span!("pipe.acknowledge"),
         ObservedOperation::Start => span!("component.start"),
@@ -1256,6 +1278,64 @@ mod tests {
     use super::*;
     use crate::observability::{TelemetryOptions, TelemetryProfile, TelemetrySettings};
     use drasi_computation_contracts::{ComponentId, ComponentSemanticKind};
+
+    #[test]
+    fn confirmation_span_names_follow_component_identity() {
+        let operation = ObservedOperation::Confirm;
+        assert_eq!(operation.label(), "confirm_outputs");
+        assert_eq!(operation.span_name(None), Some("component.confirm_outputs"));
+        for profile in [
+            TelemetryProfile::Off,
+            TelemetryProfile::Basic,
+            TelemetryProfile::Debug,
+            TelemetryProfile::Persistence,
+        ] {
+            for (role, kind, expected) in [
+                (
+                    ComponentRole::Query,
+                    ComponentSemanticKind::Query,
+                    "query.confirm_outputs",
+                ),
+                (
+                    ComponentRole::Transformer,
+                    ComponentSemanticKind::Query,
+                    "query.confirm_outputs",
+                ),
+                (
+                    ComponentRole::Transformer,
+                    ComponentSemanticKind::Transformer,
+                    "transformer.confirm_outputs",
+                ),
+                (
+                    ComponentRole::Transformer,
+                    ComponentSemanticKind::Service,
+                    "component.confirm_outputs",
+                ),
+            ] {
+                tracing::subscriber::with_default(tracing_subscriber::registry(), || {
+                    let graph =
+                        TelemetryOptions::new(TelemetrySettings::new(profile).with_metrics(false))
+                            .with_instance_id("instance")
+                            .resolve("graph", None)
+                            .unwrap();
+                    let owner = graph
+                        .observations(ComponentId::try_new("component").unwrap(), role, kind, 1)
+                        .unwrap();
+                    let observation = owner
+                        .begin(operation, &ExecutionContext::default(), Default::default())
+                        .unwrap();
+                    assert_eq!(
+                        observation
+                            .span()
+                            .metadata()
+                            .map(|metadata| metadata.name()),
+                        (profile == TelemetryProfile::Debug).then_some(expected),
+                        "{profile:?} {role:?} {kind:?}",
+                    );
+                });
+            }
+        }
+    }
 
     #[test]
     fn processing_span_names_follow_component_identity() {

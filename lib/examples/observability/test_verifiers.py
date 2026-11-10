@@ -118,7 +118,7 @@ class TraceProfileTests(unittest.TestCase):
                 span("query.commit", 6, 2),
                 span("pipe.send", 7, 1, component_id="http"),
                 span("pipe.send", 8, 2, component_id="http-query"),
-                span("component.confirm_outputs", 9, 2, component_id="http-query"),
+                span("query.confirm_outputs", 9, 2, component_id="http-query"),
                 span("query.prepare_input", 12, 2, component_id="http-query"),
                 span("query.prepare_output", 13, 2, component_id="http-query"),
                 span("query.finalize", 14, 2, component_id="http-query"),
@@ -139,7 +139,7 @@ class TraceProfileTests(unittest.TestCase):
             if transformer:
                 spans.extend([
                     span("pipe.send", 10, 1, component_id="http-transform"),
-                    span("component.confirm_outputs", 11, 4, component_id="http-transform"),
+                    span("transformer.confirm_outputs", 11, 4, component_id="http-transform"),
                 ])
         resource = {"attributes": [{"key": "service.name", "value": {"stringValue": "drasi-observability-demo"}}]}
         return {"result": {"resourceSpans": [{"resource": resource, "scopeSpans": [{"spans": spans}]}]}}, trace_id
@@ -204,10 +204,26 @@ class TraceProfileTests(unittest.TestCase):
     def test_transformer_confirmation_has_its_own_processing_parent(self):
         data, trace_id = self.trace(transformer=True, debug=True)
         spans = data["result"]["resourceSpans"][0]["scopeSpans"][0]["spans"]
-        next(span for span in spans if span["name"] == "component.confirm_outputs" and
+        next(span for span in spans if span["name"] == "transformer.confirm_outputs" and
              text(span, "component_id") == "http-transform")["parentSpanId"] = "2".zfill(16)
         with self.assertRaisesRegex(ValueError, "transformer confirmation parent"):
             verify(data, "http", trace_id, "debug", "follow")
+
+    def test_query_confirmation_has_its_own_processing_parent(self):
+        data, trace_id = self.trace(debug=True)
+        spans = data["result"]["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        next(span for span in spans if span["name"] == "query.confirm_outputs")["parentSpanId"] = "4".zfill(16)
+        with self.assertRaisesRegex(ValueError, "query confirmation parent"):
+            verify(data, "http", trace_id, "debug")
+
+    def test_generic_confirmation_name_is_rejected_for_query_and_transformer(self):
+        for name in ["query.confirm_outputs", "transformer.confirm_outputs"]:
+            with self.subTest(name=name):
+                data, trace_id = self.trace(debug=True)
+                spans = data["result"]["resourceSpans"][0]["scopeSpans"][0]["spans"]
+                next(span for span in spans if span["name"] == name)["name"] = "component.confirm_outputs"
+                with self.assertRaisesRegex(ValueError, "span counts"):
+                    verify(data, "http", trace_id, "debug")
 
     def test_transformer_uses_its_own_span_name_and_registered_implementation(self):
         data, trace_id = self.trace()

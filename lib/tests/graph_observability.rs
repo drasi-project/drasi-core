@@ -173,6 +173,7 @@ async fn directly_constructed_query_uses_real_evaluator_and_commit_boundaries() 
         "query.prepare_output",
         "query.commit",
         "query.finalize",
+        "query.confirm_outputs",
     ] {
         assert_eq!(
             spans.iter().filter(|span| span.name == name).count(),
@@ -181,6 +182,16 @@ async fn directly_constructed_query_uses_real_evaluator_and_commit_boundaries() 
         );
     }
     assert!(!spans.iter().any(|span| span.name == "component.process"));
+    assert!(!spans
+        .iter()
+        .any(|span| span.name == "component.confirm_outputs"));
+    assert_eq!(
+        metrics.count(
+            "drasi.component.calls",
+            &[("component_id", "query"), ("operation", "confirm_outputs")]
+        ),
+        1
+    );
     let evaluation = spans
         .iter()
         .find(|span| span.name == "query.evaluate")
@@ -866,6 +877,13 @@ async fn burst_case(count: usize, continuation: bool, tracing: bool) {
     );
     assert_eq!(
         metrics.count(
+            "drasi.component.calls",
+            &[("component_id", "transform"), ("operation", "confirm_outputs")]
+        ),
+        attempts as u64
+    );
+    assert_eq!(
+        metrics.count(
             "drasi.component.inputs_processed",
             &[("component_id", "transform"), ("completion", "transformed")]
         ),
@@ -903,7 +921,8 @@ async fn burst_case(count: usize, continuation: bool, tracing: bool) {
     if tracing {
         assert_eq!(number("source.publish"), 1);
         assert_eq!(number("transformer.process"), attempts);
-        assert_eq!(number("component.confirm_outputs"), attempts);
+        assert_eq!(number("transformer.confirm_outputs"), attempts);
+        assert_eq!(number("component.confirm_outputs"), 0);
         assert_eq!(number("pipe.send"), 1 + 2 * produced);
         assert_eq!(number("sink.handle"), 2 * produced);
         assert!(finished
