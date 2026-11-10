@@ -160,7 +160,8 @@ pub fn edge(from: &str, to: &str) -> EdgeDefinition {
 
 pub fn descriptor(id: &str, inputs: &[&str], outputs: &[&str]) -> ComponentDescriptor {
     let mut ports = Vec::new();
-    for (names, direction) in [(inputs, PortDirection::Input), (outputs, PortDirection::Output)] {
+    let directions = [PortDirection::Input, PortDirection::Output];
+    for (names, direction) in [inputs, outputs].into_iter().zip(directions) {
         for name in names {
             ports.push(PortDescriptor::new(
                 port(name),

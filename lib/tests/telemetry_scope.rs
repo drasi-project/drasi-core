@@ -236,7 +236,10 @@ async fn assembly_additions_and_replacement_use_the_owning_graph_policy() {
     assert_eq!(first.len(), 2);
     assert!(first[1].generation > first[0].generation);
     // Framework instruments and the factory probe reuse stable series on replacement.
-    assert_eq!(metrics.registrations().counts().unwrap(), registrations_before_replacement);
+    assert_eq!(
+        metrics.registrations().counts().unwrap(),
+        registrations_before_replacement
+    );
     core.shutdown().await.unwrap();
     logging.shutdown(Duration::from_secs(2)).await.unwrap();
 }

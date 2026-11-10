@@ -102,7 +102,7 @@ fn descriptor(
             Default::default(),
         )],
     )
-    .unwrap()
+    .expect("valid handled-latency component descriptor")
 }
 
 fn input() -> ChangeEnvelope {
@@ -120,7 +120,8 @@ fn input_sequence(sequence: u64) -> ChangeEnvelope {
             properties: ElementPropertyMap::from(serde_json::json!({"name": id})),
         },
     });
-    GraphChangeCodec::encode_changes(&changes, stream("source"), sequence, None).unwrap()
+    GraphChangeCodec::encode_changes(&changes, stream("source"), sequence, None)
+        .expect("encode handled-latency input changes")
 }
 
 async fn query() -> ContinuousQueryTransformer {
@@ -131,12 +132,12 @@ async fn query() -> ContinuousQueryTransformer {
             query: "MATCH (n:Person) RETURN n.name AS name".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: stream("query"),
-            outbox_capacity: NonZeroUsize::new(8).unwrap(),
+            outbox_capacity: NonZeroUsize::new(8).expect("nonzero test outbox capacity"),
         },
         Arc::new(InMemoryComputationProvider),
     )
     .await
-    .unwrap()
+    .expect("construct handled-latency query")
 }
 
 fn options(metrics: &RecordingMetrics, enabled: bool, excluded: bool) -> TelemetryOptions {
@@ -152,7 +153,8 @@ fn options(metrics: &RecordingMetrics, enabled: bool, excluded: bool) -> Telemet
     TelemetryOptions::new(settings)
         .with_instance_id("instance")
         .with_metric_context(
-            MetricRegistrationContext::new(Arc::new(metrics.clone()), Default::default()).unwrap(),
+            MetricRegistrationContext::new(Arc::new(metrics.clone()), Default::default())
+                .expect("valid handled-latency metric context"),
         )
 }
 
@@ -224,10 +226,11 @@ async fn exact_fan_out_duration_is_per_envelope_and_sink_without_tracing() {
         metrics
             .wait_for(|| metrics.histogram(LATENCY, &[("component_id", "a")]).len() == 1)
             .await;
+        let query_label = ("query_id", "query");
         assert_eq!(
             metrics.histogram(
                 LATENCY,
-                &[("component_id", "a"), ("query_id", "query"), ("phase", "steady")]
+                &[("component_id", "a"), query_label, ("phase", "steady")]
             ),
             [0.100]
         );
@@ -391,8 +394,8 @@ pub(crate) async fn native_transformer_pipeline(
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()
-        .unwrap();
-    let run = graph.start().unwrap();
+        .expect("build native handled-latency graph");
+    let run = graph.start().expect("start native handled-latency graph");
     let control = run.control();
     let (result, ()) = tokio::join!(run, async {
         if tokio::time::timeout(Duration::from_secs(10), gate.0.notified())
@@ -434,7 +437,10 @@ pub(crate) async fn native_transformer_pipeline(
         control.cancel();
     });
     assert!(matches!(result, Ok(()) | Err(GraphError::Cancelled)));
-    graph.shutdown().await.unwrap();
+    graph
+        .shutdown()
+        .await
+        .expect("shut down native handled-latency graph");
 }
 
 struct DrivenSource {

@@ -65,10 +65,13 @@ impl RedbConfigurationStore {
         tokio::task::spawn_blocking(move || {
             let transaction = owner.database.begin_read()?;
             let table = transaction.open_table(CURRENT)?;
-            table.iter()?.map(|entry| {
-                let (id, _) = entry?;
-                Ok(id.value().to_owned())
-            }).collect()
+            table
+                .iter()?
+                .map(|entry| {
+                    let (id, _) = entry?;
+                    Ok(id.value().to_owned())
+                })
+                .collect()
         })
         .await
         .context("configuration identity discovery worker failed")?
@@ -587,7 +590,10 @@ mod tests {
             external.close().await?;
         }
         let store = RedbConfigurationStore::new(&path, [17; 32])?;
-        assert_eq!(store.configured_instance_ids().await?, ["external", "first"]);
+        assert_eq!(
+            store.configured_instance_ids().await?,
+            ["external", "first"]
+        );
         for instance in ["first", "external"] {
             assert!(
                 !store

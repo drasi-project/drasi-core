@@ -6,35 +6,14 @@ use anyhow::{Context, Result};
 use drasi_computation_plugin_sdk::{abi, transport, wire};
 use drasi_host_sdk::computation::{self, NativeComponentProxy, NativePlugin};
 use drasi_lib::{computation::v1::*, observability::*};
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
+
+mod fixtures;
+pub use fixtures::fixture;
 
 #[path = "../../../../lib/tests/computation_support/metrics.rs"]
 pub mod metrics;
 pub use metrics::RecordingMetrics;
-
-pub fn fixture(name: &str) -> PathBuf {
-    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("components")
-        .parent()
-        .expect("workspace")
-        .to_path_buf();
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .map(|path| {
-            if path.is_absolute() {
-                path
-            } else {
-                workspace.join(path)
-            }
-        })
-        .unwrap_or_else(|| workspace.join("target"));
-    target.join("debug/examples").join(format!(
-        "{}{name}{}",
-        std::env::consts::DLL_PREFIX,
-        std::env::consts::DLL_SUFFIX
-    ))
-}
 
 pub fn load() -> Result<Arc<NativePlugin>> {
     let path = fixture("telemetry_fixture");
