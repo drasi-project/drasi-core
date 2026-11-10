@@ -166,7 +166,14 @@ async fn directly_constructed_query_uses_real_evaluator_and_commit_boundaries() 
     .with_subscriber(tracing_subscriber::registry().with(spans.clone()))
     .await;
     let spans = spans.0.lock().unwrap();
-    for name in ["query.process", "query.evaluate", "query.commit"] {
+    for name in [
+        "query.process",
+        "query.prepare_input",
+        "query.evaluate",
+        "query.prepare_output",
+        "query.commit",
+        "query.finalize",
+    ] {
         assert_eq!(
             spans.iter().filter(|span| span.name == name).count(),
             1,
@@ -311,7 +318,7 @@ async fn processing_failure_and_cancellation_have_one_local_outcome() {
         let spans = spans.0.lock().unwrap();
         let processing: Vec<_> = spans
             .iter()
-            .filter(|span| span.name == "component.process")
+            .filter(|span| span.name == "transformer.process")
             .collect();
         assert_eq!(processing.len(), 1);
         assert_eq!(
@@ -895,7 +902,7 @@ async fn burst_case(count: usize, continuation: bool, tracing: bool) {
     let number = |name| finished.iter().filter(|span| span.name == name).count();
     if tracing {
         assert_eq!(number("source.publish"), 1);
-        assert_eq!(number("component.process"), attempts);
+        assert_eq!(number("transformer.process"), attempts);
         assert_eq!(number("component.confirm_outputs"), attempts);
         assert_eq!(number("pipe.send"), 1 + 2 * produced);
         assert_eq!(number("sink.handle"), 2 * produced);

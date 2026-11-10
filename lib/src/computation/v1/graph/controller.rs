@@ -3627,6 +3627,13 @@ impl Operations {
                 generation.0,
             )
             .map_err(|error| component_error(&node, "bind operation telemetry", error.into()))?;
+        if let Some(specification) = graph.snapshot.specifications.get(&slot.id) {
+            observations
+                .bind_implementation(&specification.implementation)
+                .map_err(|error| {
+                    component_error(&node, "bind implementation telemetry", error.into())
+                })?;
+        }
         #[cfg(feature = "test-support")]
         if operation == Operation::Start {
             lease

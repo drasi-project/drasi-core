@@ -79,7 +79,7 @@
 </section>
 <section>
   <h2>Traces</h2>
-  <p>Each sampled trace follows source publication, query processing, and actual reaction handling. Click a trace after sending an event.</p>
+  <p>Each sampled trace follows source publication, query processing, and actual reaction handling. Debug splits query processing into input preparation, evaluation, output preparation, commit, and finalization. These are elapsed times, not CPU measurements; orchestration/scheduling/instrumentation can remain between spans. Click a trace after sending an event.</p>
   <div id="traces"></div>
   <p id="no-traces" class="muted">Waiting for an inspected result…</p>
 </section>
@@ -100,7 +100,7 @@
   let configured = false;
   let actionBusy = false;
   const stories = {
-    follow: ["1. Follow one HTTP change", "Insert, update, and delete a node through HTTP → arithmetic transformer → query → application reaction. The transformer doubles the integer value before evaluation. Compare component.process (http-transform) with query.process (http-query). It preserves input trace context, so those processing spans are siblings under source.publish. No PostgreSQL source or database is running."],
+    follow: ["1. Follow one HTTP change", "Insert, update, and delete a node through HTTP → arithmetic transformer → query → application reaction. The transformer doubles the integer value before evaluation. Compare transformer.process (http-transform) with query.process (http-query); inspect implementation=drasi.standard/arithmetic in the transformer's span attributes. It preserves input trace context, so those processing spans are siblings under source.publish. No PostgreSQL source or database is running."],
     controls: ["2. Signal controls", "Run the same workload under different startup policies. Sampling never suppresses metric collection; disabling tracing does not disable logging. Basic removes debug spans; Persistence adds storage metrics to Basic (not Debug), and exclusions remove only matching metrics."],
     latency: ["3. Why is my alert slow?", "One live source input creates ten query result rows and fans out to independent fast and slow handled sinks. Pause the slow sink, send a bounded burst, and release it: queued/accepted work is not handled work. Each fully handled envelope produces one latency observation per sink, not ten."],
     postgres: ["Optional: PostgreSQL CDC", "Insert, update, and delete rows through SQL. Follow one PostgreSQL replication → query → application reaction pipeline. This is a live-change demonstration, not a bootstrap snapshot; no HTTP source is running."],

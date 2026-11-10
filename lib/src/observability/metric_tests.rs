@@ -5,6 +5,7 @@ use super::*;
 use drasi_computation_contracts::{ComponentId, ComponentRole, ComponentSemanticKind};
 use drasi_core::computation::InMemoryComputationProvider;
 use std::{sync::Arc, time::Duration};
+use tracing::instrument::WithSubscriber;
 
 #[path = "../../tests/computation_support/metrics.rs"]
 mod recording;
@@ -33,6 +34,59 @@ fn owner(
         owner.bind_query_metrics().unwrap();
     }
     owner
+}
+
+#[tokio::test]
+async fn query_processing_phases_do_not_add_callback_metrics_or_errors() {
+    let metrics = RecordingMetrics::default();
+    let owner = TelemetryOptions::new(TelemetrySettings::new(TelemetryProfile::Debug))
+        .with_instance_id("phase-metrics")
+        .with_metric_context(
+            MetricRegistrationContext::new(
+                Arc::new(metrics.clone()),
+                RegistrationLimits::default(),
+            )
+            .unwrap(),
+        )
+        .resolve("graph", None)
+        .unwrap()
+        .observations(
+            ComponentId::try_new("query").unwrap(),
+            ComponentRole::Query,
+            ComponentSemanticKind::Query,
+            1,
+        )
+        .unwrap();
+    async {
+        for phase in [
+            QueryProcessingPhase::PrepareInput,
+            QueryProcessingPhase::PrepareOutput,
+            QueryProcessingPhase::Finalize,
+        ] {
+            let result = owner
+                .clone()
+                .query_phase(phase, async {
+                    Err::<(), _>(drasi_core::interface::IndexError::NotSupported)
+                })
+                .await;
+            assert!(result.is_err());
+        }
+    }
+    .with_subscriber(tracing_subscriber::registry())
+    .await;
+    for operation in ["prepare_input", "prepare_output", "finalize_query"] {
+        assert!(metrics
+            .matching("drasi.component.calls", &[("operation", operation)])
+            .is_empty());
+        assert!(metrics
+            .matching(
+                "drasi.component.operation.duration",
+                &[("operation", operation)]
+            )
+            .is_empty());
+    }
+    assert_eq!(metrics.count("drasi.errors", &[]), 0);
+    assert_eq!(metrics.count("drasi.component.inputs_processed", &[]), 0);
 }
 
 #[tokio::test(start_paused = true)]

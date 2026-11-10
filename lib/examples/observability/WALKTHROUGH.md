@@ -42,7 +42,7 @@ also show a copyable curl request for an already-running main demo.
 
 The existing main demo includes a
 [real arithmetic transformer](README.md#transformer-trace-demo) that doubles each integer
-`value` and shows `component.process` for `http-transform` alongside
+`value` and shows `transformer.process` for `http-transform` alongside
 `query.process` for `http-query`, with separate component identities and timings.
 
 The runner automatically sends an HTTP seed event, verifies its trace and
@@ -110,18 +110,21 @@ Do not expect raw cumulative counters to start at zero; they include self-checks
 
 ## 3. Follow the connected trace
 
-With default Debug settings, a fresh insert produces the verified eleven-span
+With default Debug settings, a fresh insert produces the verified fourteen-span
 path:
 
 ```text
 source.publish                    (http)
   pipe.send                       (http)
-  component.process               (http-transform)
+  transformer.process             (http-transform)
     component.confirm_outputs     (http-transform)
   pipe.send                       (http-transform)
   query.process                   (http-query)
+    query.prepare_input
     query.evaluate
+    query.prepare_output
     query.commit
+    query.finalize
     pipe.send
     component.confirm_outputs
     sink.handle                   (http-output; completion=handled)
@@ -130,10 +133,14 @@ source.publish                    (http)
 **Point out:**
 
 - `source.publish`: framework publication of the available source envelope.
-- `component.process`: the arithmetic transformer's actual processing callback.
+- `transformer.process`: the arithmetic transformer's actual processing callback;
+  its `implementation=drasi.standard/arithmetic` attribute identifies the type.
 - `query.process`: the query component's complete transformation callback.
+- `query.prepare_input`: progress validation, decoding and preparation/capacity waits.
 - `query.evaluate`: actual evaluation, not the whole transformation.
+- `query.prepare_output`: projection, serialization and staging result/checkpoint writes.
 - `query.commit`: the query's commit operation.
+- `query.finalize`: post-commit bookkeeping and live result/output preparation.
 - `pipe.send`: downstream acceptance, distinct from handling.
 - `component.confirm_outputs`: each producing component's own output confirmation.
 - `sink.handle`: the actual application reaction.
@@ -150,10 +157,13 @@ Click span details to compare `component_id=http-transform`, `component_id=http-
 The reaction inherits query-output context. Its nesting shows causality, not
 that later reaction handling contributes to the query's processing duration.
 The arithmetic transformer preserves input context on its output, so its
-`component.process` and the query's `query.process` are siblings under
+`transformer.process` and the query's `query.process` are siblings under
 `source.publish`. The data path and span-parent tree are not identical.
-Similarly, evaluation/commit children do not currently explain every interval
-inside `query.process`; do not call the residual time CPU time.
+The three Debug phase windows explain input, output and post-commit work that
+evaluation/commit alone did not cover. They include elapsed waits, not just CPU
+work. Core transaction setup, scheduling and instrumentation can still remain
+between named spans; do not call that residual CPU time or sum overlapping
+bookkeeping commits. Basic/Persistence do not add these phase spans or metrics.
 
 The normal trace starts at framework source publication, not upstream HTTP/network
 work. The optional incoming-trace command supplies an upstream `traceparent`;

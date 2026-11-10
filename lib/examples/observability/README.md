@@ -114,17 +114,20 @@ HTTP workload. No extra source, database, demo inspector or exporter is added.
 The dashboard shows the transformer topology and its actual framework
 input/output counters.
 
-The current Debug trace has **11 spans**:
+The current Debug trace has **14 spans**:
 
 ```text
 source.publish                         (http)
   pipe.send                            (http)
-  component.process                    (http-transform)
+  transformer.process                  (http-transform)
     component.confirm_outputs          (http-transform)
   pipe.send                            (http-transform)
   query.process                        (http-query)
+    query.prepare_input
     query.evaluate
+    query.prepare_output
     query.commit
+    query.finalize
     pipe.send                          (http-query)
     component.confirm_outputs          (http-query)
     sink.handle                        (http-output; completion=handled)
@@ -138,6 +141,12 @@ example/verifier shows this existing behavior rather than reparenting spans
 just for the demo. Component identities, operation timings and counts remain
 separate. Basic/Persistence have four spans, omitting Debug details.
 
+Click `transformer.process` to inspect `component_id=http-transform`,
+`component_kind=transformer` and `implementation=drasi.standard/arithmetic`.
+The operation name stays stable across transformer types; the host-owned
+registered implementation identifies which transformer ran without putting
+instance IDs, configuration or payloads into the span name.
+
 The existing incoming-context command uses this same transformer pipeline:
 
 ```sh
@@ -145,6 +154,43 @@ make observability-demo-incoming-trace
 ```
 
 Use Ctrl-C to stop the runner and clean up before changing scenarios.
+
+## Explain query processing time
+
+Debug adds three bounded child spans to the query's existing processing span:
+
+| Span | Actual work included |
+|---|---|
+| `query.prepare_input` | Progress/checkpoint validation, decoding, output-capacity reservation and non-atomic setup |
+| `query.prepare_output` | Result projection/serialization, identity stamping and staging output/live-result/checkpoint writes |
+| `query.finalize` | Post-commit watermarks, live profiling metadata, result-cache publication and output-envelope preparation |
+
+These are elapsed-time measurement windows, including waits/scheduling during
+that work, **not CPU-time measurements**. Each valid fresh input gets one of each,
+even when it produces many result rows. Basic/Off/Persistence do not collect
+these additional spans, and no new metric instruments are added. Outgoing
+context stays attached to `query.process`, so reaction handling does not become
+a child of `query.finalize`.
+
+The windows are not exhaustive: Core transaction gating/session begin, result/
+transaction orchestration, scheduling and instrumentation/export overhead can
+remain between spans. Duplicate/non-atomic paths can include a bookkeeping
+commit inside preparation or finalization; do not sum overlapping durations.
+Downstream `pipe.send`, confirmation and reaction handling can also finish
+after `query.process`; their causal parentage is not time charged to the query.
+
+A container-free local overhead characterization is available:
+
+```sh
+cargo test -p drasi-lib --lib --features otel-context,computation-rocksdb-tests \
+  --locked --offline query_phase_enabled_overhead_characterization \
+  -- --ignored --nocapture --test-threads=1
+```
+
+It compares enabled detail with those three spans filtered out using a debug
+build, in-memory synchronous export, warmup and interleaved query-loop samples.
+Both paths include phase gating. It is not a before/after production benchmark
+or a universal performance threshold; the live demo uses a different exporter.
 
 ## Continue an upstream trace
 
@@ -155,7 +201,7 @@ make observability-demo-incoming-trace
 This uses the normal main pipeline, with tracing enabled and sampling Always.
 The runner generates a fresh upstream trace ID and parent span ID, prints the
 actual `traceparent` header, and sends it with `tracestate: demo=upstream`.
-It verifies the callback's exact trace ID and all eleven exported Debug spans,
+It verifies the callback's exact trace ID and all fourteen exported Debug spans,
 including `source.publish` parentage and new local span IDs. The upstream span
 itself is not fabricated or exported by Drasi. Normal dashboard actions afterward
 have no headers and create independent traces, not children of the seed.
@@ -270,7 +316,7 @@ That's all. The runner:
 2. Starts a disposable Jaeger container only.
 3. Starts one HTTP source, the arithmetic transformer, its query, an application reaction, and a telemetry dashboard.
 4. Sends one HTTP event.
-5. Verifies its eleven-span trace, framework metrics, and correlated handling logs; exercises insert/update/delete and resets the experiment.
+5. Verifies its fourteen-span trace, framework metrics, and correlated handling logs; exercises insert/update/delete and resets the experiment.
 
 The runner prints the dashboard, metrics, logs, and Jaeger links as soon as the
 dashboard is ready, before automatic verification. Wait for **"Demo is live"**
@@ -355,12 +401,15 @@ Each available event produces one connected trace through the selected source:
 ```text
 source.publish
   pipe.send (source)
-  component.process (arithmetic transformer)
+  transformer.process (arithmetic transformer)
     component.confirm_outputs (transformer)
   pipe.send (transformer)
   query.process (query)
+    query.prepare_input
     query.evaluate
+    query.prepare_output
     query.commit
+    query.finalize
     pipe.send
     component.confirm_outputs
     sink.handle (application reaction, completion=handled)
@@ -369,10 +418,10 @@ source.publish
 The verifier checks exact span counts, parent relationships, identities, numeric
 counts, successful outcomes, and handled completion. Query output carries its
 processing context directly to the application reaction, which remains connected
-even after the query's processing span has finished. A default trace has eleven
+even after the query's processing span has finished. A default trace has fourteen
 spans; Basic/Persistence omit Debug spans and have four. The unchanged direct
-latency pipeline has two sinks and ten Debug spans; optional PostgreSQL has
-eight Debug spans and no arithmetic transformer.
+latency pipeline has two sinks and thirteen Debug spans; optional PostgreSQL has
+eleven Debug spans and no arithmetic transformer.
 
 This follows [computation_runtime](../computation_runtime.rs), statically hosting
 the native SDK sources. There is no separately loaded demo inspector or synthetic
@@ -380,11 +429,11 @@ inspection work. The final application callback records actual handling and logs
 safe result-change counts.
 
 Query components use `query.process` for their complete input-processing
-callback; `query.evaluate` remains evaluator-only. Generic transformers and
-bounded service work retain `component.process`. This is a span-name change
-only: component identities, causal parentage, timing boundaries and metric
-names/labels are unchanged. Update query span-name filters or saved searches
-that used `component.process`; older traces keep their original names.
+callback; `query.evaluate` remains evaluator-only. Transformers use
+`transformer.process`; bounded service work retains `component.process`.
+Component identities, causal parentage, timing boundaries and metric
+names/labels are unchanged. Update query/transformer span-name filters or saved
+searches that used `component.process`; older traces keep their original names.
 
 Useful framework measurements:
 

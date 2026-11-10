@@ -48,16 +48,19 @@ def verify(data, source, trace_id, profile="debug", scenario="follow", parent_sp
         "query.process": 1,
         "query.evaluate": 1,
         "query.commit": 1,
+        "query.prepare_input": 1,
+        "query.prepare_output": 1,
+        "query.finalize": 1,
         "pipe.send": 1 + len(outputs),
         "component.confirm_outputs": 1,
         "sink.handle": len(outputs),
     })
     if transformer:
-        expected["component.process"] = 1
+        expected["transformer.process"] = 1
         expected["pipe.send"] += 1
         expected["component.confirm_outputs"] += 1
     if profile != "debug":
-        for name in ["query.evaluate", "query.commit", "pipe.send", "component.confirm_outputs"]:
+        for name in ["query.evaluate", "query.commit", "query.prepare_input", "query.prepare_output", "query.finalize", "pipe.send", "component.confirm_outputs"]:
             del expected[name]
     actual = Counter(span["name"] for span in spans)
     require(actual == expected, f"unexpected span counts: observed {dict(actual)}, expected {dict(expected)}")
@@ -84,15 +87,29 @@ def verify(data, source, trace_id, profile="debug", scenario="follow", parent_sp
     require(text(publication, "component_id") == source, "wrong source identity")
     require(text(processing, "component_id") == f"{source}-query", "wrong query identity")
     require(processing.get("parentSpanId") == publication["spanId"], "query parent is not publication")
-    transforming = component_span("component.process", "http-transform") if transformer else None
+    transforming = component_span("transformer.process", "http-transform") if transformer else None
     if transforming:
         require(text(transforming, "component_kind") == "transformer", "wrong transformer semantic identity")
+        require(text(transforming, "implementation") == "drasi.standard/arithmetic", "wrong transformer implementation")
         require(transforming.get("parentSpanId") == publication["spanId"], "wrong transformer parent")
         count(transforming, "input_count", 1)
         count(transforming, "output_count", 1)
     if profile == "debug":
         for name in ["query.evaluate", "query.commit"]:
             require(one[name].get("parentSpanId") == processing["spanId"], f"wrong {name} parent")
+        for name in ["query.prepare_input", "query.prepare_output", "query.finalize"]:
+            phase = component_span(name, f"{source}-query")
+            require(phase.get("parentSpanId") == processing["spanId"], f"wrong {name} parent")
+            require(
+                int(processing["startTimeUnixNano"]) <= int(phase["startTimeUnixNano"])
+                <= int(phase["endTimeUnixNano"]) <= int(processing["endTimeUnixNano"]),
+                f"{name} must be inside query.process",
+            )
+        boundaries = ["query.prepare_input", "query.evaluate", "query.prepare_output", "query.commit", "query.finalize"]
+        require(all(
+            int(one[before]["endTimeUnixNano"]) <= int(one[after]["startTimeUnixNano"])
+            for before, after in zip(boundaries, boundaries[1:])
+        ), "query phase boundaries overlap or are out of order")
     if profile == "debug":
         require(component_span("component.confirm_outputs", f"{source}-query").get("parentSpanId") == processing["spanId"], "wrong query confirmation parent")
         if transforming:

@@ -111,7 +111,7 @@ class TraceProfileTests(unittest.TestCase):
             span("sink.handle", 3, 2, component_id="http-output", component_kind="reaction", completion="handled", input_count=1, change_count=1),
         ]
         if transformer:
-            spans.append(span("component.process", 4, 1, component_id="http-transform", component_kind="transformer", input_count=1, output_count=1))
+            spans.append(span("transformer.process", 4, 1, component_id="http-transform", component_kind="transformer", implementation="drasi.standard/arithmetic", input_count=1, output_count=1))
         if debug:
             spans.extend([
                 span("query.evaluate", 5, 2, change_count=1, result_change_count=1),
@@ -119,7 +119,23 @@ class TraceProfileTests(unittest.TestCase):
                 span("pipe.send", 7, 1, component_id="http"),
                 span("pipe.send", 8, 2, component_id="http-query"),
                 span("component.confirm_outputs", 9, 2, component_id="http-query"),
+                span("query.prepare_input", 12, 2, component_id="http-query"),
+                span("query.prepare_output", 13, 2, component_id="http-query"),
+                span("query.finalize", 14, 2, component_id="http-query"),
             ])
+            timings = {
+                "query.process": (1, 100),
+                "query.prepare_input": (2, 10),
+                "query.evaluate": (20, 30),
+                "query.prepare_output": (40, 50),
+                "query.commit": (60, 65),
+                "query.finalize": (70, 80),
+            }
+            for observed in spans:
+                if observed["name"] in timings:
+                    start, end = timings[observed["name"]]
+                    observed["startTimeUnixNano"] = str(start)
+                    observed["endTimeUnixNano"] = str(end)
             if transformer:
                 spans.extend([
                     span("pipe.send", 10, 1, component_id="http-transform"),
@@ -175,7 +191,7 @@ class TraceProfileTests(unittest.TestCase):
                 data, trace_id = self.trace(transformer=True, debug=profile == "debug")
                 self.assertEqual(
                     verify(data, "http", trace_id, profile, "follow"),
-                    11 if profile == "debug" else 4,
+                    14 if profile == "debug" else 4,
                 )
 
     def test_transformer_does_not_rewrite_the_querys_input_parent(self):
@@ -193,13 +209,37 @@ class TraceProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "transformer confirmation parent"):
             verify(data, "http", trace_id, "debug", "follow")
 
+    def test_transformer_uses_its_own_span_name_and_registered_implementation(self):
+        data, trace_id = self.trace()
+        transforming = next(span for span in data["result"]["resourceSpans"][0]["scopeSpans"][0]["spans"]
+                            if span["name"] == "transformer.process")
+        transforming["name"] = "component.process"
+        with self.assertRaisesRegex(ValueError, "span counts"):
+            verify(data, "http", trace_id, "basic")
+        transforming["name"] = "transformer.process"
+        next(field for field in transforming["attributes"] if field["key"] == "implementation")["value"]["stringValue"] = "other/transformer"
+        with self.assertRaisesRegex(ValueError, "transformer implementation"):
+            verify(data, "http", trace_id, "basic")
+
     def test_postgres_keeps_its_direct_pipeline_without_a_transformer(self):
         data, trace_id = self.trace(transformer=False, debug=True)
         for span in data["result"]["resourceSpans"][0]["scopeSpans"][0]["spans"]:
             for entry in span["attributes"]:
                 if entry["key"] == "component_id":
                     entry["value"]["stringValue"] = entry["value"]["stringValue"].replace("http", "postgres")
-        self.assertEqual(verify(data, "postgres", trace_id, "debug", "postgres"), 8)
+        self.assertEqual(verify(data, "postgres", trace_id, "debug", "postgres"), 11)
+
+    def test_query_detail_stays_within_processing_and_preserves_phase_order(self):
+        data, trace_id = self.trace(debug=True)
+        spans = data["result"]["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        finalize = next(span for span in spans if span["name"] == "query.finalize")
+        finalize["endTimeUnixNano"] = "101"
+        with self.assertRaisesRegex(ValueError, "inside query.process"):
+            verify(data, "http", trace_id, "debug")
+        finalize["endTimeUnixNano"] = "80"
+        finalize["startTimeUnixNano"] = "61"
+        with self.assertRaisesRegex(ValueError, "phase boundaries"):
+            verify(data, "http", trace_id, "debug")
 
 
 if __name__ == "__main__":

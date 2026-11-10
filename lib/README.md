@@ -854,23 +854,50 @@ Enabled profiles instrument the owning graph's actual operation boundaries:
 | Detail | Supported spans |
 |---|---|
 | Basic | Source publication, transformer/query processing, single/batch sink handling, bootstrap, scheduled/replay attempts, ordinary reaction workers, start/stop/reconfigure, and control requests |
-| Debug | Inner query evaluation, query-owned commits, pipe acceptance, output confirmation, and supported acknowledgements |
+| Debug | Query input/output preparation and finalization, inner evaluation, query-owned commits, pipe acceptance, output confirmation, and supported acknowledgements |
 
 Publication excludes idle `next()` waiting; batch handling excludes collection.
 Processing excludes later forwarding, confirmation, and acknowledgement. Sink
 completion stays `accepted` or `handled` according to its declared contract.
 Query input processing and input-driven continuations use `query.process`;
-generic transformers and bounded service work retain `component.process`.
+transformers use `transformer.process`, and bounded service work retains
+`component.process`.
 `query.evaluate` measures the evaluator-only boundary, not the full query
-callback. Query processing was previously named `component.process`: update
-span-name filters and saved searches accordingly. Component identities, causal
+callback. Query and transformer processing were previously named `component.process`:
+update span-name filters and saved searches accordingly. Component identities, causal
 parentage, timing boundaries and metric names/labels are unchanged.
+Graph-owned operation spans for components constructed from a registered
+factory specification also include `implementation`, the host-assigned
+implementation name (for example `drasi.standard/arithmetic`). Directly
+constructed components without a registered factory identity omit it; no type
+is guessed from an instance ID or payload. This is a trace attribute, not a
+metric label or part of the span name.
 Ordinary reaction enqueue acceptance is not completed reaction processing.
 Output-only replay does not imply another evaluation. `component.scheduled`
 starts only for an actual bounded future-queue, input-replay or output-replay unit;
 idle wakeups and final empty drain probes have no processing trace. Scheduled
 attempts use new roots, never a stored historical event parent. Real replay
 bookkeeping commits can still have debug spans.
+
+For actual query input processing, Debug adds bounded `query.prepare_input`,
+`query.prepare_output` and `query.finalize` measurement windows around progress/
+checkpoint validation and decoding, result projection/serialization/staging,
+and post-commit cache/watermark/profiling publication respectively. They include
+elapsed async waits, not just CPU work. No per-row spans or additional metric
+instruments are introduced; Basic/Off/Persistence do not collect these phases.
+They preserve the caller's execution context, so live output and downstream
+handling remain causally parented to the processing/scheduled attempt, not its
+last detail span. Unsampled parents are not overridden, and phase detail does
+not create unrelated root traces when no operation context is available.
+
+These phases do not exhaustively account for `query.process`: Core transaction
+gating/session begin, result/transaction orchestration, scheduling, and
+instrumentation/export/boundary overhead can remain between named spans.
+Preparation/finalization can contain their own bookkeeping commit in duplicate
+or non-atomic paths; do not sum overlapping child durations or interpret a
+residual as CPU time. Existing evaluation/commit meanings and metric ownership
+are unchanged. Output-only replay and empty wakeup probes are not reclassified
+as fresh input processing.
 
 `query.bootstrap` is one aggregate root linked to its initiating start operation.
 It includes awaited initialization and completion, with bounded

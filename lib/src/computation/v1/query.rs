@@ -43,6 +43,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     computation::internal::query_state::QueryOutputState,
+    observability::{ComponentObservations, QueryProcessingPhase},
     profiling::{timestamp_ns, ProfilingMetadata},
 };
 
@@ -1267,6 +1268,9 @@ impl ContinuousQueryTransformer {
             anyhow::bail!("query processing is fenced pending recovery");
         }
         let query = self.query()?;
+        let Some((progress, changes, reservations, transaction_deadline)) =
+            ComponentObservations::current_or_disabled()
+                .query_phase(QueryProcessingPhase::PrepareInput, async {
         let ordering = input.envelope.system().ordering();
         if ordering == drasi_core::models::ChangeOrdering::ProducerSequence {
             anyhow::ensure!(
@@ -1361,7 +1365,7 @@ impl ContinuousQueryTransformer {
                     .record_transport(&mut snapshot.transport_sequences);
                 owner.publish(snapshot);
             }
-            return Ok(Vec::new());
+            return Ok(None);
         }
         if query.resources().checkpoint_store().is_some()
             && progress.position.as_ref().is_some_and(|position| {
@@ -1394,6 +1398,17 @@ impl ContinuousQueryTransformer {
             None
         };
         self.begin_non_atomic().await?;
+                    Ok::<_, anyhow::Error>(Some((
+                        progress,
+                        changes,
+                        reservations,
+                        transaction_deadline,
+                    )))
+                })
+                .await?
+        else {
+            return Ok(Vec::new());
+        };
         let prepared = Mutex::new(None);
         let mut profiling = progress.profiling.clone().unwrap_or_default();
         // An input may carry another query's timings; this commit has not completed.
@@ -1406,66 +1421,69 @@ impl ContinuousQueryTransformer {
             let input = &input;
             let progress = &progress;
             let profiling = profiling.clone();
-            async move {
-                let sequence = if results.iter().any(|result| {
-                    !matches!(
-                        result,
-                        drasi_core::evaluation::context::QueryPartEvaluationContext::Noop
+            ComponentObservations::current_or_disabled().query_phase(
+                QueryProcessingPhase::PrepareOutput,
+                async move {
+                    let sequence = if results.iter().any(|result| {
+                        !matches!(
+                            result,
+                            drasi_core::evaluation::context::QueryPartEvaluationContext::Noop
+                        )
+                    }) {
+                        self.next_sequence()
+                            .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?
+                    } else {
+                        0
+                    };
+                    let mut output = QueryChangeCodec::encode_evaluation(
+                        Some(&input.envelope),
+                        &self.definition.id,
+                        SystemMetadata::new(self.definition.output_stream.clone(), sequence)
+                            .with_timestamp(
+                                input.envelope.system().timestamp().unwrap_or_else(Utc::now),
+                            ),
+                        &self.projector,
+                        &results,
+                        QueryOutputMetadata {
+                            query_id: self.definition.id.to_string(),
+                            source_id: Some(progress.source_id.clone()),
+                            timestamp: Utc::now(),
+                            metadata: HashMap::new(),
+                            profiling: Some(profiling),
+                        },
                     )
-                }) {
-                    self.next_sequence()
-                        .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?
-                } else {
-                    0
-                };
-                let mut output = QueryChangeCodec::encode_evaluation(
-                    Some(&input.envelope),
-                    &self.definition.id,
-                    SystemMetadata::new(self.definition.output_stream.clone(), sequence)
-                        .with_timestamp(
-                            input.envelope.system().timestamp().unwrap_or_else(Utc::now),
-                        ),
-                    &self.projector,
-                    &results,
-                    QueryOutputMetadata {
-                        query_id: self.definition.id.to_string(),
-                        source_id: Some(progress.source_id.clone()),
-                        timestamp: Utc::now(),
-                        metadata: HashMap::new(),
-                        profiling: Some(profiling),
-                    },
-                )
-                .map_err(IndexError::other)?;
-                if let Some(output) = &mut output {
-                    self.stamp_output_identity(output)
-                        .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
-                }
-                if transaction_deadline
-                    .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
-                {
-                    return Err(IndexError::other(super::SourceTransactionError::Deadline));
-                }
-                if let Some(checkpoint) = query.resources().checkpoint_store() {
-                    progress.graph.stage(checkpoint.as_ref()).await?;
-                    if let Some(output) = &output {
-                        if self.output_persistent {
-                            if self.options.publication == QueryPublicationMode::Atomic {
-                                self.stage_output(output).await?;
-                            } else {
-                                checkpoint
-                                    .stage_checkpoint(
-                                        PENDING_OUTPUT,
-                                        output.system().sequence(),
-                                        None,
-                                    )
-                                    .await?;
+                    .map_err(IndexError::other)?;
+                    if let Some(output) = &mut output {
+                        self.stamp_output_identity(output)
+                            .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
+                    }
+                    if transaction_deadline
+                        .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+                    {
+                        return Err(IndexError::other(super::SourceTransactionError::Deadline));
+                    }
+                    if let Some(checkpoint) = query.resources().checkpoint_store() {
+                        progress.graph.stage(checkpoint.as_ref()).await?;
+                        if let Some(output) = &output {
+                            if self.output_persistent {
+                                if self.options.publication == QueryPublicationMode::Atomic {
+                                    self.stage_output(output).await?;
+                                } else {
+                                    checkpoint
+                                        .stage_checkpoint(
+                                            PENDING_OUTPUT,
+                                            output.system().sequence(),
+                                            None,
+                                        )
+                                        .await?;
+                                }
                             }
                         }
                     }
-                }
-                *prepared.lock().map_err(|_| IndexError::CorruptedData)? = output;
-                Ok(())
-            }
+                    *prepared.lock().map_err(|_| IndexError::CorruptedData)? = output;
+                    Ok(())
+                },
+            )
         };
         match query.resources().atomic_result_transaction() {
             Ok(transaction) if self.options.publication == QueryPublicationMode::Atomic => {
@@ -1528,45 +1546,51 @@ impl ContinuousQueryTransformer {
             Ok(_) => unreachable!(),
         }
         let core_return_ns = timestamp_ns();
-        let mut output = prepared
-            .into_inner()
-            .map_err(|_| anyhow::anyhow!("prepared output poisoned"))?;
-        if self.options.publication == QueryPublicationMode::NonAtomic && self.output_persistent {
-            self.finish_non_atomic(output.as_ref()).await?;
-        }
-        if query.resources().checkpoint_store().is_none() {
-            if let Some(producer) = &progress.graph.producer {
-                let mut owners = self
-                    .input_producers
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("input producer identities poisoned"))?;
-                if !owners.contains_key(&progress.graph.key) {
-                    owners.insert(progress.graph.key.clone(), producer.clone());
+        ComponentObservations::current_or_disabled()
+            .query_phase(QueryProcessingPhase::Finalize, async {
+                let mut output = prepared
+                    .into_inner()
+                    .map_err(|_| anyhow::anyhow!("prepared output poisoned"))?;
+                if self.options.publication == QueryPublicationMode::NonAtomic
+                    && self.output_persistent
+                {
+                    self.finish_non_atomic(output.as_ref()).await?;
                 }
-            }
-        }
-        self.watermarks
-            .lock()
-            .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
-            .insert(progress.graph.key.clone(), progress.sequence);
-        // Keep completion timings on the live branch, not in already committed outbox bytes.
-        if let Some(output) = &mut output {
-            QueryChangeCodec::append_post_commit_profiling(
-                output,
-                &self.definition.id,
-                core_return_ns,
-                timestamp_ns(),
-            )?;
-        }
-        let outputs = self.publish(output)?;
-        if SOURCE_TRANSACTION || !GraphChangeCodec::is_futures_due(&input.envelope) {
-            crate::observability::ComponentObservations::current_or_disabled()
-                .query_input(crate::observability::QueryPhase::Steady);
-        }
-        if let Some(confirmation) = &self.source_progress {
-            confirmation.confirm_input(&progress.graph);
-        }
-        Ok(outputs)
+                if query.resources().checkpoint_store().is_none() {
+                    if let Some(producer) = &progress.graph.producer {
+                        let mut owners = self
+                            .input_producers
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("input producer identities poisoned"))?;
+                        if !owners.contains_key(&progress.graph.key) {
+                            owners.insert(progress.graph.key.clone(), producer.clone());
+                        }
+                    }
+                }
+                self.watermarks
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
+                    .insert(progress.graph.key.clone(), progress.sequence);
+                // Keep completion timings on the live branch, not in already committed outbox bytes.
+                if let Some(output) = &mut output {
+                    QueryChangeCodec::append_post_commit_profiling(
+                        output,
+                        &self.definition.id,
+                        core_return_ns,
+                        timestamp_ns(),
+                    )?;
+                }
+                let outputs = self.publish(output)?;
+                if SOURCE_TRANSACTION || !GraphChangeCodec::is_futures_due(&input.envelope) {
+                    crate::observability::ComponentObservations::current_or_disabled()
+                        .query_input(crate::observability::QueryPhase::Steady);
+                }
+                if let Some(confirmation) = &self.source_progress {
+                    confirmation.confirm_input(&progress.graph);
+                }
+                Ok::<_, anyhow::Error>(outputs)
+            })
+            .await
     }
 }
 

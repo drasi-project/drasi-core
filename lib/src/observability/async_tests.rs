@@ -23,16 +23,23 @@ use tracing::instrument::WithSubscriber;
 use tracing_subscriber::{filter::filter_fn, prelude::*};
 
 async fn record(future: impl Future<Output = ()>) -> Vec<SpanData> {
+    record_filtered(TelemetryProfile::Debug, true, future).await
+}
+
+async fn record_filtered(
+    profile: TelemetryProfile,
+    phase_detail: bool,
+    future: impl Future<Output = ()>,
+) -> Vec<SpanData> {
     let exporter = InMemorySpanExporter::default();
     let provider = SdkTracerProvider::builder()
         .with_simple_exporter(exporter.clone())
         .build();
-    let config =
-        TelemetryOptions::new(TelemetrySettings::new(TelemetryProfile::Debug).with_metrics(false))
-            .with_instance_id("async-tests")
-            .with_context_adapter(Arc::new(OpenTelemetryContextAdapter))
-            .resolve("async-tests", None)
-            .unwrap();
+    let config = TelemetryOptions::new(TelemetrySettings::new(profile).with_metrics(false))
+        .with_instance_id("async-tests")
+        .with_context_adapter(Arc::new(OpenTelemetryContextAdapter))
+        .resolve("async-tests", None)
+        .unwrap();
     let owner = config
         .observations(
             ComponentId::try_new("query").unwrap(),
@@ -44,11 +51,13 @@ async fn record(future: impl Future<Output = ()>) -> Vec<SpanData> {
     async {
         let scope = ExecutionScope::new(Default::default())
             .with_component(
-                config.scope().unwrap().component(
-                    ComponentId::try_new("query").unwrap(),
-                    ComponentRole::Query,
-                    ComponentSemanticKind::Query,
-                ),
+                TelemetryScope::graph("async-tests", "async-tests")
+                    .unwrap()
+                    .component(
+                        ComponentId::try_new("query").unwrap(),
+                        ComponentRole::Query,
+                        ComponentSemanticKind::Query,
+                    ),
                 1,
             )
             .with_adapter(config.context_adapter().cloned());
@@ -58,8 +67,14 @@ async fn record(future: impl Future<Output = ()>) -> Vec<SpanData> {
         tracing_subscriber::registry().with(
             tracing_opentelemetry::layer()
                 .with_tracer(provider.tracer("async-tests"))
-                .with_filter(filter_fn(|metadata| {
-                    metadata.is_span() && metadata.target() == TELEMETRY_TARGET
+                .with_filter(filter_fn(move |metadata| {
+                    metadata.is_span()
+                        && metadata.target() == TELEMETRY_TARGET
+                        && (phase_detail
+                            || !matches!(
+                                metadata.name(),
+                                "query.prepare_input" | "query.prepare_output" | "query.finalize"
+                            ))
                 })),
         ),
     )
@@ -116,6 +131,307 @@ fn field<'a>(span: &'a SpanData, name: &str) -> Option<&'a opentelemetry::Value>
         .map(|field| &field.value)
 }
 
+async fn observed_transform(
+    query: &mut ContinuousQueryTransformer,
+    input: InputEnvelope,
+) -> Vec<OutputEnvelope> {
+    let observation = ComponentObservations::current_or_disabled()
+        .begin(
+            ObservedOperation::Transform,
+            &input.execution_context,
+            Default::default(),
+        )
+        .unwrap();
+    let expected = observation.context().clone();
+    let output = observation
+        .run_outputs(query.transform(input))
+        .await
+        .unwrap();
+    assert!(output
+        .iter()
+        .all(|output| output.execution_context.trace() == expected.trace()));
+    output
+}
+
+#[tokio::test]
+async fn query_phase_detail_is_debug_only_bounded_and_keeps_output_parentage() {
+    for profile in [
+        TelemetryProfile::Off,
+        TelemetryProfile::Basic,
+        TelemetryProfile::Debug,
+        TelemetryProfile::Persistence,
+    ] {
+        let spans = record_filtered(profile, true, async {
+            let mut query = ContinuousQueryTransformer::new(
+                definition("MATCH (a:Item), (b:Item) RETURN a.name AS first, b.name AS second"),
+                Arc::new(InMemoryComputationProvider),
+            )
+            .await
+            .unwrap();
+            query.start().await.unwrap();
+            for sequence in 1..=2 {
+                let output = observed_transform(&mut query, input(sequence)).await;
+                assert_eq!(output.len(), 1);
+                assert_eq!(
+                    output[0].envelope.changes().operations().len(),
+                    if sequence == 1 { 1 } else { 3 }
+                );
+                query.delivery_completed(&output).await.unwrap();
+            }
+            query.stop().await.unwrap();
+        })
+        .await;
+        let processing: Vec<_> = spans
+            .iter()
+            .filter(|span| span.name == "query.process")
+            .collect();
+        assert_eq!(
+            processing.len(),
+            if profile == TelemetryProfile::Off {
+                0
+            } else {
+                2
+            }
+        );
+        for name in ["query.prepare_input", "query.prepare_output", "query.finalize"] {
+            let phases: Vec<_> = spans.iter().filter(|span| span.name == name).collect();
+            assert_eq!(
+                phases.len(),
+                if profile == TelemetryProfile::Debug {
+                    2
+                } else {
+                    0
+                },
+                "{profile:?} {name}"
+            );
+            for phase in phases {
+                let parent = processing
+                    .iter()
+                    .find(|parent| parent.span_context.span_id() == phase.parent_span_id)
+                    .unwrap();
+                assert_eq!(
+                    phase.span_context.trace_id(),
+                    parent.span_context.trace_id()
+                );
+                assert!(phase.start_time >= parent.start_time);
+                assert!(phase.end_time <= parent.end_time);
+                assert_eq!(
+                    field(phase, "outcome"),
+                    Some(&opentelemetry::Value::String("success".into()))
+                );
+            }
+        }
+        if profile == TelemetryProfile::Debug {
+            for parent in processing {
+                let child = |name| {
+                    spans
+                        .iter()
+                        .find(|span| {
+                            span.name == name
+                                && span.parent_span_id == parent.span_context.span_id()
+                        })
+                        .unwrap()
+                };
+                assert!(
+                    child("query.prepare_input").end_time <= child("query.evaluate").start_time
+                );
+                assert!(
+                    child("query.evaluate").end_time <= child("query.prepare_output").start_time
+                );
+                assert!(child("query.prepare_output").end_time <= child("query.commit").start_time);
+                assert!(child("query.commit").end_time <= child("query.finalize").start_time);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn query_phase_elapsed_waits_errors_and_cancellation_preserve_caller_context() {
+    let spans = record(async {
+        let owner = ComponentObservations::current_or_disabled();
+        let observation = owner
+            .begin(
+                ObservedOperation::Transform,
+                &input(1).execution_context,
+                Default::default(),
+            )
+            .unwrap();
+        let caller = observation.context().clone();
+        observation
+            .run(async {
+                owner
+                    .clone()
+                    .query_phase(QueryProcessingPhase::PrepareInput, async {
+                        assert_eq!(ExecutionContext::current(), caller);
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                        assert_eq!(ExecutionContext::current(), caller);
+                        Ok::<_, drasi_core::interface::IndexError>(())
+                    })
+                    .await
+                    .unwrap();
+                let failure = owner
+                    .clone()
+                    .query_phase(QueryProcessingPhase::PrepareOutput, async {
+                        Err::<(), _>(drasi_core::interface::IndexError::NotSupported)
+                    })
+                    .await;
+                assert!(failure.is_err());
+                let mut pending = Box::pin(owner.clone().query_phase(
+                    QueryProcessingPhase::Finalize,
+                    std::future::pending::<
+                        std::result::Result<(), drasi_core::interface::IndexError>,
+                    >(),
+                ));
+                std::future::poll_fn(|cx| {
+                    assert!(pending.as_mut().poll(cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                drop(pending);
+                assert_eq!(ExecutionContext::current(), caller);
+                Ok::<_, drasi_core::interface::IndexError>(())
+            })
+            .await
+            .unwrap();
+    })
+    .await;
+    for (name, outcome) in [
+        ("query.prepare_input", "success"),
+        ("query.prepare_output", "error"),
+        ("query.finalize", "cancelled"),
+    ] {
+        let phase = spans.iter().find(|span| span.name == name).unwrap();
+        assert_eq!(
+            field(phase, "outcome"),
+            Some(&opentelemetry::Value::String(outcome.into()))
+        );
+        if outcome == "success" {
+            assert!(
+                phase.end_time.duration_since(phase.start_time).unwrap()
+                    >= std::time::Duration::from_millis(5)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn query_phase_detail_does_not_create_detached_root_traces() {
+    let spans = record(async {
+        ComponentObservations::current_or_disabled()
+            .query_phase(QueryProcessingPhase::PrepareInput, async {
+                Ok::<_, drasi_core::interface::IndexError>(())
+            })
+            .await
+            .unwrap();
+    })
+    .await;
+    assert!(spans.is_empty());
+}
+
+#[tokio::test]
+async fn query_phase_detail_preserves_unsampled_parent_decisions() {
+    let spans = record(async {
+        let owner = ComponentObservations::current_or_disabled();
+        let parent = ExecutionContext::new(TraceContextV1::new([1; 16], [1; 8], 0, None).unwrap());
+        let observation = owner
+            .begin(ObservedOperation::Transform, &parent, Default::default())
+            .unwrap();
+        observation
+            .run(async {
+                for phase in [
+                    QueryProcessingPhase::PrepareInput,
+                    QueryProcessingPhase::PrepareOutput,
+                    QueryProcessingPhase::Finalize,
+                ] {
+                    owner
+                        .clone()
+                        .query_phase(phase, async {
+                            assert!(!ExecutionContext::current().trace().unwrap().sampled());
+                            Ok::<_, drasi_core::interface::IndexError>(())
+                        })
+                        .await
+                        .unwrap();
+                }
+                Ok::<_, drasi_core::interface::IndexError>(())
+            })
+            .await
+            .unwrap();
+    })
+    .await;
+    assert!(!spans.iter().any(|span| matches!(
+        span.name.as_ref(),
+        "query.prepare_input" | "query.prepare_output" | "query.finalize"
+    )));
+}
+
+#[tokio::test]
+#[ignore = "local timing characterization, not a portable performance threshold"]
+async fn query_phase_enabled_overhead_characterization() {
+    const INPUTS: u64 = 32;
+    let mut baseline = Vec::new();
+    let mut detailed = Vec::new();
+    for round in 0..6 {
+        for enabled in if round % 2 == 0 {
+            [false, true]
+        } else {
+            [true, false]
+        } {
+            let mut elapsed = std::time::Duration::ZERO;
+            let spans = record_filtered(TelemetryProfile::Debug, enabled, async {
+                let mut query = ContinuousQueryTransformer::new(
+                    definition("MATCH (n:Item) RETURN n.name AS name"),
+                    Arc::new(InMemoryComputationProvider),
+                )
+                .await
+                .unwrap();
+                query.start().await.unwrap();
+                for sequence in 1..=4 {
+                    let output = observed_transform(&mut query, input(sequence)).await;
+                    query.delivery_completed(&output).await.unwrap();
+                }
+                let started = std::time::Instant::now();
+                for sequence in 5..5 + INPUTS {
+                    let output = observed_transform(&mut query, input(sequence)).await;
+                    query.delivery_completed(&output).await.unwrap();
+                }
+                elapsed = started.elapsed();
+                query.stop().await.unwrap();
+            })
+            .await;
+            let phases = spans
+                .iter()
+                .filter(|span| {
+                    matches!(
+                        span.name.as_ref(),
+                        "query.prepare_input" | "query.prepare_output" | "query.finalize"
+                    )
+                })
+                .count();
+            assert_eq!(
+                phases,
+                if enabled {
+                    3 * (INPUTS as usize + 4)
+                } else {
+                    0
+                }
+            );
+            let sample = elapsed.as_secs_f64() * 1_000_000.0 / INPUTS as f64;
+            if enabled {
+                detailed.push(sample);
+            } else {
+                baseline.push(sample);
+            }
+        }
+    }
+    baseline.sort_by(f64::total_cmp);
+    detailed.sort_by(f64::total_cmp);
+    let median = |samples: &[f64]| (samples[2] + samples[3]) / 2.0;
+    println!(
+        "Local debug-build query loop, in-memory synchronous span export, six interleaved pairs: phases filtered out {:.2} us/input; phases enabled {:.2} us/input; delta {:.2} us/input. Both paths include phase gating; this is not a before/after production benchmark.",
+        median(&baseline), median(&detailed), median(&detailed) - median(&baseline),
+    );
+}
+
 #[tokio::test]
 async fn scheduled_work_is_a_new_attempt_even_without_output_and_empty_probes_are_silent() {
     let spans = record(async {
@@ -156,9 +472,9 @@ async fn scheduled_work_is_a_new_attempt_even_without_output_and_empty_probes_ar
         field(scheduled, "output_count"),
         Some(&opentelemetry::Value::I64(0))
     );
-    assert!(!spans
-        .iter()
-        .any(|span| span.name == "component.process" || span.name == "query.process"));
+    assert!(!spans.iter().any(|span| span.name == "component.process"
+        || span.name == "transformer.process"
+        || span.name == "query.process"));
     for name in ["query.evaluate", "query.commit"] {
         let children: Vec<_> = spans
             .iter()
@@ -343,9 +659,9 @@ async fn prepared_input_replay_is_not_bootstrap_and_does_not_duplicate_processin
             .count(),
         1
     );
-    assert!(!spans
-        .iter()
-        .any(|span| span.name == "component.process" || span.name == "query.process"));
+    assert!(!spans.iter().any(|span| span.name == "component.process"
+        || span.name == "transformer.process"
+        || span.name == "query.process"));
     let evaluation = spans
         .iter()
         .find(|span| span.name == "query.evaluate")

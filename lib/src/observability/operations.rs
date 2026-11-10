@@ -6,7 +6,7 @@ use super::{
     ReactionSubscriptionMetrics, ReactionSubscriptions, TelemetryError, TelemetryScope,
     TELEMETRY_TARGET,
 };
-use drasi_computation_contracts::{ComponentRole, ComponentSemanticKind};
+use drasi_computation_contracts::{ComponentRole, ComponentSemanticKind, ImplementationIdentity};
 use metrics::{Counter, Gauge, Histogram};
 use std::{
     cell::RefCell,
@@ -34,6 +34,9 @@ pub(crate) enum ObservedOperation {
     Run,
     Evaluate,
     Commit,
+    PrepareInput,
+    PrepareOutput,
+    FinalizeQuery,
     Control,
     Bootstrap,
     Snapshot,
@@ -41,6 +44,23 @@ pub(crate) enum ObservedOperation {
     Reaction,
     ReactionBatch,
     ServiceWork,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum QueryProcessingPhase {
+    PrepareInput,
+    PrepareOutput,
+    Finalize,
+}
+
+impl QueryProcessingPhase {
+    fn operation(self) -> ObservedOperation {
+        match self {
+            Self::PrepareInput => ObservedOperation::PrepareInput,
+            Self::PrepareOutput => ObservedOperation::PrepareOutput,
+            Self::Finalize => ObservedOperation::FinalizeQuery,
+        }
+    }
 }
 
 impl ObservedOperation {
@@ -83,6 +103,9 @@ impl ObservedOperation {
             Self::Run => "run",
             Self::Evaluate => "evaluate",
             Self::Commit => "commit",
+            Self::PrepareInput => "prepare_input",
+            Self::PrepareOutput => "prepare_output",
+            Self::FinalizeQuery => "finalize_query",
             Self::Control => "control",
             Self::Bootstrap => "bootstrap",
             Self::Snapshot => "snapshot",
@@ -104,6 +127,12 @@ impl ObservedOperation {
             {
                 "query.process"
             }
+            Self::Transform | Self::Continue
+                if scope.and_then(TelemetryScope::semantic_kind)
+                    == Some(ComponentSemanticKind::Transformer) =>
+            {
+                "transformer.process"
+            }
             Self::Transform | Self::Continue => "component.process",
             Self::Handle => "sink.handle",
             Self::HandleBatch => "sink.handle_batch",
@@ -114,6 +143,9 @@ impl ObservedOperation {
             Self::Reconfigure => "component.reconfigure",
             Self::Evaluate => "query.evaluate",
             Self::Commit => "query.commit",
+            Self::PrepareInput => "query.prepare_input",
+            Self::PrepareOutput => "query.prepare_output",
+            Self::FinalizeQuery => "query.finalize",
             Self::Control => "control.apply",
             Self::Bootstrap => "query.bootstrap",
             Self::Snapshot => "bootstrap.snapshot",
@@ -127,7 +159,24 @@ impl ObservedOperation {
     fn common(self) -> bool {
         !matches!(
             self,
-            Self::Evaluate | Self::Commit | Self::Control | Self::Send
+            Self::Evaluate
+                | Self::Commit
+                | Self::PrepareInput
+                | Self::PrepareOutput
+                | Self::FinalizeQuery
+                | Self::Control
+                | Self::Send
+        )
+    }
+
+    fn records_callback_metrics(self) -> bool {
+        !matches!(
+            self,
+            Self::Reaction
+                | Self::ReactionBatch
+                | Self::PrepareInput
+                | Self::PrepareOutput
+                | Self::FinalizeQuery
         )
     }
 
@@ -193,6 +242,7 @@ pub(crate) struct ComponentObservations {
     dispatched: [Counter; 2],
     storage_errors: Counter,
     worker_owned: std::sync::atomic::AtomicBool,
+    implementation: std::sync::OnceLock<Arc<str>>,
     query: std::sync::OnceLock<QueryMetrics>,
     subscriptions: Mutex<ReactionSubscriptions>,
     state: Mutex<BindingState>,
@@ -353,6 +403,7 @@ impl ComponentObservations {
             dispatched,
             storage_errors,
             worker_owned: std::sync::atomic::AtomicBool::new(false),
+            implementation: std::sync::OnceLock::new(),
             query: std::sync::OnceLock::new(),
             subscriptions: Mutex::new(BTreeMap::new()),
             state: Mutex::new(BindingState { up }),
@@ -368,6 +419,20 @@ impl ComponentObservations {
 
     pub(crate) fn telemetry(&self) -> &GraphTelemetry {
         &self.config
+    }
+
+    pub(crate) fn bind_implementation(
+        &self,
+        implementation: &ImplementationIdentity,
+    ) -> Result<(), TelemetryError> {
+        if let Err(name) = self.implementation.set(implementation.name.clone()) {
+            if self.implementation.get() != Some(&name) {
+                return Err(TelemetryError::Invalid(
+                    "component implementation changed within a telemetry generation".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn current_or_disabled() -> Arc<Self> {
@@ -622,10 +687,7 @@ impl ComponentObservations {
 
     pub(crate) fn failed(&self, operation: ObservedOperation) {
         self.update(|| {
-            let record_metrics = !matches!(
-                operation,
-                ObservedOperation::Reaction | ObservedOperation::ReactionBatch
-            );
+            let record_metrics = operation.records_callback_metrics();
             if let Some(metrics) = self.metrics.get(&operation).filter(|_| record_metrics) {
                 metrics.errors.increment(1);
             }
@@ -643,6 +705,47 @@ impl ComponentObservations {
         fields: OperationFields<'_>,
     ) -> Result<OperationObservation, TelemetryError> {
         self.begin_with_links(operation, parent, fields, &[], false)
+    }
+
+    fn begin_query_phase(
+        self: &Arc<Self>,
+        phase: QueryProcessingPhase,
+    ) -> Result<Option<Box<OperationObservation>>, TelemetryError> {
+        let operation = phase.operation();
+        let name = operation
+            .span_name(self.config.scope())
+            .expect("query processing phases have span names");
+        if !self.config.policy().allows_span(name) {
+            return Ok(None);
+        }
+        let parent = ExecutionContext::current();
+        if parent.trace().is_some_and(|trace| !trace.sampled())
+            || (self.config.context_adapter().is_some() && parent.trace().is_none())
+        {
+            return Ok(None);
+        }
+        let observation = self.begin(operation, &parent, Default::default())?;
+        if observation.span.is_disabled() {
+            return Ok(None);
+        }
+        Ok(Some(Box::new(observation)))
+    }
+
+    pub(crate) async fn query_phase<T, E>(
+        self: Arc<Self>,
+        phase: QueryProcessingPhase,
+        future: impl Future<Output = Result<T, E>>,
+    ) -> Result<T, E>
+    where
+        E: From<drasi_core::interface::IndexError>,
+    {
+        let observation = self
+            .begin_query_phase(phase)
+            .map_err(drasi_core::interface::IndexError::other)?;
+        match observation {
+            Some(observation) => Box::pin(observation.run_phase(future)).await,
+            None => future.await,
+        }
     }
 
     pub(crate) fn begin_untraced(
@@ -752,6 +855,7 @@ impl ComponentObservations {
             operation_span(
                 operation,
                 self.config.scope(),
+                self.implementation.get().map(|name| name.as_ref()),
                 self.generation,
                 &fields,
                 truncated,
@@ -770,10 +874,7 @@ impl ComponentObservations {
                 }
             }
         }
-        let record_metrics = !matches!(
-            operation,
-            ObservedOperation::Reaction | ObservedOperation::ReactionBatch
-        );
+        let record_metrics = operation.records_callback_metrics();
         if let Some(metrics) = self.metrics.get(&operation).filter(|_| record_metrics) {
             self.update(|| metrics.calls.increment(1));
         }
@@ -933,6 +1034,16 @@ impl OperationObservation {
         result
     }
 
+    async fn run_phase<T, E>(
+        mut self: Box<Self>,
+        future: impl Future<Output = Result<T, E>>,
+    ) -> Result<T, E> {
+        // Measure the phase without making it the event's outgoing causal context.
+        let result = future.await;
+        self.finish(if result.is_ok() { 0 } else { 1 });
+        result
+    }
+
     pub(crate) async fn run_outputs<E>(
         mut self,
         future: impl Future<Output = Result<Vec<crate::computation::v1::OutputEnvelope>, E>>,
@@ -1074,6 +1185,7 @@ fn trace_count(count: usize) -> i64 {
 fn operation_span(
     operation: ObservedOperation,
     scope: Option<&TelemetryScope>,
+    implementation: Option<&str>,
     generation: u64,
     fields: &OperationFields<'_>,
     truncated: bool,
@@ -1085,6 +1197,7 @@ fn operation_span(
                 graph_id = scope.map(TelemetryScope::graph_id),
                 component_id = scope.and_then(TelemetryScope::component_id).map(|id| id.as_str()),
                 component_kind = scope.and_then(TelemetryScope::semantic_kind).map(|kind| kind.as_str()),
+                implementation,
                 role = scope.and_then(TelemetryScope::role).map(|role| role.as_str()), generation,
                 operation = operation.label(), outcome = Empty, error_kind = Empty,
                 input_port = fields.input_port, output_port = fields.output_port,
@@ -1109,6 +1222,11 @@ fn operation_span(
         {
             span!("query.process")
         }
+        ObservedOperation::Transform | ObservedOperation::Continue
+            if operation.span_name(scope) == Some("transformer.process") =>
+        {
+            span!("transformer.process")
+        }
         ObservedOperation::Transform | ObservedOperation::Continue => span!("component.process"),
         ObservedOperation::Handle => span!("sink.handle"),
         ObservedOperation::HandleBatch => span!("sink.handle_batch"),
@@ -1119,6 +1237,9 @@ fn operation_span(
         ObservedOperation::Reconfigure => span!("component.reconfigure"),
         ObservedOperation::Evaluate => span!("query.evaluate"),
         ObservedOperation::Commit => span!("query.commit"),
+        ObservedOperation::PrepareInput => span!("query.prepare_input"),
+        ObservedOperation::PrepareOutput => span!("query.prepare_output"),
+        ObservedOperation::FinalizeQuery => span!("query.finalize"),
         ObservedOperation::Control => span!("control.apply"),
         ObservedOperation::Bootstrap => span!("query.bootstrap"),
         ObservedOperation::Snapshot => span!("bootstrap.snapshot"),
@@ -1174,6 +1295,13 @@ mod tests {
                                 ObservedOperation::Transform | ObservedOperation::Continue
                             ) {
                             "query.process"
+                        } else if kind == ComponentSemanticKind::Transformer
+                            && matches!(
+                                operation,
+                                ObservedOperation::Transform | ObservedOperation::Continue
+                            )
+                        {
+                            "transformer.process"
                         } else {
                             "component.process"
                         };
@@ -1192,6 +1320,39 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn implementation_identity_is_owned_by_the_component_generation() {
+        let graph = TelemetryOptions::new(
+            TelemetrySettings::new(TelemetryProfile::Basic).with_metrics(false),
+        )
+        .with_instance_id("instance")
+        .resolve("graph", None)
+        .unwrap();
+        let owner = |generation| {
+            graph
+                .observations(
+                    ComponentId::try_new("transformer").unwrap(),
+                    ComponentRole::Transformer,
+                    ComponentSemanticKind::Transformer,
+                    generation,
+                )
+                .unwrap()
+        };
+        let first = owner(1);
+        assert!(first.implementation.get().is_none());
+        let arithmetic = ImplementationIdentity::try_new("drasi.standard/arithmetic", "1").unwrap();
+        let middleware = ImplementationIdentity::try_new("drasi.standard/middleware", "1").unwrap();
+        first.bind_implementation(&arithmetic).unwrap();
+        first.bind_implementation(&arithmetic).unwrap();
+        assert_eq!(first.implementation.get(), Some(&arithmetic.name));
+        assert!(first.bind_implementation(&middleware).is_err());
+        let replacement = owner(2);
+        assert!(replacement.implementation.get().is_none());
+        replacement.bind_implementation(&middleware).unwrap();
+        assert_eq!(replacement.implementation.get(), Some(&middleware.name));
+        assert_eq!(first.implementation.get(), Some(&arithmetic.name));
     }
 
     #[test]
