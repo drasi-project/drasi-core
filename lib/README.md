@@ -837,6 +837,9 @@ Standard `log::info!()` and `tracing::info!()` macros both work inside plugin co
 
 ## Telemetry foundations
 
+For a short end-to-end setup, see
+[Enable observability in your application](docs/developer-guide/README.md#enable-observability-in-your-application).
+
 `observability` exposes shared catalogue descriptors, `TelemetryProfile`,
 `TelemetrySettings`, `TelemetryOptions`, parent-based sampling decisions and
 validated metric registration. The existing snapshot-oriented `metrics` module,
@@ -1123,11 +1126,12 @@ fenced. `require_native_metrics()` is validated against the actual plugin
 capability before construction. See the [native SDK guide](../components/computation-plugin-sdk/README.md#telemetry-registration-foundations)
 for API and compatibility details.
 
-For a runnable HTTP/PostgreSQL source -> query -> native inspector -> handled
+For a runnable HTTP source -> arithmetic transformer -> query -> handled
 callback trace, see the [observability demonstration](examples/observability/README.md).
-It includes a separately built plugin, a live metrics/correlated-log dashboard,
-local Jaeger, and an exact trace-shape verifier. `TRACE_SAMPLING=never` demonstrates
-metrics/logging independently of sampled traces.
+The current demo statically registers native SDK components and includes a live
+metrics/correlated-log dashboard, local Jaeger, and an exact trace-shape verifier.
+PostgreSQL CDC is a separate optional scenario. `TRACE_SAMPLING=never`
+demonstrates metrics/logging independently of sampled traces.
 
 Execution context is transient metadata accompanying work, not the envelope's
 persisted `ProcessingContext`/annotations. It holds an optional sending trace ID,
@@ -1231,8 +1235,9 @@ run to subscription-owned initialization; it is host-local, not an ABI frame.
 
 Native context transport uses a negotiated extension, not appended fields in
 frozen vtables or legacy Source/Reaction payloads. Missing required capabilities
-fail explicitly. Completed native-span/log collection and metric callbacks
-remain follow-up work. Legacy Source/Reaction cdylibs without context transport
+fail explicitly. Negotiated telemetry V2 supports completed native spans, logs,
+and scoped metric callbacks with host-owned collection and export.
+Legacy Source/Reaction cdylibs without context transport
 retain their loading/logging behavior, but cannot provide transparent worker
 trace continuity through their unchanged ABI.
 

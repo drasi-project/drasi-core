@@ -62,6 +62,7 @@ The later lessons make those boundaries explicit.
 6. [Control flow, ordering, and memory](#6-control-flow-ordering-and-memory)
 7. [Own the runtime lifecycle](#7-own-the-runtime-lifecycle)
 8. [Observe and diagnose the application](#8-observe-and-diagnose-the-application)
+   - [Enable observability in your application](#enable-observability-in-your-application)
 
 **Part III - Make processing recoverable**
 
@@ -2483,12 +2484,67 @@ Log and operation-trace filters are independent. `TelemetryProfile::Off` leaves
 ordinary logging enabled, while an explicit log `off` does not disable an
 independently configured operation-span layer. Automatic setup never installs a
 metric recorder or exporter. See the [library telemetry foundations](../../README.md#telemetry-foundations)
-for registration ownership, profiles, and the still-deferred instrumentation.
+for registration ownership, profiles, and supported graph, query, and reaction
+observations.
 
 Component spans carry `component_id`, `component_type`, and `instance_id`.
 Preserve that span when spawning auxiliary work, for example by instrumenting
 the future. Merely placing a component ID in an arbitrary message field does
 not establish component log routing.
+
+<a id="enable-observability-in-your-application"></a>
+
+#### Enable observability in your application
+
+Profiles enable measurements; the application host owns collection and export.
+Automatic logging or setting `RUST_LOG` alone does not export traces or metrics.
+For an end-to-end setup, follow this order:
+
+1. **Add the host dependencies.** Enable `drasi-lib`'s `otel-context` feature for
+   OpenTelemetry integration. Add a compatible tracer provider, OTLP exporter,
+   `tracing-opentelemetry`, `tracing-subscriber`, and metrics recorder. The
+   [demo manifest](../../examples/observability/Cargo.toml) lists a working set.
+   Metrics-only hosts do not need OpenTelemetry.
+2. **Initialize the host once, before building Drasi.** Create a
+   `ComponentLogRuntime` and compose its `layer()` with the OpenTelemetry layer
+   in the same subscriber. Keep `drasi::telemetry` spans enabled independently
+   of log filtering. Configure the trace exporter endpoint and service name.
+   For native internal spans, wrap a batch processor in
+   `OpenTelemetrySpanProcessor`, use its `sampler()` in the tracer provider,
+   and give a clone of the same processor to `NativeSpanCollector::new`.
+3. **Connect metrics to an endpoint.** Create one `MetricRegistrationContext`
+   for the host's recorder and share it across instances using that recorder.
+   With `metrics-exporter-prometheus`, use `PrometheusBuilder::build_recorder()`
+   and serve its handle's `render()` output at your HTTP `/metrics` endpoint;
+   merely creating the recorder does not expose an endpoint.
+4. **Bind collection to the application.** Create `TelemetryOptions` from
+   `TelemetrySettings::new(TelemetryProfile::Debug)`, attach
+   `with_context_adapter(Arc::new(OpenTelemetryContextAdapter))` and
+   `with_metric_context(...)`, plus `with_native_span_collector(...)` when
+   collecting native internal spans. Pass those options to
+   `DrasiLib::builder().with_telemetry(...)`, supply a unique `with_id(...)`,
+   and reuse the host log runtime with `with_component_logging(...)`.
+   Add your sources, queries, and reactions as usual, then build and start.
+   Use `Basic` for less trace detail; `Persistence` is Basic plus persistence,
+   not Debug. `with_tracing(false)` keeps metrics; `with_metrics(false)` keeps
+   tracing. `Off` disables both, not ordinary logging.
+5. **Verify and shut down cleanly.** Submit a change that produces a query
+   result. Check one connected trace through `source.publish`, `query.process`,
+   and `sink.handle` or an ordinary reaction's `reaction.process`, plus
+   component-labelled metrics. Supported incoming W3C context continues the
+   sender's trace; sampling can intentionally suppress export without
+   suppressing metrics. Stop inputs and await instance shutdown first, then
+   drain native spans and logs before shutting down the tracer provider.
+   Run blocking exporter shutdown off the async executor, and perform cleanup
+   on error paths too.
+
+The [working host setup](../../examples/observability/src/main.rs) demonstrates
+subscriber composition, exporter/recorder wiring, builder options, and cleanup;
+the [demo guide](../../examples/observability/README.md) provides commands to
+verify traces and metrics locally. Its environment switches are demo
+configuration, not settings automatically read by every `DrasiLib` host.
+For plugin capability requirements and legacy limits, see
+[shared native telemetry](../../README.md#shared-native-telemetry).
 
 `subscribe_computation_logs` supplies recent history plus a live receiver
 for the actual Source, Transformer, Query, Sink, or Service category.
