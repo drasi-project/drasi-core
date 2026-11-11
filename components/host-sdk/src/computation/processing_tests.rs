@@ -1083,6 +1083,7 @@ impl EnvelopeSource for OneSource {
         Ok(self.envelope.take().map(|envelope| OutputEnvelope { execution_context: Default::default(),
             port: PortId::try_new("out").expect("fixture port"),
             envelope,
+            execution_context: Default::default(),
         }))
     }
 }

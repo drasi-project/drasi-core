@@ -28,6 +28,7 @@ pub(super) struct QueryOutput {
     reader: Arc<QueryOutputProvider>,
     configuration_hash: u64,
     description: QueryDescription,
+    telemetry: super::observations::QueryObservations,
 }
 
 impl QueryOutput {
@@ -52,7 +53,7 @@ impl QueryOutput {
         stream: StreamId,
         projector: ResultNodeProjector,
         capacity: NonZeroUsize,
-        configuration_hash: u64,
+        telemetry: super::observations::QueryObservations,
         description: QueryDescription,
     ) -> Self {
         let results = QueryOutputOwner::new(capacity, projector.clone());
@@ -69,8 +70,9 @@ impl QueryOutput {
             projector,
             results,
             reader,
-            configuration_hash,
+            configuration_hash: description.configuration_hash,
             description,
+            telemetry,
         }
     }
 
@@ -138,6 +140,7 @@ impl QueryOutput {
         state.recovery_ready = available;
         drop(state);
         self.results.notify.notify_waiters();
+        self.observe_state()?;
         Ok(())
     }
 
@@ -192,6 +195,8 @@ impl QueryOutput {
             "query snapshot has not initialized"
         );
         state.apply_rows(envelope);
+        drop(state);
+        self.observe_state()?;
         Ok(())
     }
 
@@ -245,6 +250,7 @@ impl QueryOutput {
         state.producer = None;
         drop(state);
         self.results.notify.notify_waiters();
+        self.observe_state()?;
         Ok(())
     }
 
@@ -289,10 +295,27 @@ impl QueryOutput {
             .state
             .write()
             .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
+        let fresh = QueryChangeCodec::query_sequence(envelope)? > state.sequence;
         state.apply_producer(envelope.clone())?;
         drop(state);
         self.results.notify.notify_waiters();
+        if fresh {
+            self.telemetry.results(envelope)?;
+        }
+        self.observe_state()?;
         Ok(())
+    }
+
+    pub(super) fn observe_state(&self) -> anyhow::Result<()> {
+        if !self.telemetry.enabled() {
+            return Ok(());
+        }
+        let state = self
+            .results
+            .state
+            .read()
+            .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
+        self.telemetry.state(state.outbox.len(), state.rows.len())
     }
 }
 

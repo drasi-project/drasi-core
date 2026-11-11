@@ -249,7 +249,7 @@ mod tests {
 
     fn scope(instance: &str) -> TelemetryScope {
         TelemetryScope::graph(instance, "graph").unwrap().component(
-            ComponentId::try_new("query").unwrap(),
+            ComponentId::try_new("064e948e-04b4-40d2-8dcd-32740a66e91f").unwrap(),
             ComponentRole::Transformer,
             ComponentSemanticKind::Query,
         )
@@ -277,6 +277,7 @@ mod tests {
                 tracing: false,
                 metrics,
                 native_metrics_required: false,
+                native_query_observations_required: false,
                 trace_directives: "off".into(),
                 log_directives: "off".into(),
                 metric_exclusions: vec![],

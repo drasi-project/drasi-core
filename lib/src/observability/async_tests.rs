@@ -153,6 +153,258 @@ async fn observed_transform(
     output
 }
 
+fn query_binding() -> PluginTelemetry {
+    let owner = ComponentObservations::current().unwrap();
+    super::plugin_telemetry::bind(
+        &owner,
+        owner.telemetry().scope().unwrap().clone(),
+        "native-query",
+        None,
+    )
+    .unwrap()
+}
+
+fn query_request(kind: QueryObservationKind) -> QueryObservationRequest {
+    QueryObservationRequest {
+        kind,
+        phase: QueryObservationPhase::Steady,
+        parent: None,
+        change_count: (kind == QueryObservationKind::Evaluate).then_some(1),
+    }
+}
+
+fn finish_query(observation: &mut dyn QueryObservation) {
+    observation
+        .finish(QueryObservationResult {
+            outcome: QueryObservationOutcome::Success,
+            result_count: None,
+        })
+        .unwrap();
+}
+
+#[tokio::test]
+async fn native_query_actual_commit_selects_the_late_root_without_evaluator_context_leaks() {
+    use drasi_core::computation::QueryOperation;
+
+    let spans = record(async {
+        let binding = query_binding();
+        let mut transaction = binding
+            .begin_query_observation(&query_request(QueryObservationKind::Transaction))
+            .unwrap()
+            .unwrap();
+        let mut observer = None;
+        transaction
+            .in_scope(&mut || {
+                observer = NativeQueryScope::current().unwrap().observer();
+            })
+            .unwrap();
+        let observer = observer.unwrap();
+        let mut root = None;
+        transaction
+            .in_scope(&mut || {
+                root = binding
+                    .begin_query_observation(&query_request(QueryObservationKind::FutureQueue))
+                    .unwrap();
+                root.as_ref()
+                    .unwrap()
+                    .in_scope(&mut || {
+                        let context = ExecutionContext::current();
+                        for kind in
+                            [QueryObservationKind::Evaluate, QueryObservationKind::PrepareOutput]
+                        {
+                            let mut observation = binding
+                                .begin_query_observation(&query_request(kind))
+                                .unwrap()
+                                .unwrap();
+                            observation
+                                .in_scope(&mut || {
+                                    assert!(NativeQueryScope::current().is_some());
+                                    if kind == QueryObservationKind::PrepareOutput {
+                                        assert_eq!(
+                                            ExecutionContext::current().trace(),
+                                            context.trace()
+                                        );
+                                    }
+                                })
+                                .unwrap();
+                            finish_query(observation.as_mut());
+                            assert_eq!(ExecutionContext::current().trace(), context.trace());
+                        }
+                    })
+                    .unwrap();
+            })
+            .unwrap();
+        assert!(NativeQueryScope::current().is_none());
+        assert!(ExecutionContext::current().is_empty());
+        let mut commit = observer.start(QueryOperation::Commit, None).unwrap();
+        commit.finish(true, None);
+        drop(commit);
+        // A metadata-only session under the same transaction is not query work.
+        let mut probe = observer.start(QueryOperation::Commit, None).unwrap();
+        probe.finish(true, None);
+        drop(probe);
+        root.as_mut()
+            .unwrap()
+            .finish(QueryObservationResult {
+                outcome: QueryObservationOutcome::Success,
+                result_count: Some(1),
+            })
+            .unwrap();
+        finish_query(transaction.as_mut());
+        drop((root, transaction));
+        let empty = binding
+            .begin_query_observation(&query_request(QueryObservationKind::Transaction))
+            .unwrap()
+            .unwrap();
+        empty
+            .in_scope(&mut || {
+                let observer = NativeQueryScope::current().unwrap().observer().unwrap();
+                let mut probe = observer.start(QueryOperation::Commit, None).unwrap();
+                probe.finish(true, None);
+            })
+            .unwrap();
+        assert!(ExecutionContext::current().is_empty());
+    })
+    .await;
+    let root = spans
+        .iter()
+        .find(|span| span.name == "component.scheduled")
+        .unwrap();
+    assert_eq!(field(root, "work_kind"), Some(&"future_queue".into()));
+    assert_eq!(field(root, "input_count"), Some(&0_i64.into()));
+    assert_eq!(field(root, "output_count"), Some(&1_i64.into()));
+    assert!(field(root, "result_change_count").is_none());
+    for name in ["query.evaluate", "query.prepare_output", "query.commit"] {
+        let children = spans
+            .iter()
+            .filter(|span| span.name == name)
+            .collect::<Vec<_>>();
+        assert_eq!(children.len(), 1, "{name}");
+        assert_eq!(
+            children[0].parent_span_id,
+            root.span_context.span_id(),
+            "{name}"
+        );
+    }
+    assert_eq!(spans.len(), 4);
+}
+
+#[tokio::test]
+async fn native_query_bootstrap_detail_and_unsampled_phase_filters_match_reference_policy() {
+    for bootstrap in [false, true] {
+        let spans = record(async {
+            let binding = query_binding();
+            let mut request = query_request(QueryObservationKind::Transaction);
+            if bootstrap {
+                request.phase = QueryObservationPhase::Bootstrap;
+            } else {
+                request.parent = Some(TraceContextV1::new([2; 16], [2; 8], 0, None).unwrap());
+            }
+            let transaction = binding.begin_query_observation(&request).unwrap().unwrap();
+            transaction
+                .in_scope(&mut || {
+                    let mut root = if bootstrap {
+                        let mut root_request = query_request(QueryObservationKind::Bootstrap);
+                        root_request.phase = QueryObservationPhase::Bootstrap;
+                        binding.begin_query_observation(&root_request).unwrap()
+                    } else {
+                        None
+                    };
+                    let mut work = || {
+                        if bootstrap {
+                            for _ in 0..2 {
+                                binding
+                                    .query_observation_event(QueryObservationEvent::Input {
+                                        phase: QueryObservationPhase::Bootstrap,
+                                    })
+                                    .unwrap();
+                            }
+                        }
+                        for kind in
+                            [QueryObservationKind::Evaluate, QueryObservationKind::PrepareInput]
+                        {
+                            request.kind = kind;
+                            let observation = binding.begin_query_observation(&request).unwrap();
+                            assert_eq!(
+                                observation.is_some(),
+                                kind == QueryObservationKind::Evaluate
+                            );
+                            drop(observation);
+                        }
+                        let observer = NativeQueryScope::current().unwrap().observer();
+                        assert_eq!(observer.is_some(), !bootstrap);
+                        if let Some(observer) = observer {
+                            let mut commit = observer
+                                .start(drasi_core::computation::QueryOperation::Commit, None)
+                                .unwrap();
+                            commit.finish(true, None);
+                        }
+                    };
+                    if let Some(root) = &root {
+                        root.in_scope(&mut work).unwrap();
+                    } else {
+                        work();
+                    }
+                    if let Some(root) = &mut root {
+                        finish_query(root.as_mut());
+                    }
+                })
+                .unwrap();
+        })
+        .await;
+        assert_eq!(spans.len(), usize::from(bootstrap));
+        if bootstrap {
+            assert_eq!(spans[0].name, "query.bootstrap");
+            assert_eq!(field(&spans[0], "input_count"), Some(&2_i64.into()));
+        }
+    }
+}
+
+#[tokio::test]
+async fn native_query_bootstrap_inputs_follow_retained_root_after_transaction_returns() {
+    let spans = record(async {
+        let binding = query_binding();
+        let mut request = query_request(QueryObservationKind::Transaction);
+        request.phase = QueryObservationPhase::Bootstrap;
+        request.parent = Some(TraceContextV1::new([3; 16], [3; 8], 1, None).unwrap());
+        let mut transaction = binding.begin_query_observation(&request).unwrap().unwrap();
+        let mut root = None;
+        transaction
+            .in_scope(&mut || {
+                request.kind = QueryObservationKind::Bootstrap;
+                root = binding.begin_query_observation(&request).unwrap();
+            })
+            .unwrap();
+        finish_query(transaction.as_mut());
+        drop(transaction);
+        assert!(NativeQueryScope::current().is_none());
+        let mut root = root.unwrap();
+        root.in_scope(&mut || {
+            assert!(NativeQueryScope::current().is_none());
+            for _ in 0..3 {
+                binding
+                    .query_observation_event(QueryObservationEvent::Input {
+                        phase: QueryObservationPhase::Bootstrap,
+                    })
+                    .unwrap();
+            }
+        })
+        .unwrap();
+        binding
+            .query_observation_event(QueryObservationEvent::Input {
+                phase: QueryObservationPhase::Bootstrap,
+            })
+            .unwrap();
+        finish_query(root.as_mut());
+        assert!(ExecutionContext::current().is_empty());
+    })
+    .await;
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].name, "query.bootstrap");
+    assert_eq!(spans[0].links.len(), 1);
+    assert_eq!(field(&spans[0], "input_count"), Some(&3_i64.into()));
+}
+
 #[tokio::test]
 async fn query_phase_detail_is_debug_only_bounded_and_keeps_output_parentage() {
     for profile in [

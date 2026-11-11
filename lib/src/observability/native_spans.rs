@@ -486,6 +486,7 @@ mod tests {
             tracing: true,
             metrics: false,
             native_metrics_required: false,
+            native_query_observations_required: false,
             trace_directives: "trace".into(),
             log_directives: "off".into(),
             metric_exclusions: vec![],

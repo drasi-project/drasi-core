@@ -41,6 +41,373 @@ fn owner(
     owner
 }
 
+fn native_binding(owner: &Arc<ComponentObservations>) -> PluginTelemetry {
+    super::plugin_telemetry::bind(
+        owner,
+        owner.telemetry().scope().unwrap().clone(),
+        "native-query",
+        None,
+    )
+    .unwrap()
+}
+
+fn native_request(kind: QueryObservationKind) -> QueryObservationRequest {
+    QueryObservationRequest {
+        kind,
+        phase: QueryObservationPhase::Steady,
+        parent: None,
+        change_count: (kind == QueryObservationKind::Evaluate).then_some(1),
+    }
+}
+
+fn native_finish(observation: &mut dyn QueryObservation) {
+    observation
+        .finish(QueryObservationResult {
+            outcome: QueryObservationOutcome::Success,
+            result_count: None,
+        })
+        .unwrap();
+}
+
+#[test]
+fn native_query_exclusions_disable_query_collection_without_disabling_component_metrics() {
+    let metrics = RecordingMetrics::default();
+    let owner = TelemetryOptions::new(
+        TelemetrySettings::new(TelemetryProfile::Basic)
+            .with_tracing(false)
+            .exclude_metrics("drasi.query."),
+    )
+    .with_instance_id("excluded-query")
+    .with_metric_context(
+        MetricRegistrationContext::new(Arc::new(metrics.clone()), Default::default()).unwrap(),
+    )
+    .resolve("graph", None)
+    .unwrap()
+    .observations(
+        crate::test_helpers::component_id("query"),
+        ComponentRole::Transformer,
+        ComponentSemanticKind::Query,
+        1,
+    )
+    .unwrap();
+    let binding = native_binding(&owner);
+    assert!(!binding.supports_query_observations());
+    assert!(binding
+        .begin_query_observation(&native_request(QueryObservationKind::Transaction))
+        .unwrap()
+        .is_none());
+    assert!(!metrics.labels("drasi.component.calls").is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn native_query_observes_only_evaluation_and_actual_session_commit() {
+    use drasi_core::{
+        computation::{ComputationIndexProvider, ComputationIndexes, ComputationTransaction},
+        interface::{IndexError, IndexSet, SessionControl},
+    };
+
+    struct CommitSession;
+    #[async_trait::async_trait]
+    impl SessionControl for CommitSession {
+        async fn begin(&self) -> std::result::Result<(), IndexError> {
+            Ok(())
+        }
+        async fn commit(&self) -> std::result::Result<(), IndexError> {
+            tokio::time::advance(Duration::from_secs(5)).await;
+            Ok(())
+        }
+        fn rollback(&self) -> std::result::Result<(), IndexError> {
+            Ok(())
+        }
+    }
+
+    let metrics = RecordingMetrics::default();
+    let owner = owner(
+        &metrics,
+        TelemetryProfile::Persistence,
+        ComponentRole::Transformer,
+        ComponentSemanticKind::Query,
+    );
+    let binding = native_binding(&owner);
+    let mut transaction = binding
+        .begin_query_observation(&native_request(QueryObservationKind::Transaction))
+        .unwrap()
+        .unwrap();
+    let mut observer = None;
+    transaction
+        .in_scope(&mut || {
+            observer = NativeQueryScope::current().unwrap().observer();
+        })
+        .unwrap();
+    assert!(NativeQueryScope::current().is_none());
+    let observer = observer.unwrap();
+    let memory = InMemoryComputationProvider
+        .create_indexes("native", "query")
+        .await
+        .unwrap();
+    let indexes = memory.indexes();
+    let resources = ComputationIndexes::try_new(
+        IndexSet {
+            element_index: indexes.element_index.clone(),
+            archive_index: indexes.archive_index.clone(),
+            result_index: indexes.result_index.clone(),
+            future_queue: indexes.future_queue.clone(),
+            session_control: Arc::new(CommitSession),
+        },
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let processing = ComputationTransaction::for_processing(resources);
+    processing
+        .run_observed(
+            async {
+                let mut evaluation = None;
+                transaction
+                    .in_scope(&mut || {
+                        evaluation = binding
+                            .begin_query_observation(&native_request(
+                                QueryObservationKind::Evaluate,
+                            ))
+                            .unwrap();
+                    })
+                    .unwrap();
+                tokio::time::advance(Duration::from_secs(2)).await;
+                native_finish(evaluation.as_mut().unwrap().as_mut());
+                tokio::time::advance(Duration::from_secs(3)).await;
+                Ok(())
+            },
+            Some(&observer),
+        )
+        .await
+        .unwrap();
+    native_finish(transaction.as_mut());
+    assert_eq!(
+        metrics.histogram("drasi.query.engine.duration", &[]),
+        vec![2.0]
+    );
+    assert_eq!(
+        metrics.histogram("drasi.query.commit.duration", &[("outcome", "success")]),
+        vec![5.0]
+    );
+    assert_eq!(
+        metrics.count("drasi.component.calls", &[("operation", "evaluate")]),
+        0
+    );
+    assert_eq!(
+        metrics.count("drasi.component.calls", &[("operation", "commit")]),
+        0
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn native_query_commit_arming_is_consumed_and_polling_roots_does_not_rearm() {
+    use drasi_core::computation::QueryOperation;
+    let metrics = RecordingMetrics::default();
+    let owner = owner(
+        &metrics,
+        TelemetryProfile::Persistence,
+        ComponentRole::Transformer,
+        ComponentSemanticKind::Query,
+    );
+    let binding = native_binding(&owner);
+    let transaction = binding
+        .begin_query_observation(&native_request(QueryObservationKind::Transaction))
+        .unwrap()
+        .unwrap();
+    let mut observer = None;
+    transaction
+        .in_scope(&mut || {
+            observer = NativeQueryScope::current().unwrap().observer();
+        })
+        .unwrap();
+    let observer = observer.unwrap();
+    let mut empty = observer.start(QueryOperation::Commit, None).unwrap();
+    empty.finish(true, None);
+    assert!(metrics
+        .histogram("drasi.query.commit.duration", &[])
+        .is_empty());
+    let mut root = None;
+    transaction
+        .in_scope(&mut || {
+            root = binding
+                .begin_query_observation(&native_request(QueryObservationKind::FutureQueue))
+                .unwrap();
+        })
+        .unwrap();
+    let root = root.unwrap();
+    for (expected, mark) in [(1, false), (1, false), (2, true)] {
+        transaction
+            .in_scope(&mut || {
+                root.in_scope(&mut || {}).unwrap();
+                if mark {
+                    let mut marker = binding
+                        .begin_query_observation(&native_request(QueryObservationKind::CommitWork))
+                        .unwrap()
+                        .unwrap();
+                    native_finish(marker.as_mut());
+                }
+            })
+            .unwrap();
+        let mut commit = observer.start(QueryOperation::Commit, None).unwrap();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        commit.finish(true, None);
+        assert_eq!(
+            metrics.histogram("drasi.query.commit.duration", &[]).len(),
+            expected
+        );
+    }
+    assert!(NativeQueryScope::current().is_none());
+    assert!(metrics
+        .histogram("drasi.query.engine.duration", &[])
+        .is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn native_query_events_cancellation_and_retirement_reuse_the_existing_owner() {
+    use drasi_core::computation::QueryOperation;
+    let metrics = RecordingMetrics::default();
+    let owner = owner(
+        &metrics,
+        TelemetryProfile::Persistence,
+        ComponentRole::Transformer,
+        ComponentSemanticKind::Query,
+    );
+    let binding = native_binding(&owner);
+    let transaction = binding
+        .begin_query_observation(&native_request(QueryObservationKind::Transaction))
+        .unwrap()
+        .unwrap();
+    let mut observer = None;
+    let mut evaluation = None;
+    transaction
+        .in_scope(&mut || {
+            observer = NativeQueryScope::current().unwrap().observer();
+            evaluation = binding
+                .begin_query_observation(&native_request(QueryObservationKind::Evaluate))
+                .unwrap();
+        })
+        .unwrap();
+    tokio::time::advance(Duration::from_secs(2)).await;
+    drop(evaluation);
+    let observer = observer.unwrap();
+    let commit = observer.start(QueryOperation::Commit, None).unwrap();
+    tokio::time::advance(Duration::from_secs(1)).await;
+    drop(commit);
+    binding
+        .query_observation_event(QueryObservationEvent::Input {
+            phase: QueryObservationPhase::Steady,
+        })
+        .unwrap();
+    binding
+        .query_observation_event(QueryObservationEvent::Results {
+            added: 2,
+            updated: 3,
+            deleted: 4,
+        })
+        .unwrap();
+    binding
+        .query_observation_event(QueryObservationEvent::State { outbox: 5, live: 6 })
+        .unwrap();
+    assert!(binding
+        .query_observation_event(QueryObservationEvent::Results {
+            added: u64::MAX,
+            updated: 1,
+            deleted: 0,
+        })
+        .is_err());
+    assert_eq!(
+        metrics.histogram("drasi.query.engine.duration", &[]),
+        vec![2.0]
+    );
+    assert_eq!(
+        metrics.histogram("drasi.query.commit.duration", &[("outcome", "cancelled")]),
+        vec![1.0]
+    );
+    assert_eq!(metrics.count("drasi.query.events_processed", &[]), 1);
+    assert_eq!(metrics.count("drasi.query.results_emitted", &[]), 9);
+    assert_eq!(
+        metrics.gauge_samples("drasi.query.outbox.entries", &[]),
+        vec![5.0]
+    );
+    owner.revoke();
+    assert!(matches!(
+        transaction.in_scope(&mut || {}),
+        Err(TelemetryError::Retired)
+    ));
+    assert!(observer.start(QueryOperation::Commit, None).is_err());
+    assert!(matches!(
+        binding.query_observation_event(QueryObservationEvent::Input {
+            phase: QueryObservationPhase::Steady
+        }),
+        Err(TelemetryError::Retired)
+    ));
+    assert_eq!(
+        metrics.gauge_samples("drasi.query.outbox.entries", &[]),
+        vec![5.0, 0.0]
+    );
+    assert_eq!(metrics.count("drasi.query.events_processed", &[]), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn native_query_bootstrap_root_reuse_does_not_capture_its_first_transaction() {
+    let metrics = RecordingMetrics::default();
+    let owner = owner(
+        &metrics,
+        TelemetryProfile::Persistence,
+        ComponentRole::Transformer,
+        ComponentSemanticKind::Query,
+    );
+    let binding = native_binding(&owner);
+    let mut request = native_request(QueryObservationKind::Transaction);
+    request.phase = QueryObservationPhase::Bootstrap;
+    let mut root = None;
+    for _ in 0..2 {
+        request.kind = QueryObservationKind::Transaction;
+        let transaction = binding.begin_query_observation(&request).unwrap().unwrap();
+        let mut observer = None;
+        transaction
+            .in_scope(&mut || {
+                observer = NativeQueryScope::current().unwrap().observer();
+                if root.is_none() {
+                    request.kind = QueryObservationKind::Bootstrap;
+                    root = binding.begin_query_observation(&request).unwrap();
+                }
+                root.as_ref()
+                    .unwrap()
+                    .in_scope(&mut || {
+                        request.kind = QueryObservationKind::Evaluate;
+                        let mut evaluation =
+                            binding.begin_query_observation(&request).unwrap().unwrap();
+                        native_finish(evaluation.as_mut());
+                    })
+                    .unwrap();
+            })
+            .unwrap();
+        let mut commit = observer
+            .unwrap()
+            .start(drasi_core::computation::QueryOperation::Commit, None)
+            .unwrap();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        commit.finish(true, None);
+        assert!(NativeQueryScope::current().is_none());
+    }
+    native_finish(root.as_mut().unwrap().as_mut());
+    assert_eq!(
+        metrics.histogram("drasi.query.commit.duration", &[("phase", "bootstrap")]),
+        vec![1.0, 1.0]
+    );
+    assert_eq!(
+        metrics.histogram("drasi.query.engine.duration", &[("phase", "bootstrap")]),
+        vec![0.0, 0.0]
+    );
+    assert!(metrics
+        .histogram("drasi.query.commit.duration", &[("phase", "steady")])
+        .is_empty());
+}
+
 #[tokio::test]
 async fn query_processing_phases_do_not_add_callback_metrics_or_errors() {
     let metrics = RecordingMetrics::default();

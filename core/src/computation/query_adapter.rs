@@ -102,7 +102,9 @@ impl QueryEvaluator {
         }
     }
 
-    async fn evaluate_input_batch_observed<const SOURCE_TRANSACTION: bool>(
+    /// Observe only evaluator work within the caller's processing transaction,
+    /// excluding result hooks and the host-owned commit.
+    pub async fn evaluate_input_batch_observed<const SOURCE_TRANSACTION: bool>(
         &self,
         input: QueryInputBatch,
         observer: Option<&Arc<dyn super::QueryObserver>>,
@@ -129,7 +131,8 @@ impl QueryEvaluator {
         self.evaluate_next_future_observed(None).await
     }
 
-    async fn evaluate_next_future_observed(
+    /// Observe evaluation only after a queued future was actually popped.
+    pub async fn evaluate_next_future_observed(
         &self,
         observer: Option<&Arc<dyn super::QueryObserver>>,
     ) -> Result<Option<Arc<ComputationFutureResult>>> {

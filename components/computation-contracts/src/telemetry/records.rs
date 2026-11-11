@@ -209,6 +209,8 @@ pub struct PluginTelemetryConfig {
     pub tracing: bool,
     pub metrics: bool,
     pub native_metrics_required: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub native_query_observations_required: bool,
     #[serde(deserialize_with = "text")]
     pub trace_directives: String,
     #[serde(deserialize_with = "text")]

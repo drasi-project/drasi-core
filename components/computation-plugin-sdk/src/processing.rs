@@ -183,8 +183,12 @@ impl NativeProcessing {
         Fut: Future<Output = anyhow::Result<T>> + Send + 'static,
         T: Serialize + DeserializeOwned + Send + 'static,
     {
-        let operation = {
-            let work = Arc::new(Work(Mutex::new(Some(work))));
+        let scope = crate::query_telemetry::WorkScope::capture();
+        let operation = scope.in_scope(|| -> anyhow::Result<_> {
+            let work = Arc::new(Work {
+                work: Mutex::new(Some(work)),
+                scope: scope.clone(),
+            });
             let table = ProcessingWorkV1 {
                 header: abi::Header::new::<ProcessingWorkV1>(),
                 context: Arc::as_ptr(&work).cast_mut().cast(),
@@ -209,9 +213,9 @@ impl NativeProcessing {
                     table,
                     &mut operation,
                 ))?;
-                OperationFuture::new(operation)?
+                Ok(OperationFuture::new(operation)?)
             }
-        };
+        })??;
         let bytes = operation.await.map_err(|error| {
             index_error_from_failure(&error)
                 .map(anyhow::Error::new)
@@ -738,7 +742,10 @@ fn work_failure(error: anyhow::Error) -> Failure {
     Failure::from(error)
 }
 
-struct Work<F>(Mutex<Option<F>>);
+struct Work<F> {
+    work: Mutex<Option<F>>,
+    scope: crate::query_telemetry::WorkScope,
+}
 
 unsafe extern "C" fn retain<F>(context: *mut c_void) {
     transport::drop_boundary(|| unsafe { Arc::increment_strong_count(context.cast::<Work<F>>()) });
@@ -763,24 +770,26 @@ where
             return Err(Failure::protocol("null native processing work or output"));
         }
         let work = unsafe { &*context.cast::<Work<F>>() };
+        let scope = work.scope.clone();
         let work = work
-            .0
+            .work
             .lock()
             .map_err(|_| Failure::failed("native processing work poisoned"))?
             .take()
             .ok_or_else(Failure::closed)?;
         let transaction = unsafe { RetainedTransaction::new(transaction)? };
-        let operation = transport::export_operation(
-            async move {
-                let result = work(NativeProcessingContext { transaction })
-                    .await
-                    .map_err(work_failure)?;
-                let bytes = wire::encode(&result).map_err(Failure::from)?;
-                let _: T = wire::decode(&bytes).map_err(Failure::from)?;
-                Ok(bytes)
-            },
-            None,
-        );
+        let future = scope
+            .in_scope(|| {
+                scope.scope(async move {
+                    let result = work(NativeProcessingContext { transaction }).await?;
+                    let bytes = wire::encode(&result)?;
+                    let _: T = wire::decode(&bytes)?;
+                    Ok(bytes)
+                })
+            })
+            .map_err(|error| Failure::from(anyhow::Error::from(error)))?;
+        let operation =
+            transport::export_operation(async move { future.await.map_err(work_failure) }, None);
         unsafe { transport::write_out(out, operation) }
     })
 }

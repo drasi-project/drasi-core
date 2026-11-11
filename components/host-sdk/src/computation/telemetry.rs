@@ -8,11 +8,66 @@ use drasi_computation_plugin_sdk::{
     wire,
 };
 use drasi_lib::observability::*;
-use std::{ffi::c_void, sync::Arc};
+#[cfg(test)]
+#[path = "query_telemetry_tests.rs"]
+mod query_tests;
+use std::{
+    collections::BTreeMap,
+    ffi::c_void,
+    sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
+};
+
+static NEXT_QUERY_BINDING: AtomicU64 = AtomicU64::new(1);
+static OPEN_QUERY_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
+
+struct QuerySlot(Arc<AtomicUsize>);
+impl Drop for QuerySlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+        OPEN_QUERY_OBSERVATIONS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+struct QueryEntry {
+    observation: Mutex<Option<Box<dyn QueryObservation>>>,
+    diagnostics: TelemetryDiagnostics,
+    _slot: QuerySlot,
+}
+
+impl Drop for QueryEntry {
+    fn drop(&mut self) {
+        let observation = self
+            .observation
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(mut observation) = observation.take() {
+            if let Err(error) = observation.finish(QueryObservationResult {
+                outcome: QueryObservationOutcome::Cancelled,
+                result_count: None,
+            }) {
+                self.diagnostics.record(TelemetryLoss::Invalid);
+                log::error!("Cancelling abandoned native query observation: {error}");
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct Queries {
+    next: u64,
+    entries: BTreeMap<u64, Arc<QueryEntry>>,
+}
 
 struct BindingState {
     backend: PluginTelemetry,
     lifetime: TelemetryLifetime,
+    query_owner: [u8; 16],
+    queries: Mutex<Queries>,
+    query_count: Arc<AtomicUsize>,
+    processing_context: Mutex<Option<ExecutionContext>>,
 }
 
 pub(super) struct NativeTelemetryBinding {
@@ -20,12 +75,30 @@ pub(super) struct NativeTelemetryBinding {
     extension: PluginTelemetryV2,
     config: PluginTelemetryConfig,
     capabilities: u32,
+    query: Option<PluginTelemetryV4>,
 }
 
 impl Drop for NativeTelemetryBinding {
     fn drop(&mut self) {
         if let Err(error) = self.state.lifetime.revoke(|| {}) {
             log::error!("Revoking native telemetry callbacks: {error}");
+        }
+        match self.state.queries.lock() {
+            Ok(mut queries) => {
+                let entries = std::mem::take(&mut queries.entries);
+                drop(queries);
+                drop(entries);
+            }
+            Err(error) => {
+                self.state
+                    .backend
+                    .diagnostics()
+                    .record(TelemetryLoss::Invalid);
+                let mut queries = error.into_inner();
+                let entries = std::mem::take(&mut queries.entries);
+                drop(queries);
+                drop(entries);
+            }
         }
         if let Err(error) = self.state.backend.retire() {
             log::error!("Retiring native telemetry instruments: {error}");
@@ -37,6 +110,23 @@ impl NativeTelemetryBinding {
     pub(super) fn capture(
         extension: Option<PluginTelemetryV2>,
         kind: &str,
+    ) -> anyhow::Result<Option<Self>> {
+        Self::capture_with_query(extension, None, kind, false)
+    }
+
+    pub(super) fn capture_query(
+        extension: Option<PluginTelemetryV2>,
+        query: Option<PluginTelemetryV4>,
+        kind: &str,
+    ) -> anyhow::Result<Option<Self>> {
+        Self::capture_with_query(extension, query, kind, true)
+    }
+
+    fn capture_with_query(
+        extension: Option<PluginTelemetryV2>,
+        query: Option<PluginTelemetryV4>,
+        kind: &str,
+        inspect_query: bool,
     ) -> anyhow::Result<Option<Self>> {
         let Some(parent) = ExecutionScope::current_plugin_telemetry() else {
             return Ok(None);
@@ -52,6 +142,21 @@ impl NativeTelemetryBinding {
             })
             .collect();
         let backend = parent.for_plugin(&kind)?;
+        let is_query = inspect_query
+            && backend.config().scope.semantic_kind()
+                == Some(drasi_lib::computation::v1::ComponentSemanticKind::Query);
+        if is_query && (query.is_none() || extension.is_none()) {
+            if backend.config().native_query_observations_required {
+                return Err(
+                    TelemetryError::Unsupported("required native query observations").into(),
+                );
+            }
+            if backend.config().tracing || backend.config().metrics {
+                backend.diagnostics().record(TelemetryLoss::Capture);
+                log::warn!("Native query observations unavailable for {kind}; optional telemetry V4 and a host query backend are required");
+            }
+        }
+        let query = query.filter(|_| is_query && backend.supports_query_observations());
         let Some(extension) = extension else {
             if backend.config().native_metrics_required {
                 return Err(TelemetryError::Unsupported("required native metric callbacks").into());
@@ -68,6 +173,7 @@ impl NativeTelemetryBinding {
             return Err(TelemetryError::Unsupported("required native metric callbacks").into());
         }
         let mut config = backend.config().clone();
+        config.native_query_observations_required &= query.is_some();
         let capabilities = extension.capabilities
             & (CONTEXT
                 | LOGS
@@ -90,15 +196,67 @@ impl NativeTelemetryBinding {
             config.log_directives = "off".into();
         }
         config.validate()?;
+        let owner = NEXT_QUERY_BINDING
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| TelemetryError::Capacity("native query binding identities"))?;
+        let mut query_owner = [0; 16];
+        query_owner[..8].copy_from_slice(&owner.to_le_bytes());
+        query_owner[8..].copy_from_slice(&config.generation.to_le_bytes());
         Ok(Some(Self {
             state: Arc::new(BindingState {
                 backend,
                 lifetime: Default::default(),
+                query_owner,
+                queries: Default::default(),
+                query_count: Default::default(),
+                processing_context: Default::default(),
             }),
             extension,
             config,
             capabilities,
+            query,
         }))
+    }
+
+    pub(super) fn query_observations_active(&self) -> bool {
+        self.query.is_some()
+    }
+
+    pub(super) fn reset_processing_context(&self) -> anyhow::Result<()> {
+        *self
+            .state
+            .processing_context
+            .lock()
+            .map_err(|_| TelemetryError::Poisoned)? = None;
+        Ok(())
+    }
+
+    pub(super) fn processing_context(&self) -> Option<ExecutionContext> {
+        self.query.map(|_| {
+            self.state
+                .processing_context
+                .lock()
+                .ok()
+                .and_then(|context| context.clone())
+                .unwrap_or_default()
+        })
+    }
+
+    fn query_table(&self) -> HostQueryTelemetryV4 {
+        HostQueryTelemetryV4 {
+            header: abi::Header::new::<HostQueryTelemetryV4>(),
+            version: VERSION_V4,
+            reserved: 0,
+            context: Arc::as_ptr(&self.state).cast_mut().cast(),
+            retain: Some(retain),
+            release: Some(release),
+            begin: Some(begin_query),
+            in_scope: Some(query_scope),
+            finish: Some(finish_query),
+            event: Some(query_event),
+        }
     }
 
     fn table(&self) -> HostTelemetryV2 {
@@ -152,12 +310,23 @@ impl NativeTelemetryBinding {
         )?;
         let table = self.table();
         let outcome = unsafe {
-            transport::take_status(self.extension.with_scope.expect("validated")(
-                &table,
-                abi::BorrowedBytes::new(&frame),
-                invoke::<F, T>,
-                (&mut call as *mut Call<F, T>).cast(),
-            ))
+            let state = (&mut call as *mut Call<F, T>).cast();
+            if let Some(query) = self.query {
+                transport::take_status(query.with_scope.expect("validated")(
+                    &table,
+                    &self.query_table(),
+                    abi::BorrowedBytes::new(&frame),
+                    invoke::<F, T>,
+                    state,
+                ))
+            } else {
+                transport::take_status(self.extension.with_scope.expect("validated")(
+                    &table,
+                    abi::BorrowedBytes::new(&frame),
+                    invoke::<F, T>,
+                    state,
+                ))
+            }
         };
         match call.result {
             Some(Err(error)) => Err(error),
@@ -181,6 +350,217 @@ pub(super) fn scope<T>(
         Some(binding) => binding.scope(work),
         None => work(),
     }
+}
+
+fn query_failure(state: &BindingState, error: TelemetryError) -> Failure {
+    state.backend.diagnostics().record(match &error {
+        TelemetryError::Capacity(_) => TelemetryLoss::Full,
+        TelemetryError::Retired => TelemetryLoss::Closed,
+        _ => TelemetryLoss::Invalid,
+    });
+    Failure::from(anyhow::Error::from(error))
+}
+
+fn query_record<T: TelemetryRecord + serde::de::DeserializeOwned>(
+    state: &BindingState,
+    bytes: abi::BorrowedBytes,
+) -> drasi_lib::observability::Result<T> {
+    let bytes =
+        unsafe { transport::borrowed_bytes(bytes, state.backend.config().limits.record_bytes) }
+            .map_err(|error| TelemetryError::Invalid(error.to_string()))?;
+    decode_telemetry(bytes, state.backend.config().limits.record_bytes)
+}
+
+fn query_entry(
+    state: &BindingState,
+    token: QueryToken,
+) -> drasi_lib::observability::Result<Arc<QueryEntry>> {
+    if token.owner != state.query_owner || token.lease == 0 {
+        return Err(TelemetryError::Invalid(
+            "foreign native query observation token".into(),
+        ));
+    }
+    state
+        .queries
+        .lock()
+        .map_err(|_| TelemetryError::Poisoned)?
+        .entries
+        .get(&token.lease)
+        .cloned()
+        .ok_or_else(|| TelemetryError::Invalid("stale native query observation token".into()))
+}
+
+unsafe extern "C" fn begin_query(context: *mut c_void, bytes: abi::BorrowedBytes) -> abi::Reply {
+    transport::reply_boundary(|| {
+        let state = unsafe { state(context)? };
+        let result = state.lifetime.with_active(|| {
+            let request: QueryObservationRequest = query_record(state, bytes)?;
+            state
+                .query_count
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                    (value < state.backend.config().limits.open_spans).then_some(value + 1)
+                })
+                .map_err(|_| TelemetryError::Capacity("native query observations"))?;
+            OPEN_QUERY_OBSERVATIONS
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                    (value < MAX_NATIVE_OPEN_SPANS).then_some(value + 1)
+                })
+                .map_err(|_| {
+                    state.query_count.fetch_sub(1, Ordering::AcqRel);
+                    TelemetryError::Capacity("native query observations")
+                })?;
+            let slot = QuerySlot(state.query_count.clone());
+            let Some(observation) = state.backend.begin_query_observation(&request)? else {
+                return wire::encode(
+                    &Option::<drasi_computation_plugin_sdk::query_transport::QueryBeginReply>::None,
+                )
+                .map_err(|error| TelemetryError::Invalid(error.to_string()));
+            };
+            let entry = Arc::new(QueryEntry {
+                observation: Mutex::new(Some(observation)),
+                diagnostics: state.backend.diagnostics().clone(),
+                _slot: slot,
+            });
+            let context = entry
+                .observation
+                .lock()
+                .map_err(|_| TelemetryError::Poisoned)?
+                .as_ref()
+                .ok_or(TelemetryError::Retired)?
+                .context();
+            let encoded_context = context.encode()?;
+            let mut queries = state.queries.lock().map_err(|_| TelemetryError::Poisoned)?;
+            queries.next = queries.next.checked_add(1).ok_or(TelemetryError::Capacity(
+                "native query observation identities",
+            ))?;
+            let token = QueryToken {
+                owner: state.query_owner,
+                lease: queries.next,
+            };
+            let reply = wire::encode(&Some(
+                drasi_computation_plugin_sdk::query_transport::QueryBeginReply {
+                    owner: token.owner,
+                    lease: token.lease,
+                    context: encoded_context,
+                },
+            ))
+            .map_err(|error| TelemetryError::Invalid(error.to_string()))?;
+            let mut processing = state
+                .processing_context
+                .lock()
+                .map_err(|_| TelemetryError::Poisoned)?;
+            if matches!(
+                request.kind,
+                QueryObservationKind::Bootstrap
+                    | QueryObservationKind::FutureQueue
+                    | QueryObservationKind::OutputReplay
+                    | QueryObservationKind::InputReplay
+            ) || (request.kind == QueryObservationKind::Evaluate && processing.is_none())
+            {
+                *processing = Some(context);
+            }
+            queries.entries.insert(token.lease, entry);
+            Ok(reply)
+        });
+        result.map_err(|error| query_failure(state, error))
+    })
+}
+
+unsafe extern "C" fn query_scope(
+    context: *mut c_void,
+    token: QueryToken,
+    call: ScopedCall,
+    callback_state: *mut c_void,
+) -> abi::Status {
+    transport::status_boundary(|| {
+        let state = unsafe { state(context)? };
+        let entry = state
+            .lifetime
+            .with_active(|| query_entry(state, token))
+            .map_err(|error| query_failure(state, error))?;
+        // A foreign callback can re-enter this binding; never keep the
+        // revocation read gate across it when a retiring writer may be queued.
+        (|| {
+            if !state.lifetime.is_active()? {
+                return Err(TelemetryError::Retired);
+            }
+            let observation = entry
+                .observation
+                .try_lock()
+                .map_err(|_| TelemetryError::Invalid("native query observation is busy".into()))?;
+            let observation = observation.as_ref().ok_or(TelemetryError::Retired)?;
+            let mut called = false;
+            let mut result = Ok(());
+            observation.in_scope(&mut || {
+                if called {
+                    result = Err(TelemetryError::Invalid(
+                        "query observation callback invoked twice".into(),
+                    ));
+                    return;
+                }
+                called = true;
+                result = unsafe { transport::take_status(call(callback_state)) }
+                    .map_err(|error| TelemetryError::Invalid(error.to_string()));
+            })?;
+            if !called {
+                return Err(TelemetryError::Invalid(
+                    "query observation callback not invoked".into(),
+                ));
+            }
+            result
+        })()
+        .map_err(|error| query_failure(state, error))
+    })
+}
+
+unsafe extern "C" fn finish_query(
+    context: *mut c_void,
+    token: QueryToken,
+    bytes: abi::BorrowedBytes,
+) -> abi::Status {
+    transport::status_boundary(|| {
+        let state = unsafe { state(context)? };
+        state
+            .lifetime
+            .with_active(|| {
+                let result: QueryObservationResult = query_record(state, bytes)?;
+                let entry = query_entry(state, token)?;
+                let mut queries = state.queries.lock().map_err(|_| TelemetryError::Poisoned)?;
+                if !queries
+                    .entries
+                    .get(&token.lease)
+                    .is_some_and(|value| Arc::ptr_eq(value, &entry))
+                {
+                    return Err(TelemetryError::Invalid(
+                        "stale native query observation token".into(),
+                    ));
+                }
+                queries.entries.remove(&token.lease);
+                drop(queries);
+                let mut observation = entry.observation.try_lock().map_err(|_| {
+                    TelemetryError::Invalid(
+                        "native query observation is busy; cancellation is pending".into(),
+                    )
+                })?;
+                let mut observation = observation.take().ok_or(TelemetryError::Retired)?;
+                observation.finish(result)
+            })
+            .map_err(|error| query_failure(state, error))
+    })
+}
+
+unsafe extern "C" fn query_event(context: *mut c_void, bytes: abi::BorrowedBytes) -> abi::Status {
+    transport::status_boundary(|| {
+        let state = unsafe { state(context)? };
+        state
+            .lifetime
+            .with_active(|| {
+                state
+                    .backend
+                    .query_observation_event(query_record(state, bytes)?)
+            })
+            .map_err(|error| query_failure(state, error))
+    })
 }
 
 unsafe fn state<'a>(context: *mut c_void) -> std::result::Result<&'a BindingState, Failure> {

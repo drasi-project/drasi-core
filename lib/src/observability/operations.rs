@@ -482,7 +482,17 @@ impl ComponentObservations {
         phase: QueryPhase,
         detail: bool,
     ) -> Option<Arc<dyn drasi_core::computation::QueryObserver>> {
-        ((detail
+        self.observes_query_operations(detail).then(|| {
+            Arc::new(QueryOperationObserver {
+                owner: self.clone(),
+                phase,
+                detail,
+            }) as Arc<dyn drasi_core::computation::QueryObserver>
+        })
+    }
+
+    pub(super) fn observes_query_operations(&self, detail: bool) -> bool {
+        (detail
             && (self.config.policy().allows_span("query.evaluate")
                 || self.config.policy().allows_span("query.commit")))
             || self
@@ -492,14 +502,7 @@ impl ComponentObservations {
             || self
                 .config
                 .policy()
-                .allows_metric("drasi.query.commit.duration"))
-        .then(|| {
-            Arc::new(QueryOperationObserver {
-                owner: self.clone(),
-                phase,
-                detail,
-            }) as Arc<dyn drasi_core::computation::QueryObserver>
-        })
+                .allows_metric("drasi.query.commit.duration")
     }
 
     pub(crate) fn query_input(&self, phase: QueryPhase) {
@@ -517,25 +520,66 @@ impl ComponentObservations {
         if self.query.get().is_none() {
             return;
         }
-        self.update(|| {
-            if let Some(query) = self.query.get() {
-                let mut counts = [0; 3];
-                for change in output.changes().operations() {
-                    use crate::computation::v1::ChangeOperation;
-                    let index = match change {
-                        ChangeOperation::Added { .. } => 0,
-                        ChangeOperation::Updated { .. } => 1,
-                        ChangeOperation::Deleted { .. } => 2,
-                    };
-                    counts[index] += 1;
-                }
-                for (counter, count) in query.results.iter().zip(counts) {
-                    if count > 0 {
-                        counter.increment(count);
-                    }
+        let mut counts = [0; 3];
+        for change in output.changes().operations() {
+            use crate::computation::v1::ChangeOperation;
+            let index = match change {
+                ChangeOperation::Added { .. } => 0,
+                ChangeOperation::Updated { .. } => 1,
+                ChangeOperation::Deleted { .. } => 2,
+            };
+            counts[index] += 1;
+        }
+        self.update(|| self.query_result_counts(counts));
+    }
+
+    fn query_result_counts(&self, counts: [u64; 3]) {
+        if let Some(query) = self.query.get() {
+            for (counter, count) in query.results.iter().zip(counts) {
+                if count > 0 {
+                    counter.increment(count);
                 }
             }
-        });
+        }
+    }
+
+    pub(super) fn native_query_event(
+        &self,
+        event: super::QueryObservationEvent,
+        lifetime: &super::TelemetryLifetime,
+    ) -> Result<(), TelemetryError> {
+        use super::QueryObservationEvent;
+        lifetime.with_active(|| {
+            if let QueryObservationEvent::Input { phase } = event {
+                super::native_query::query_input(self, phase)?;
+            }
+            let Some(query) = self.query.get() else {
+                return Ok(());
+            };
+            match event {
+                QueryObservationEvent::Input { phase } => {
+                    query.inputs[QueryPhase::from(phase) as usize].increment(1);
+                }
+                QueryObservationEvent::Results {
+                    added,
+                    updated,
+                    deleted,
+                } => {
+                    self.query_result_counts([added, updated, deleted]);
+                }
+                QueryObservationEvent::State { outbox, live } => {
+                    let count = |value| {
+                        usize::try_from(value).map_err(|_| {
+                            TelemetryError::Invalid(
+                                "query state count exceeds platform range".into(),
+                            )
+                        })
+                    };
+                    query.state(&self.config, count(outbox)?, count(live)?)?;
+                }
+            }
+            Ok(())
+        })
     }
 
     pub(crate) fn query_state(&self, outbox: usize, live: usize) {
@@ -647,11 +691,12 @@ impl ComponentObservations {
 
     pub(crate) async fn scope<T>(self: &Arc<Self>, future: impl Future<Output = T>) -> T {
         let mut future = std::pin::pin!(future);
-        poll_fn(|cx| {
-            let _guard = CurrentGuard(CURRENT.with(|current| current.replace(Some(self.clone()))));
-            future.as_mut().poll(cx)
-        })
-        .await
+        poll_fn(|cx| self.in_scope(|| future.as_mut().poll(cx))).await
+    }
+
+    pub(super) fn in_scope<T>(self: &Arc<Self>, work: impl FnOnce() -> T) -> T {
+        let _guard = CurrentGuard(CURRENT.with(|current| current.replace(Some(self.clone()))));
+        work()
     }
 
     pub(crate) fn update_up(&self, up: bool) {
@@ -716,6 +761,14 @@ impl ComponentObservations {
         self: &Arc<Self>,
         phase: QueryProcessingPhase,
     ) -> Result<Option<Box<OperationObservation>>, TelemetryError> {
+        self.begin_query_phase_with_parent(phase, &ExecutionContext::current())
+    }
+
+    fn begin_query_phase_with_parent(
+        self: &Arc<Self>,
+        phase: QueryProcessingPhase,
+        parent: &ExecutionContext,
+    ) -> Result<Option<Box<OperationObservation>>, TelemetryError> {
         let operation = phase.operation();
         let name = operation
             .span_name(self.config.scope())
@@ -723,17 +776,116 @@ impl ComponentObservations {
         if !self.config.policy().allows_span(name) {
             return Ok(None);
         }
-        let parent = ExecutionContext::current();
         if parent.trace().is_some_and(|trace| !trace.sampled())
             || (self.config.context_adapter().is_some() && parent.trace().is_none())
         {
             return Ok(None);
         }
-        let observation = self.begin(operation, &parent, Default::default())?;
+        let observation = self.begin(operation, parent, Default::default())?;
         if observation.span.is_disabled() {
             return Ok(None);
         }
         Ok(Some(Box::new(observation)))
+    }
+
+    pub(super) fn begin_query_operation(
+        self: &Arc<Self>,
+        operation: drasi_core::computation::QueryOperation,
+        parent: &ExecutionContext,
+        phase: QueryPhase,
+        detail: bool,
+        change_count: Option<usize>,
+    ) -> Result<OperationObservation, TelemetryError> {
+        let evaluate = operation == drasi_core::computation::QueryOperation::Evaluate;
+        let operation = if evaluate {
+            ObservedOperation::Evaluate
+        } else {
+            ObservedOperation::Commit
+        };
+        let fields = OperationFields {
+            change_count,
+            ..Default::default()
+        };
+        let mut observation = if detail {
+            self.begin(operation, parent, fields)?
+        } else {
+            self.begin_untraced(operation, parent, fields)?
+        };
+        let name = if evaluate {
+            "drasi.query.engine.duration"
+        } else {
+            "drasi.query.commit.duration"
+        };
+        if self.query.get().is_some() && self.config.policy().allows_metric(name) {
+            observation.query_timing = Some((phase, evaluate, Instant::now()));
+        }
+        Ok(observation)
+    }
+
+    pub(super) fn begin_native_query(
+        self: &Arc<Self>,
+        request: &super::QueryObservationRequest,
+        parent: &ExecutionContext,
+    ) -> Result<Option<OperationObservation>, TelemetryError> {
+        use super::QueryObservationKind as Kind;
+        let detail = request.phase == super::QueryObservationPhase::Steady;
+        let phase = QueryPhase::from(request.phase);
+        match request.kind {
+            Kind::Transaction | Kind::CommitWork => Ok(None),
+            Kind::Evaluate => self
+                .begin_query_operation(
+                    drasi_core::computation::QueryOperation::Evaluate,
+                    parent,
+                    phase,
+                    detail,
+                    request
+                        .change_count
+                        .map(|count| {
+                            usize::try_from(count).map_err(|_| {
+                                TelemetryError::Invalid(
+                                    "query change count exceeds platform range".into(),
+                                )
+                            })
+                        })
+                        .transpose()?,
+                )
+                .map(Some),
+            Kind::PrepareInput | Kind::PrepareOutput | Kind::Finalize if !detail => Ok(None),
+            Kind::PrepareInput | Kind::PrepareOutput | Kind::Finalize => {
+                let phase = match request.kind {
+                    Kind::PrepareInput => QueryProcessingPhase::PrepareInput,
+                    Kind::PrepareOutput => QueryProcessingPhase::PrepareOutput,
+                    _ => QueryProcessingPhase::Finalize,
+                };
+                self.begin_query_phase_with_parent(phase, parent)
+                    .map(|observation| observation.map(|observation| *observation))
+            }
+            Kind::Bootstrap => self
+                .root(
+                    ObservedOperation::Bootstrap,
+                    parent,
+                    OperationFields {
+                        input_count: Some(0),
+                        ..Default::default()
+                    },
+                )
+                .map(Some),
+            Kind::FutureQueue | Kind::OutputReplay | Kind::InputReplay => self
+                .root(
+                    ObservedOperation::Scheduled,
+                    &ExecutionContext::default(),
+                    OperationFields {
+                        input_count: Some(0),
+                        work_kind: Some(match request.kind {
+                            Kind::FutureQueue => "future_queue",
+                            Kind::OutputReplay => "output_replay",
+                            _ => "input_replay",
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .map(Some),
+        }
     }
 
     pub(crate) async fn query_phase<T, E>(
@@ -919,6 +1071,7 @@ impl ComponentObservations {
             completion: fields.completion,
             record_metrics,
             query_timing: None,
+            metric_lifetime: None,
         })
     }
 }
@@ -935,6 +1088,8 @@ pub(crate) struct OperationObservation {
     completion: Option<&'static str>,
     record_metrics: bool,
     query_timing: Option<(QueryPhase, bool, Instant)>,
+    // Native bindings retire independently; do not nest child and parent lifetime gates.
+    metric_lifetime: Option<super::TelemetryLifetime>,
 }
 
 impl OperationObservation {
@@ -944,6 +1099,20 @@ impl OperationObservation {
 
     pub(crate) fn span(&self) -> Span {
         self.span.clone()
+    }
+
+    pub(super) fn with_lifetime(mut self, lifetime: super::TelemetryLifetime) -> Self {
+        self.metric_lifetime = Some(lifetime);
+        self
+    }
+
+    pub(super) fn in_scope(&self, work: &mut dyn FnMut()) {
+        self.owner.in_scope(|| {
+            self.scope.in_scope(|| {
+                let _entered = self.span.enter();
+                work();
+            })
+        });
     }
 }
 
@@ -960,33 +1129,10 @@ impl drasi_core::computation::QueryObserver for QueryOperationObserver {
         change_count: Option<usize>,
     ) -> Result<Box<dyn drasi_core::computation::QueryObservation>, drasi_core::interface::IndexError>
     {
-        let operation = match operation {
-            drasi_core::computation::QueryOperation::Evaluate => ObservedOperation::Evaluate,
-            drasi_core::computation::QueryOperation::Commit => ObservedOperation::Commit,
-        };
-        let fields = OperationFields {
-            change_count,
-            ..Default::default()
-        };
         let context = ExecutionContext::current();
-        let observation = if self.detail {
-            self.owner.begin(operation, &context, fields)
-        } else {
-            self.owner.begin_untraced(operation, &context, fields)
-        };
-        observation
-            .map(|mut observation| {
-                let evaluate = operation == ObservedOperation::Evaluate;
-                let name = if evaluate {
-                    "drasi.query.engine.duration"
-                } else {
-                    "drasi.query.commit.duration"
-                };
-                if self.owner.query.get().is_some()
-                    && self.owner.config.policy().allows_metric(name)
-                {
-                    observation.query_timing = Some((self.phase, evaluate, Instant::now()));
-                }
+        self.owner
+            .begin_query_operation(operation, &context, self.phase, self.detail, change_count)
+            .map(|observation| {
                 Box::new(observation) as Box<dyn drasi_core::computation::QueryObservation>
             })
             .map_err(drasi_core::interface::IndexError::other)
@@ -995,10 +1141,25 @@ impl drasi_core::computation::QueryObserver for QueryOperationObserver {
 
 impl drasi_core::computation::QueryObservation for OperationObservation {
     fn in_scope(&self, work: &mut dyn FnMut()) {
-        self.scope.in_scope(|| {
-            let _entered = self.span.enter();
-            work();
-        });
+        self.in_scope(work);
+    }
+
+    fn in_scope_result(
+        &self,
+        work: &mut dyn FnMut(),
+    ) -> Result<(), drasi_core::interface::IndexError> {
+        if let Some(lifetime) = &self.metric_lifetime {
+            if !lifetime
+                .is_active()
+                .map_err(drasi_core::interface::IndexError::other)?
+            {
+                return Err(drasi_core::interface::IndexError::other(
+                    TelemetryError::Retired,
+                ));
+            }
+        }
+        self.in_scope(work);
+        Ok(())
     }
 
     fn finish(&mut self, success: bool, result_count: Option<usize>) {
@@ -1132,7 +1293,7 @@ impl OperationObservation {
         if outcome == 1 {
             self.span.record("error_kind", self.operation.error_kind());
         }
-        self.owner.update(|| {
+        let record = || {
             if let Some((phase, evaluate, started)) = self.query_timing {
                 if let Some(query) = self.owner.query.get() {
                     let histogram = if evaluate {
@@ -1172,7 +1333,19 @@ impl OperationObservation {
                     self.owner.inputs[index].increment(self.input_count as u64);
                 }
             }
-        });
+        };
+        if let Some(lifetime) = &self.metric_lifetime {
+            if let Err(error) = lifetime.with_active(|| {
+                record();
+                Ok(())
+            }) {
+                if error != TelemetryError::Retired {
+                    log::error!("Updating native query telemetry: {error}");
+                }
+            }
+        } else {
+            self.owner.update(record);
+        }
     }
 }
 
