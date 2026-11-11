@@ -127,6 +127,13 @@ This runs `release-plz release` for unpublished crate versions and, on success, 
 
 New packages may be private after their first push. If final visibility verification fails, a package administrator must make them public in GitHub Package settings, then rerun the failed verification job. If only plugin publishing failed after crates were published, it can also be retried via a new `publish-plugins.yml` dispatch at the intended release ref without republishing crates.
 
+For the Windows GNU `multiple plugin FFI ABI version markers` failure caused by
+the old reader embedding its own search prefix, the selected **source** must
+include the reader repair. Rebuild from corrected main after checking its crate
+versions; rerunning the old job or selecting the old source ref with a newer
+publisher still produces the invalid DLLs. Use plugin publication, not signature
+repair, and do not bypass ABI checks or republish crates just to rebuild plugins.
+
 Plugin publication has separate artifact and catalog outcomes. A required upload,
 signing, verification, or catalog error fails the command and Actions job, even
 when other entries succeeded. Artifact failures suppress that batch's catalog

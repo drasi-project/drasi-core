@@ -276,6 +276,13 @@ from each built binary to generate `abi_version` in its metadata JSON.
 before any upload, including dry runs and cross-compiled targets. Publication
 uses the same validated ABI in the OCI annotation and result report.
 
+The shared reader must not embed its own literal marker prefix: MinGW can retain
+the reader's constants inside a DLL, creating a false second marker. It compares
+an encoded search prefix instead, with an optimizer barrier so release LTO cannot
+reintroduce the literal. Missing, malformed, and duplicate markers (even identical
+versions) remain errors. PR CI builds the real identity test plugin for Windows
+GNU with release LTO and validates it using that same reader.
+
 Artifacts predating the marker/annotation are not accepted by the corrected
 registry resolver. Rebuild and publish versioned artifacts using this contract;
 do not guess the ABI from the package version, silently relabel old artifacts,

@@ -52,16 +52,36 @@ pub const RUSTLS_RING_PROVIDER_MARKER: [u8; 27] = *b"drasi-rustls-provider=ring\
 /// loading them or calling their initialization code.
 pub const PLUGIN_ABI_VERSION_MARKER_PREFIX: &[u8] = b"drasi-plugin-ffi-abi=";
 
+fn plugin_abi_marker_offsets(binary: &[u8]) -> impl Iterator<Item = usize> + '_ {
+    // MinGW retains this reader's constants in plugin DLLs, even in release
+    // builds. Do not embed the literal search prefix: it would match itself.
+    // The optimizer barrier prevents LTO from decoding it back into a literal.
+    const ENCODED_PREFIX: [u8; PLUGIN_ABI_VERSION_MARKER_PREFIX.len()] = {
+        let mut bytes = [0; PLUGIN_ABI_VERSION_MARKER_PREFIX.len()];
+        let mut index = 0;
+        while index < bytes.len() {
+            bytes[index] = !PLUGIN_ABI_VERSION_MARKER_PREFIX[index];
+            index += 1;
+        }
+        bytes
+    };
+    let encoded = std::hint::black_box(ENCODED_PREFIX);
+    binary
+        .windows(encoded.len())
+        .enumerate()
+        .filter_map(move |(offset, window)| {
+            window
+                .iter()
+                .zip(encoded)
+                .all(|(byte, expected)| !byte == expected)
+                .then_some(offset)
+        })
+}
+
 /// Read the unique embedded ABI version from a plugin binary.
 pub fn read_plugin_abi_version(binary: &[u8]) -> Result<&str, &'static str> {
     let mut version = None;
-    for (offset, window) in binary
-        .windows(PLUGIN_ABI_VERSION_MARKER_PREFIX.len())
-        .enumerate()
-    {
-        if window != PLUGIN_ABI_VERSION_MARKER_PREFIX {
-            continue;
-        }
+    for offset in plugin_abi_marker_offsets(binary) {
         if version.is_some() {
             return Err("multiple plugin FFI ABI version markers");
         }
@@ -93,6 +113,22 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a real Windows GNU plugin built by the ABI-marker workflow job"]
+    fn reads_abi_version_from_windows_gnu_plugin() {
+        let path = std::env::var("DRASI_ABI_TEST_PLUGIN")
+            .expect("DRASI_ABI_TEST_PLUGIN must select the built Windows GNU DLL");
+        let binary = std::fs::read(path).expect("read Windows GNU plugin");
+        assert!(
+            binary.starts_with(b"MZ"),
+            "fixture must be a Windows PE binary"
+        );
+        let abi = read_plugin_abi_version(&binary).expect("one unambiguous plugin ABI marker");
+        let expected =
+            std::env::var("DRASI_ABI_TEST_VERSION").expect("expected plugin ABI version");
+        assert_eq!(abi, expected);
+    }
+
+    #[test]
     fn rejects_missing_malformed_and_ambiguous_markers() {
         for binary in [
             b"legacy binary".as_slice(),
@@ -101,6 +137,9 @@ mod tests {
             b"drasi-plugin-ffi-abi=\xff\0",
             b"drasi-plugin-ffi-abi=0.13.0\0drasi-plugin-ffi-abi=0.14.0\0",
             b"drasi-plugin-ffi-abi=0.14.0\0drasi-plugin-ffi-abi=0.14.0\0",
+            b"drasi-plugin-ffi-abi=0.14.0\0drasi-plugin-ffi-abi=",
+            b"drasi-plugin-ffi-abi=0.14.0\0drasi-plugin-ffi-abi=\0",
+            b"drasi-plugin-ffi-abi=0.14.0\0drasi-plugin-ffi-abi=\xff\0",
         ] {
             assert!(read_plugin_abi_version(binary).is_err(), "{binary:?}");
         }

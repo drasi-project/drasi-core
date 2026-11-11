@@ -17,6 +17,28 @@ permissions:
 
 
 jobs:
+  windows-gnu-abi:
+    name: Windows GNU Plugin ABI Marker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Install Windows GNU cross-toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64
+          rustup target add x86_64-pc-windows-gnu
+      - name: Build actual exported plugin with release LTO
+        run: cargo build --locked --release --target x86_64-pc-windows-gnu -p drasi-identity-test --features dynamic-plugin
+      - name: Validate embedded ABI with shared artifact reader
+        run: |
+          export DRASI_ABI_TEST_PLUGIN="$PWD/target/x86_64-pc-windows-gnu/release/drasi_identity_test.dll"
+          DRASI_ABI_TEST_VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("components/plugin-sdk/Cargo.toml", "rb"))["package"]["metadata"]["drasi"]["ffi-abi-version"])')"
+          export DRASI_ABI_TEST_VERSION
+          cargo test --locked -p drasi-ffi-primitives reads_abi_version_from_windows_gnu_plugin -- --ignored
+
   signature-repair:
     name: Plugin Signature Repair Tests (offline)
     runs-on: ubuntu-latest

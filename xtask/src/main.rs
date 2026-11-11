@@ -1901,6 +1901,17 @@ mod tests {
         let mut metadata = artifact_metadata();
         let binary = b"binary\0drasi-plugin-ffi-abi=0.14.0\0";
         validate_plugin_artifact(&metadata, binary).expect("matching ABI");
+        for duplicate in [
+            b"drasi-plugin-ffi-abi=0.14.0\0drasi-plugin-ffi-abi=0.14.0\0".as_slice(),
+            b"drasi-plugin-ffi-abi=0.14.0\0drasi-plugin-ffi-abi=0.15.0\0",
+        ] {
+            let error = validate_plugin_artifact(&metadata, duplicate)
+                .expect_err("duplicate or conflicting ABI marker");
+            assert!(
+                error.contains("multiple plugin FFI ABI version markers"),
+                "{error}"
+            );
+        }
         for abi in ["0.13.0", "0.14.1", "invalid", ""] {
             metadata.abi_version = abi.to_string();
             let error =

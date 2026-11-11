@@ -177,6 +177,18 @@ mod abi_tests {
             "{error}"
         );
         assert!(validate_binary_abi(b"legacy binary", Some(abi), Some(&manifest)).is_err());
+        for second in [abi, "99.0.0", ""] {
+            let binary =
+                format!("binary\0drasi-plugin-ffi-abi={abi}\0drasi-plugin-ffi-abi={second}\0");
+            let error = validate_binary_abi(binary.as_bytes(), Some(abi), Some(&manifest))
+                .expect_err("duplicate or conflicting ABI marker");
+            assert!(
+                error
+                    .to_string()
+                    .contains("multiple plugin FFI ABI version markers"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
