@@ -335,6 +335,111 @@ fn query_scope_allows_nested_map_callbacks_and_rejects_busy_handle() -> anyhow::
 }
 
 #[test]
+fn nested_sdk_scopes_reject_reentry_without_blocking() -> anyhow::Result<()> {
+    let (done, completed) = std::sync::mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        let result = (|| -> anyhow::Result<()> {
+            let (_graph, scope) = setup(true)?;
+            let (v2, v4) = extensions();
+            let binding = scope
+                .in_scope(|| NativeTelemetryBinding::capture_query(Some(v2), Some(v4), "query"))?
+                .expect("binding");
+            let query = binding.scope(|| Ok(QueryTelemetry::capture()?))?;
+            let mut first = query
+                .begin(
+                    QueryObservationKind::Transaction,
+                    QueryObservationPhase::Steady,
+                    None,
+                )?
+                .expect("first scope");
+            let mut second = query
+                .begin(
+                    QueryObservationKind::Transaction,
+                    QueryObservationPhase::Steady,
+                    None,
+                )?
+                .expect("second scope");
+            first.in_scope(&mut || {
+                second
+                    .in_scope(&mut || {
+                        let error = first
+                            .in_scope(&mut || panic!("busy scope executed"))
+                            .unwrap_err();
+                        assert!(error.to_string().contains("busy"), "{error}");
+                    })
+                    .unwrap();
+            })?;
+            first.finish(QueryObservationOutcome::Success, None)?;
+            second.finish(QueryObservationOutcome::Success, None)?;
+            assert!(binding.state.queries.lock().unwrap().entries.is_empty());
+            Ok(())
+        })();
+        let _ = done.send(result.map_err(|error| error.to_string()));
+    });
+    completed
+        .recv_timeout(std::time::Duration::from_secs(5))?
+        .map_err(anyhow::Error::msg)?;
+    worker.join().expect("query scope worker did not panic");
+    Ok(())
+}
+
+#[test]
+fn query_scope_releases_retirement_gates_before_foreign_callbacks() -> anyhow::Result<()> {
+    let (done, completed) = std::sync::mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        let result = (|| -> anyhow::Result<()> {
+            let (_graph, scope) = setup(true)?;
+            let (v2, v4) = extensions();
+            let mut binding = Some(
+                scope
+                    .in_scope(|| {
+                        NativeTelemetryBinding::capture_query(Some(v2), Some(v4), "query")
+                    })?
+                    .expect("binding"),
+            );
+            let query = binding
+                .as_ref()
+                .unwrap()
+                .scope(|| Ok(QueryTelemetry::capture()?))?;
+            let mut guard = query
+                .begin(
+                    QueryObservationKind::Transaction,
+                    QueryObservationPhase::Steady,
+                    None,
+                )?
+                .expect("scope");
+            let retained = binding.as_ref().unwrap().state.clone();
+            guard.in_scope(&mut || {
+                drop(binding.take());
+                assert!(
+                    query
+                        .event(QueryObservationEvent::Input {
+                            phase: QueryObservationPhase::Steady,
+                        })
+                        .is_err(),
+                    "retired binding accepted a late query update"
+                );
+            })?;
+            assert!(guard
+                .finish(QueryObservationOutcome::Success, None)
+                .is_err());
+            drop(guard);
+            assert!(retained.queries.lock().unwrap().entries.is_empty());
+            assert_eq!(retained.query_count.load(Ordering::Acquire), 0);
+            Ok(())
+        })();
+        let _ = done.send(result.map_err(|error| error.to_string()));
+    });
+    completed
+        .recv_timeout(std::time::Duration::from_secs(5))?
+        .map_err(anyhow::Error::msg)?;
+    worker
+        .join()
+        .expect("query retirement worker did not panic");
+    Ok(())
+}
+
+#[test]
 fn missing_query_extension_is_optional_unless_explicitly_required() -> anyhow::Result<()> {
     let (_graph, scope) = setup(false)?;
     let (v2, _) = extensions();

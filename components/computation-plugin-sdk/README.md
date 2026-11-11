@@ -243,6 +243,11 @@ is diagnosed; `TelemetrySettings::require_native_query_observations()` rejects
 an incapable query plugin before construction. Rebuild the actual cdylib to
 enable this optional extension.
 
+Scope callbacks can enter another observation handle. Re-entering a borrowed
+handle through a different nested scope fails explicitly as busy instead of
+blocking. Token-map and retirement gates are released before foreign callbacks;
+an accepted poll retains its owners, while retirement rejects late updates.
+
 The host span handoff defaults to 1,024 records and 16 MiB encoded bytes with a
 64 KiB maximum record; queued, reserved and in-flight work all count. SDK capture
 limits open spans to 256 per binding (4,096 per library), with fixed bounds of 64
