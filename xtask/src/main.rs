@@ -15,6 +15,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod integration_matrix;
+mod publish_dependencies;
 
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -395,6 +396,13 @@ fn main() {
     match subcommand {
         Some("build-plugins") => build_plugins(&args[2..]),
         Some("check-publish-dependency-cycles") => check_publish_dependency_cycles(),
+        Some("check-publish-dependencies") => {
+            let metadata = load_cargo_metadata(true);
+            if let Err(error) = publish_dependencies::check(&metadata) {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
         Some("list-plugins") => list_plugins(),
         Some("list-integration-test-matrix") => list_integration_test_matrix(),
         Some("publish-plugins") => publish_plugins(&args[2..]),
@@ -407,6 +415,9 @@ fn main() {
             );
             eprintln!(
                 "  check-publish-dependency-cycles  Check publishable packages for dev-dependency cycles"
+            );
+            eprintln!(
+                "  check-publish-dependencies  Check release dev-dependency ordering and crates.io availability"
             );
             eprintln!("  list-plugins               List all discovered dynamic plugin crates");
             eprintln!(
