@@ -1124,7 +1124,7 @@ async fn both_network_paths_use_one_host_query_evaluation_per_input() -> Result<
         let indexes = ResourceId::try_new("memory-indexes")?;
         let spec = ComponentSpecification {
             descriptor: query.descriptor(),
-            role: ComponentRole::Query,
+            role: ComponentRole::Transformer,
             completion: None,
             implementation: ImplementationIdentity::try_new("drasi/continuous-query", "1")?,
             configuration_version: 1,

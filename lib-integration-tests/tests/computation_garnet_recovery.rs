@@ -15,7 +15,7 @@
 #![cfg(test)]
 #![cfg(feature = "garnet-tests")]
 
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use drasi_core::{
     computation::ComputationIndexProvider,
@@ -157,6 +157,67 @@ async fn garnet_native_and_standard_adapters_recover_primary_output_and_separate
         let result = exercise(adapter.clone(), "ordinary-garnet").await;
         adapter.shutdown().await?;
         result
+    }
+    .await;
+    redis.cleanup().await;
+    result
+}
+
+#[tokio::test]
+async fn native_query_rejects_unqualified_garnet_without_touching_storage() -> Result<()> {
+    let redis = shared_tests::redis_helpers::setup_redis().await;
+    let result = async {
+        let provider = Arc::new(GarnetComputationProvider::new(redis.url(), false));
+        let plugin = drasi_host_sdk::computation::NativePlugin::from_definition(
+            drasi_computation_transformer_query::plugin()?,
+        )?;
+        let factory = plugin
+            .factories()
+            .iter()
+            .find(|factory| {
+                factory.metadata().implementation.name.as_ref()
+                    == "drasi.experimental/indexed-query"
+            })
+            .context("indexed native query")?;
+        let mut query = factory.create_component_with_processing(
+            ComponentId::try_new("query")?,
+            serde_json::json!({"query":"MATCH (n:Item) RETURN n.name AS name"}),
+            drasi_computation_plugin_sdk::Scope {
+                instance_id: "native-garnet-capabilities".into(),
+                graph_id: "native-garnet-capabilities".into(),
+                generation: 1,
+            },
+            provider.clone(),
+        )?;
+        let error = query
+            .start()
+            .await
+            .expect_err("unknown storage durability cannot be upgraded");
+        ensure!(format!("{error:#}").contains("not guaranteed"), "{error:#}");
+        query.stop().await?;
+        drop(query);
+        let indexes = provider
+            .create_indexes("native-garnet-capabilities", "query")
+            .await?;
+        ensure!(indexes
+            .checkpoint_store()
+            .context("Garnet checkpoints")?
+            .read_result_sequence("query")
+            .await?
+            .is_none());
+        ensure!(indexes
+            .live_results_writer()
+            .context("Garnet live rows")?
+            .read_snapshot("query")
+            .await?
+            .is_empty());
+        ensure!(indexes
+            .outbox_writer()
+            .context("Garnet outbox")?
+            .read_from("query", 0)
+            .await?
+            .is_empty());
+        Ok(())
     }
     .await;
     redis.cleanup().await;

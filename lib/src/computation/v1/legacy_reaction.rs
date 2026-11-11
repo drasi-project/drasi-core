@@ -199,7 +199,7 @@ mod tests {
         fn query_ids(&self) -> Vec<String> {
             vec!["query".into()]
         }
-        async fn initialize(&self, _context: ReactionRuntimeContext) {}
+        async fn bind_runtime_context(&self, _context: ReactionRuntimeContext) {}
         async fn start(&self) -> anyhow::Result<()> {
             Ok(())
         }

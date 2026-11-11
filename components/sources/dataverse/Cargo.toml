@@ -13,6 +13,7 @@
 # limitations under the License.
 
 [package]
+rust-version.workspace = true
 name = "drasi-source-dataverse"
 version = "0.2.12"
 edition.workspace = true

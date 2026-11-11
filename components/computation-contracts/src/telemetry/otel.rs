@@ -45,9 +45,8 @@ impl<S: opentelemetry_sdk::trace::ShouldSample + Clone + 'static>
         kind: &opentelemetry::trace::SpanKind,
         attributes: &[opentelemetry::KeyValue],
         links: &[opentelemetry::trace::Link],
-    ) -> opentelemetry::trace::SamplingResult {
-        use opentelemetry::trace::{SamplingDecision, SamplingResult};
-        use opentelemetry_sdk::trace::{Sampler, ShouldSample};
+    ) -> opentelemetry_sdk::trace::SamplingResult {
+        use opentelemetry_sdk::trace::{Sampler, SamplingDecision, SamplingResult};
         let request = parent.and_then(|context| context.get::<Arc<OperationSampling>>());
         if let Some(request) = request {
             request.observed.store(true, Ordering::Relaxed);
@@ -210,7 +209,7 @@ mod tests {
             kind: &opentelemetry::trace::SpanKind,
             attributes: &[opentelemetry::KeyValue],
             links: &[opentelemetry::trace::Link],
-        ) -> opentelemetry::trace::SamplingResult {
+        ) -> opentelemetry_sdk::trace::SamplingResult {
             self.0.lock().unwrap().push((
                 name.to_owned(),
                 links.len(),

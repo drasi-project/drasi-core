@@ -16,9 +16,12 @@
 //!
 //! This module exposes observability metrics snapshots for queries, reactions,
 //! and lifecycle events.
+//! Per-component string selectors are exact current names; use the paired
+//! `_by_id` methods for explicit [`crate::config::ComponentId`] selection.
 
 use std::collections::HashMap;
 
+use crate::config::ComponentId;
 use crate::error::Result;
 use crate::lib_core::DrasiLib;
 use crate::metrics::{
@@ -70,9 +73,20 @@ impl DrasiLib {
     /// ```
     pub async fn get_query_output_metrics(
         &self,
-        query_id: &str,
+        query_name: &str,
     ) -> Result<QueryOutputMetricsSnapshot> {
-        self.inspection.get_query_output_metrics(query_id).await
+        let query_id = self.resolve_component_name(query_name, "query")?;
+        self.get_query_output_metrics_by_id(&query_id).await
+    }
+
+    /// Get query output metrics by immutable UUID.
+    pub async fn get_query_output_metrics_by_id(
+        &self,
+        query_id: &ComponentId,
+    ) -> Result<QueryOutputMetricsSnapshot> {
+        self.inspection
+            .get_query_output_metrics(query_id.as_str())
+            .await
     }
 
     /// Get per-reaction metrics for a specific reaction.
@@ -96,9 +110,20 @@ impl DrasiLib {
     /// ```
     pub async fn get_reaction_metrics(
         &self,
-        reaction_id: &str,
+        reaction_name: &str,
     ) -> Result<HashMap<String, ReactionMetricsSnapshot>> {
-        self.inspection.get_reaction_metrics(reaction_id).await
+        let reaction_id = self.resolve_component_name(reaction_name, "reaction")?;
+        self.get_reaction_metrics_by_id(&reaction_id).await
+    }
+
+    /// Get reaction metrics by immutable UUID.
+    pub async fn get_reaction_metrics_by_id(
+        &self,
+        reaction_id: &ComponentId,
+    ) -> Result<HashMap<String, ReactionMetricsSnapshot>> {
+        self.inspection
+            .get_reaction_metrics(reaction_id.as_str())
+            .await
     }
 
     /// Get global lifecycle metrics.

@@ -23,23 +23,17 @@
 //! Each side implements the same Rust-facing trait; the trait object itself
 //! does not cross the library boundary:
 //!
-//! - **In-process reactions** receive an internal `InProcessSnapshotFetcher`
-//!   backed by the host's query provider.
+//! - **In-process reactions** receive a scoped fetcher backed by graph-owned
+//!   query readers.
 //! - **cdylib plugin reactions** receive an FFI proxy (`FfiSnapshotFetcherProxy`)
 //!   backed by the ordinary SDK's `SnapshotFetcherVtable` with C-compatible callbacks.
 //!
 //! Both sides use the same [`SnapshotStream`] return type, and the FFI layer
 //! reuses the same streaming iterator protocol as bootstrap.
 
-use std::collections::HashSet;
-use std::sync::Arc;
-
 use async_trait::async_trait;
-use tokio::sync::RwLock;
 
-use crate::channels::ComponentStatus;
 use crate::queries::output_state::{FetchError, SnapshotStream};
-use crate::reactions::QueryProvider;
 
 /// Trait for fetching query snapshots on-demand at runtime.
 ///
@@ -64,58 +58,4 @@ pub trait SnapshotFetcher: Send + Sync {
     /// - `FetchError::NotRunning` if the query is not running or not found
     /// - `FetchError::TimedOut` if the query's bootstrap hasn't completed in time
     async fn fetch_snapshot(&self, query_id: &str) -> Result<SnapshotStream, FetchError>;
-}
-
-/// In-process snapshot fetcher backed by a [`QueryProvider`].
-///
-/// Used for reactions running in the same process (not across FFI).
-/// Wraps a lazily-resolved `QueryProvider` behind a `RwLock` so it can
-/// be created at provision time (before `QueryProvider` is injected) and
-/// resolved at call time.
-pub(crate) struct InProcessSnapshotFetcher {
-    query_provider: Arc<RwLock<Option<Arc<dyn QueryProvider>>>>,
-    allowed_queries: HashSet<String>,
-}
-
-impl InProcessSnapshotFetcher {
-    /// Create a new in-process snapshot fetcher.
-    ///
-    /// The `query_provider` may be `None` at construction time and resolved
-    /// lazily when `fetch_snapshot` is called (after `inject_query_provider`).
-    pub fn new(
-        query_provider: Arc<RwLock<Option<Arc<dyn QueryProvider>>>>,
-        allowed_queries: Vec<String>,
-    ) -> Self {
-        Self {
-            query_provider,
-            allowed_queries: allowed_queries.into_iter().collect(),
-        }
-    }
-}
-
-#[async_trait]
-impl SnapshotFetcher for InProcessSnapshotFetcher {
-    async fn fetch_snapshot(&self, query_id: &str) -> Result<SnapshotStream, FetchError> {
-        if !self.allowed_queries.contains(query_id) {
-            return Err(FetchError::NotRunning {
-                status: ComponentStatus::Error,
-            });
-        }
-
-        let provider = self.query_provider.read().await;
-        let provider = provider.as_ref().ok_or(FetchError::NotRunning {
-            status: ComponentStatus::Error,
-        })?;
-
-        let query =
-            provider
-                .get_query_instance(query_id)
-                .await
-                .map_err(|_| FetchError::NotRunning {
-                    status: ComponentStatus::Error,
-                })?;
-
-        let snapshot = query.fetch_snapshot().await?;
-        Ok(SnapshotStream::from_snapshot(snapshot))
-    }
 }

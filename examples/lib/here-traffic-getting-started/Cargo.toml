@@ -9,6 +9,8 @@ description = "HERE Traffic real-time dashboard example"
 [workspace]
 
 [dependencies]
+drasi-host-sdk = { path = "../../../components/host-sdk" }
+drasi-computation-transformer-query = { path = "../../../components/computation-plugins/transformers/query" }
 drasi-lib = { path = "../../../lib" }
 drasi-source-here-traffic = { path = "../../../components/sources/here-traffic" }
 drasi-bootstrap-here-traffic = { path = "../../../components/bootstrappers/here-traffic" }

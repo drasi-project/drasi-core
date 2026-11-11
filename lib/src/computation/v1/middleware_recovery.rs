@@ -429,7 +429,7 @@ impl TransformStore {
                     && envelope.system().sequence() <= emission
                     && envelope.system().sequence() >= logical_sequence
                     && previous_emission
-                        .map_or(true, |previous| envelope.system().sequence() > previous)
+                        .is_none_or(|previous| envelope.system().sequence() > previous)
                     && envelope.id()
                         == &super::emission_id(&self.output_stream, envelope.system().sequence())?
                     && envelope.lineage().is_some()
@@ -694,7 +694,7 @@ impl TransformStore {
         Fut: Future<Output = anyhow::Result<ChangeEnvelope>> + Send,
     {
         anyhow::ensure!(
-            progress.position.as_ref().map_or(true, |position| {
+            progress.position.as_ref().is_none_or(|position| {
                 position.len() <= crate::sources::SourceBase::MAX_SOURCE_POSITION_BYTES
             }),
             "middleware source position exceeds the supported checkpoint limit"
@@ -732,7 +732,7 @@ impl TransformStore {
         if query_owner.is_some()
             && saved
                 .as_ref()
-                .map_or(true, |saved| progress.sequence > saved.sequence)
+                .is_none_or(|saved| progress.sequence > saved.sequence)
         {
             anyhow::ensure!(
                 saved

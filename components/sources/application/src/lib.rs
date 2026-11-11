@@ -150,11 +150,11 @@ pub use property_builder::PropertyMapBuilder;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use log::{debug, error, info, trace, warn};
+use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
 
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 use drasi_lib::channels::{ComponentStatus, *};
@@ -742,16 +742,14 @@ impl Source for ApplicationSource {
         self.config.durability.as_ref().is_some_and(|d| d.enabled)
     }
 
-    async fn deprovision(&self) -> Result<()> {
+    async fn delete_owned_resources(&self) -> Result<()> {
         // Delete WAL data if durability was enabled
         let wal_guard = self.wal.read().await;
         if let Some(ref wal) = *wal_guard {
-            info!("[{}] Deprovisioning: deleting WAL data", self.base.id);
+            info!("[{}] Deleting owned WAL data", self.base.id);
             if let Err(e) = wal.delete_wal(&self.base.id).await {
-                warn!(
-                    "[{}] Failed to delete WAL during deprovision: {}",
-                    self.base.id, e
-                );
+                warn!("[{}] Failed to delete owned WAL data: {}", self.base.id, e);
+                return Err(e.into());
             }
         }
         drop(wal_guard);
@@ -762,8 +760,8 @@ impl Source for ApplicationSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn set_bootstrap_provider(

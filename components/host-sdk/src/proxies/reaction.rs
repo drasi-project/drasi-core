@@ -36,46 +36,91 @@ use drasi_plugin_sdk::ffi::{
 };
 use libloading::Library;
 
+use super::retained_call::{CallKind, RetainedCall};
 use super::source::{known_plugin_origin, observe_resources_and_plugin, read_plugin_version};
 use crate::snapshot_fetcher_bridge::SnapshotFetcherVtableBuilder;
 use crate::state_store_bridge::StateStoreVtableBuilder;
 
 /// Wraps a `ReactionVtable` into a DrasiLib `Reaction` trait implementation.
+///
+/// Lifecycle calls retain their blocking worker across cancelled waits and
+/// deadlines. Stop also joins the previous activation's result forwarder before
+/// restart. Keep the proxy after cleanup failure and retry; dropping a proxy is
+/// not successful asynchronous disposal or permission to delete owned state.
 pub struct ReactionProxy {
     log_forwarding: Option<Arc<crate::callbacks::PluginLogForwarding>>,
     vtable: ReactionVtable,
-    _library: Arc<Library>,
+    calls: RetainedCall,
     cached_id: String,
     cached_type_name: String,
-    /// Per-instance callback context for plugin-emitted log/lifecycle callbacks.
-    ///
-    /// Stored as an `Arc` whose strong count was bumped by `Arc::into_raw` when
-    /// the raw pointer was handed to the plugin. The host's `Arc` is kept here
-    /// so the proxy holds at least two strong references; on Drop the host's
-    /// `Arc` is `mem::forget`-ed unconditionally so any **late** log/lifecycle
-    /// callback emitted by the plugin (after `stop()` returns) still finds a
-    /// valid pointer. The cdylib itself is intentionally leaked process-wide
-    /// (see `host-sdk/src/loader.rs`), so the small per-instance `Arc` leak is
-    /// acceptable in exchange for closing the late-callback UAF window.
-    _callback_ctx: std::sync::Mutex<Option<Arc<crate::callbacks::InstanceCallbackContext>>>,
-    /// Channel for push-based result delivery. Created on start, closed on stop/drop.
-    result_tx:
-        std::sync::Mutex<Option<std::sync::mpsc::SyncSender<drasi_lib::channels::QueryResult>>>,
-    /// Keep the callback context alive for the lifetime of the forwarder.
-    _push_ctx: std::sync::Mutex<Option<Arc<ResultPushContext>>>,
+    forwarding: Arc<ResultForwarding>,
     /// Per-reaction identity provider set programmatically via
     /// [`Reaction::set_identity_provider`]. When present, it takes precedence
     /// over any instance-wide provider supplied via
     /// [`ReactionRuntimeContext::identity_provider`] during
-    /// [`Reaction::initialize`].
+    /// [`Reaction::bind_runtime_context`].
     identity_provider: std::sync::Mutex<Option<Arc<dyn IdentityProvider>>>,
     resource_report_failed: AtomicBool,
     plugin_origin: Option<PluginOrigin>,
 }
 
+#[derive(Default)]
+struct ResultForwarding {
+    result_tx:
+        std::sync::Mutex<Option<tokio::sync::mpsc::Sender<drasi_lib::channels::QueryResult>>>,
+    push_context: std::sync::Mutex<Option<Arc<ResultPushContext>>>,
+}
+
+impl ResultForwarding {
+    fn close_sender(&self) -> anyhow::Result<()> {
+        self.result_tx
+            .lock()
+            .map_err(|error| anyhow::anyhow!("result channel lock poisoned: {error}"))?
+            .take();
+        Ok(())
+    }
+
+    // Called only on the retained blocking worker, never on a runtime thread.
+    fn close_and_join(&self) -> anyhow::Result<()> {
+        self.close_sender()?;
+        let mut slot = self
+            .push_context
+            .lock()
+            .map_err(|error| anyhow::anyhow!("result forwarder lock poisoned: {error}"))?;
+        if let Some(context) = slot.as_ref() {
+            let done = context.forwarder_done.lock().map_err(|error| {
+                anyhow::anyhow!("result forwarder completion lock poisoned: {error}")
+            })?;
+            let (done, _) = context
+                .forwarder_done_cv
+                .wait_timeout_while(done, std::time::Duration::from_secs(5), |done| !*done)
+                .map_err(|error| {
+                    anyhow::anyhow!("result forwarder completion wait poisoned: {error}")
+                })?;
+            anyhow::ensure!(
+                *done,
+                "reaction result forwarder has not exited; its context and plugin are retained; retry stop"
+            );
+        }
+        slot.take();
+        Ok(())
+    }
+
+    fn ensure_stopped(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.push_context
+                .lock()
+                .map_err(|error| anyhow::anyhow!("result forwarder lock poisoned: {error}"))?
+                .is_none(),
+            "reaction result forwarder must be joined by stop before disposal"
+        );
+        Ok(())
+    }
+}
+
 /// Context for the push-based result callback.
 struct ResultPushContext {
-    rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<drasi_lib::channels::QueryResult>>>,
+    rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<drasi_lib::channels::QueryResult>>>,
     /// Signaled when the plugin-side forwarder task has fully exited its loop
     /// and will no longer access the `ReactionWrapper`. The forwarder signals
     /// this by calling the callback one final time with the sentinel parameter,
@@ -107,9 +152,9 @@ extern "C" fn result_push_callback(ctx: *mut c_void, sentinel: *mut c_void) -> *
         result_push_callback_inner(ctx, sentinel)
     }))
     .unwrap_or_else(|_| {
-        // On panic, signal done so drop() doesn't deadlock
-        let context = unsafe { &*(ctx as *const ResultPushContext) };
-        signal_forwarder_done(context);
+        // A failed receive is not proof that the plugin forwarder has exited.
+        // It must still send its exit sentinel before cleanup can release state.
+        log::error!("reaction result callback panicked; awaiting the forwarder's exit sentinel");
         std::ptr::null_mut()
     })
 }
@@ -138,13 +183,13 @@ fn result_push_callback_inner(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c
         return std::ptr::null_mut();
     }
 
-    let guard = context
+    let mut guard = context
         .rx
         .lock()
         .expect("result_push_callback lock poisoned");
-    if let Some(ref rx) = *guard {
-        match rx.recv() {
-            Ok(result) => {
+    if let Some(ref mut rx) = *guard {
+        match rx.blocking_recv() {
+            Some(result) => {
                 // Serialize the QueryResult for cross-cdylib transfer (issue #602):
                 // never hand the plugin a reinterpreted `repr(Rust)` pointer.
                 let bytes = encode_query_result(&result);
@@ -156,7 +201,7 @@ fn result_push_callback_inner(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c
                     payload_drop_fn: Some(drop_query_result_bytes),
                 })) as *mut c_void
             }
-            Err(_) => {
+            None => {
                 // Channel closed — return null so the forwarder breaks.
                 // Do NOT signal forwarder_done here; the forwarder will
                 // send a sentinel callback after it has fully exited.
@@ -173,19 +218,30 @@ unsafe impl Send for ReactionProxy {}
 unsafe impl Sync for ReactionProxy {}
 
 impl ReactionProxy {
+    #[cfg(test)]
+    pub(super) fn set_call_wait_timeout(&mut self, timeout: std::time::Duration) {
+        self.calls.set_wait_timeout(timeout);
+    }
+
     pub fn new(vtable: ReactionVtable, library: Arc<Library>) -> Self {
         let cached_id = unsafe { (vtable.id_fn)(vtable.state as *const c_void).to_string() };
         let cached_type_name =
             unsafe { (vtable.type_name_fn)(vtable.state as *const c_void).to_string() };
+        let forwarding = Arc::new(ResultForwarding::default());
+        let calls = RetainedCall::new(
+            vtable.state,
+            vtable.drop_fn,
+            library,
+            cached_id.clone(),
+            Some(forwarding.clone()),
+        );
         Self {
             log_forwarding: None,
             vtable,
-            _library: library,
+            calls,
             cached_id,
             cached_type_name,
-            _callback_ctx: std::sync::Mutex::new(None),
-            result_tx: std::sync::Mutex::new(None),
-            _push_ctx: std::sync::Mutex::new(None),
+            forwarding,
             identity_provider: std::sync::Mutex::new(None),
             resource_report_failed: AtomicBool::new(false),
             plugin_origin: None,
@@ -274,7 +330,7 @@ impl Reaction for ReactionProxy {
         (self.vtable.auto_start_fn)(self.vtable.state as *const c_void)
     }
 
-    async fn initialize(&self, context: ReactionRuntimeContext) {
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
         let binding = context.log_binding.clone().unwrap_or_else(|| {
             drasi_lib::observability::ComponentLogBinding {
                 registry: drasi_lib::observability::get_or_init_global_registry(),
@@ -306,146 +362,187 @@ impl Reaction for ReactionProxy {
         )
         .await;
 
-        let state_store_vtable = context
-            .state_store
-            .as_ref()
-            .map(|ss| StateStoreVtableBuilder::build(ss.clone()));
+        let update_tx = context.update_tx.clone();
+        let runtime_handle = tokio::runtime::Handle::current();
+        let bind_fn = self.vtable.bind_runtime_context_fn;
+        let result = self
+            .calls
+            .run(CallKind::BindRuntimeContext, move |owner| {
+                let instance_id_str = context.instance_id.clone();
+                let component_id_str = context.reaction_id.clone();
 
-        let instance_id_str = context.instance_id.clone();
-        let component_id_str = context.reaction_id.clone();
+                let instance_id_ffi = FfiStr::from_str(&instance_id_str);
+                let component_id_ffi = FfiStr::from_str(&component_id_str);
 
-        let instance_id_ffi = FfiStr::from_str(&instance_id_str);
-        let component_id_ffi = FfiStr::from_str(&component_id_str);
+                // Create per-instance callback context for this reaction
+                let per_instance_ctx = Arc::new(crate::callbacks::InstanceCallbackContext {
+                    instance_id: binding.key.instance_id,
+                    component_id: binding.key.component_id,
+                    component_type: binding.key.component_type,
+                    runtime_handle,
+                    log_registry,
+                    update_tx: context.update_tx.clone(),
+                });
 
-        // Ownership of this allocation transfers to the plugin. ABI 0.17
-        // `FfiStateStoreProxy` frees the vtable and its state on `Drop`; ABI 0.16
-        // plugins retain it (see `FfiRuntimeContext::state_store`). The host must
-        // not free it.
-        let ss_ptr = state_store_vtable
-            .map(|v| Box::into_raw(Box::new(v)) as *const _)
-            .unwrap_or(std::ptr::null());
+                // Preserve the process-pinned reference used by late ordinary callbacks.
+                let mut callback_context = owner.callback_context.lock().map_err(|error| {
+                    anyhow::anyhow!("Reaction callback context lock poisoned: {error}")
+                })?;
+                let ctx_ptr = Arc::into_raw(per_instance_ctx.clone()) as *mut c_void;
+                *callback_context = Some(per_instance_ctx);
+                drop(callback_context);
 
-        // Create per-instance callback context for this reaction
-        let per_instance_ctx = Arc::new(crate::callbacks::InstanceCallbackContext {
-            instance_id: binding.key.instance_id,
-            component_id: binding.key.component_id,
-            component_type: binding.key.component_type,
-            runtime_handle: tokio::runtime::Handle::current(),
-            log_registry,
-            update_tx: context.update_tx.clone(),
-        });
+                // Preserve the ABI 0.17 state-store ownership contract, transferring
+                // only after fallible host-side preparation has completed.
+                let ss_ptr = context
+                    .state_store
+                    .as_ref()
+                    .map(|store| {
+                        Box::into_raw(Box::new(StateStoreVtableBuilder::build(store.clone())))
+                            as *const _
+                    })
+                    .unwrap_or(std::ptr::null());
 
-        // Bug C fix: hand the plugin a strong reference (Arc::into_raw bumps
-        // the refcount) so log/lifecycle callbacks emitted late by the plugin
-        // (e.g. from inside stop_fn or from internal tasks shutting down) do
-        // not deref freed memory. The matching `mem::forget` happens in Drop
-        // and intentionally leaks one strong ref per instance.
-        let ctx_for_plugin = per_instance_ctx.clone();
-        let ctx_ptr = Arc::into_raw(ctx_for_plugin) as *mut c_void;
+                let identity_vtable = identity_provider
+                    .map(crate::identity_bridge::IdentityProviderVtableBuilder::build);
 
-        if let Ok(mut guard) = self._callback_ctx.lock() {
-            *guard = Some(per_instance_ctx);
+                let ip_ptr: *mut drasi_plugin_sdk::ffi::identity::IdentityProviderVtable =
+                    identity_vtable
+                        .map(|v| Box::into_raw(Box::new(v)))
+                        .unwrap_or(std::ptr::null_mut());
+
+                let snapshot_fetcher_vtable = context
+                    .snapshot_fetcher
+                    .as_ref()
+                    .map(|sf| SnapshotFetcherVtableBuilder::build(sf.clone()));
+
+                let sf_ptr = snapshot_fetcher_vtable
+                    .map(|v| Box::into_raw(Box::new(v)) as *const _)
+                    .unwrap_or(std::ptr::null());
+
+                let ffi_ctx = FfiRuntimeContext {
+                    instance_id: instance_id_ffi,
+                    component_id: component_id_ffi,
+                    state_store: ss_ptr,
+                    identity_provider: ip_ptr as *const _,
+                    log_callback: Some(crate::callbacks::instance_log_callback),
+                    log_ctx: ctx_ptr,
+                    lifecycle_callback: Some(crate::callbacks::instance_lifecycle_callback),
+                    lifecycle_ctx: ctx_ptr,
+                    snapshot_fetcher: sf_ptr,
+                    wal_provider: std::ptr::null(),
+                };
+
+                let result = bind_fn(owner.state.as_ptr(), &ffi_ctx as *const FfiRuntimeContext);
+
+                // Reclaim the identity-provider vtable struct we allocated for `ip_ptr`. This is a
+                // transient pointer: the plugin SDK (>= 0.10.0) copies the vtable fields by value in
+                // `FfiIdentityProviderProxy::new` during binding and never retains `ip_ptr`,
+                // so it is safe to free the struct here. Plugins built against SDK < 0.10.0 retained
+                // the raw pointer; they are rejected by the loader's exact major.minor version gate
+                // (see `validate_plugin_metadata` in `host-sdk/src/loader.rs`), which prevents a
+                // use-after-free. This frees only the `IdentityProviderVtable` struct (no `Drop`
+                // impl) — the underlying state remains owned by the plugin proxy and is released via
+                // `drop_fn` when that proxy is dropped.
+                if !ip_ptr.is_null() {
+                    unsafe {
+                        drop(Box::from_raw(ip_ptr));
+                    }
+                }
+                unsafe { result.into_result() }.map_err(anyhow::Error::msg)
+            })
+            .await;
+        if let Err(error) = result {
+            let message = format!(
+                "Reaction '{}' context binding failed: {error:#}",
+                self.cached_id
+            );
+            log::error!("{message}");
+            ComponentStatusHandle::new_wired(&self.cached_id, update_tx)
+                .set_status(ComponentStatus::Error, Some(message))
+                .await;
         }
+    }
 
-        let identity_vtable =
-            identity_provider.map(crate::identity_bridge::IdentityProviderVtableBuilder::build);
-
-        let ip_ptr: *mut drasi_plugin_sdk::ffi::identity::IdentityProviderVtable = identity_vtable
-            .map(|v| Box::into_raw(Box::new(v)))
-            .unwrap_or(std::ptr::null_mut());
-
-        let snapshot_fetcher_vtable = context
-            .snapshot_fetcher
-            .as_ref()
-            .map(|sf| SnapshotFetcherVtableBuilder::build(sf.clone()));
-
-        let sf_ptr = snapshot_fetcher_vtable
-            .map(|v| Box::into_raw(Box::new(v)) as *const _)
-            .unwrap_or(std::ptr::null());
-
-        let ffi_ctx = FfiRuntimeContext {
-            instance_id: instance_id_ffi,
-            component_id: component_id_ffi,
-            state_store: ss_ptr,
-            identity_provider: ip_ptr as *const _,
-            log_callback: Some(crate::callbacks::instance_log_callback),
-            log_ctx: ctx_ptr,
-            lifecycle_callback: Some(crate::callbacks::instance_lifecycle_callback),
-            lifecycle_ctx: ctx_ptr,
-            snapshot_fetcher: sf_ptr,
-            wal_provider: std::ptr::null(),
-        };
-
-        (self.vtable.initialize_fn)(self.vtable.state, &ffi_ctx as *const FfiRuntimeContext);
-
-        // Reclaim the identity-provider vtable struct we allocated for `ip_ptr`. This is a
-        // transient pointer: the plugin SDK (>= 0.10.0) copies the vtable fields by value in
-        // `FfiIdentityProviderProxy::new` during `initialize_fn` and never retains `ip_ptr`,
-        // so it is safe to free the struct here. Plugins built against SDK < 0.10.0 retained
-        // the raw pointer; they are rejected by the loader's exact major.minor version gate
-        // (see `validate_plugin_metadata` in `host-sdk/src/loader.rs`), which prevents a
-        // use-after-free. This frees only the `IdentityProviderVtable` struct (no `Drop`
-        // impl) — the underlying state remains owned by the plugin proxy and is released via
-        // `drop_fn` when that proxy is dropped.
-        if !ip_ptr.is_null() {
-            unsafe {
-                drop(Box::from_raw(ip_ptr));
-            }
-        }
+    async fn initialize(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.resource_report_failed.load(Ordering::Acquire),
+            "Reaction '{}' resource observation failed",
+            self.cached_id
+        );
+        self.calls
+            .call(CallKind::Initialize, self.vtable.initialize_fn)
+            .await
     }
 
     async fn start(&self) -> anyhow::Result<()> {
-        // Set up push-based result channel before starting the reaction
-        let (tx, rx) = std::sync::mpsc::sync_channel::<drasi_lib::channels::QueryResult>(256);
-        {
-            let mut guard = self.result_tx.lock().expect("result_tx lock poisoned");
-            *guard = Some(tx);
-        }
-
-        let push_ctx = Arc::new(ResultPushContext {
-            rx: std::sync::Mutex::new(Some(rx)),
-            forwarder_done: std::sync::Mutex::new(false),
-            forwarder_done_cv: std::sync::Condvar::new(),
-        });
-        // Use Arc::as_ptr — the Arc stays alive in _push_ctx for the lifetime of the proxy
-        let ctx_ptr = Arc::as_ptr(&push_ctx) as *mut c_void;
-        {
-            let mut guard = self._push_ctx.lock().expect("_push_ctx lock poisoned");
-            *guard = Some(push_ctx);
-        }
-
-        // Start the plugin's forwarder task
-        (self.vtable.start_result_push_fn)(self.vtable.state, result_push_callback, ctx_ptr);
-
-        // Start the reaction itself
-        let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
         let start_fn = self.vtable.start_fn;
-        let result = std::thread::spawn(move || (start_fn)(state.as_ptr()))
-            .join()
-            .map_err(|_| anyhow::anyhow!("Thread panicked"))?;
-        unsafe { result.into_result().map_err(|e| anyhow::anyhow!(e)) }
+        let push_fn = self.vtable.start_result_push_fn;
+        let forwarding = self.forwarding.clone();
+        self.calls
+            .run(CallKind::Start, move |owner| {
+                unsafe { start_fn(owner.state.as_ptr()).into_result() }
+                    .map_err(anyhow::Error::msg)?;
+                let mut sender = forwarding
+                    .result_tx
+                    .lock()
+                    .map_err(|error| anyhow::anyhow!("result channel lock poisoned: {error}"))?;
+                if sender.is_some() {
+                    return Ok(());
+                }
+                forwarding.ensure_stopped()?;
+                let (tx, rx) = tokio::sync::mpsc::channel(256);
+                let push_context = Arc::new(ResultPushContext {
+                    rx: std::sync::Mutex::new(Some(rx)),
+                    forwarder_done: std::sync::Mutex::new(false),
+                    forwarder_done_cv: std::sync::Condvar::new(),
+                });
+                let ctx_ptr = Arc::as_ptr(&push_context) as *mut c_void;
+                *forwarding.push_context.lock().map_err(|error| {
+                    anyhow::anyhow!("result forwarder lock poisoned: {error}")
+                })? = Some(push_context);
+                push_fn(owner.state.as_ptr(), result_push_callback, ctx_ptr);
+                *sender = Some(tx);
+                Ok(())
+            })
+            .await
     }
 
     async fn stop(&self) -> anyhow::Result<()> {
-        // Bug B fix: close ONLY the sender. Dropping the sender is sufficient
-        // to unblock the forwarder's `rx.recv()` (it returns Err, the callback
-        // returns null, and the forwarder breaks). Do NOT also drop the
-        // receiver here — the callback may still be holding `context.rx.lock()`
-        // for a recv() that is racing this stop, and removing the receiver
-        // mid-flight creates a race against the forwarder's in-flight
-        // `enqueue_query_result(qr).await` against the reaction's
-        // shutting-down priority queue.
-        {
-            let mut guard = self.result_tx.lock().expect("result_tx lock poisoned");
-            *guard = None;
-        }
-
-        let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
         let stop_fn = self.vtable.stop_fn;
-        let result = std::thread::spawn(move || (stop_fn)(state.as_ptr()))
-            .join()
-            .map_err(|_| anyhow::anyhow!("Thread panicked"))?;
-        unsafe { result.into_result().map_err(|e| anyhow::anyhow!(e)) }
+        let forwarding = self.forwarding.clone();
+        self.calls
+            .run(CallKind::Stop, move |owner| {
+                // Close admission, drain and join the previous forwarder before
+                // stopping its destination queue or allowing another activation.
+                forwarding.close_and_join()?;
+                unsafe { stop_fn(owner.state.as_ptr()).into_result() }.map_err(anyhow::Error::msg)
+            })
+            .await
+    }
+
+    async fn dispose(&self) -> anyhow::Result<()> {
+        let dispose_fn = self.vtable.dispose_fn;
+        let forwarding = self.forwarding.clone();
+        self.calls
+            .run(CallKind::Dispose, move |owner| {
+                forwarding.ensure_stopped()?;
+                unsafe { dispose_fn(owner.state.as_ptr()).into_result() }
+                    .map_err(anyhow::Error::msg)
+            })
+            .await
+    }
+
+    async fn pause_processing(&self) -> anyhow::Result<()> {
+        self.calls
+            .call(CallKind::PauseProcessing, self.vtable.pause_processing_fn)
+            .await
+    }
+
+    async fn resume_processing(&self) -> anyhow::Result<()> {
+        self.calls
+            .call(CallKind::ResumeProcessing, self.vtable.resume_processing_fn)
+            .await
     }
 
     async fn status(&self) -> ComponentStatus {
@@ -469,38 +566,41 @@ impl Reaction for ReactionProxy {
         &self,
         result: drasi_lib::channels::QueryResult,
     ) -> anyhow::Result<()> {
-        let guard = self.result_tx.lock().expect("result_tx lock poisoned");
-        if let Some(ref tx) = *guard {
-            tx.send(result)
-                .map_err(|_| anyhow::anyhow!("Result channel closed"))?;
-        } else {
-            return Err(anyhow::anyhow!(
-                "Reaction not started — result channel not initialized"
-            ));
-        }
+        let tx = self
+            .forwarding
+            .result_tx
+            .lock()
+            .map_err(|error| anyhow::anyhow!("result channel lock poisoned: {error}"))?
+            .clone()
+            .ok_or_else(|| {
+                anyhow::anyhow!("Reaction not started — result channel not initialized")
+            })?;
+        tx.send(result)
+            .await
+            .map_err(|_| anyhow::anyhow!("Result channel closed"))?;
         Ok(())
     }
 
-    async fn deprovision(&self) -> anyhow::Result<()> {
-        let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
-        let deprovision_fn = self.vtable.deprovision_fn;
-        let result = std::thread::spawn(move || (deprovision_fn)(state.as_ptr()))
-            .join()
-            .map_err(|_| anyhow::anyhow!("Thread panicked"))?;
-        unsafe { result.into_result().map_err(|e| anyhow::anyhow!(e)) }
+    async fn delete_owned_resources(&self) -> anyhow::Result<()> {
+        self.calls
+            .call(
+                CallKind::DeleteOwnedResources,
+                self.vtable.delete_owned_resources_fn,
+            )
+            .await
     }
 
     /// Stash a per-instance identity provider that will take precedence over
-    /// the runtime-context provider during [`Reaction::initialize`].
+    /// the runtime-context provider during [`Reaction::bind_runtime_context`].
     ///
     /// # Timing constraint (FFI reactions only)
     ///
     /// For `ReactionProxy`, the provider must be set **before** the reaction
     /// is added to `DrasiLib` (i.e. before the lifecycle manager calls
-    /// `initialize`). There is no FFI hook for late identity-provider
+    /// `bind_runtime_context`). There is no FFI hook for late identity-provider
     /// injection — the plugin only receives the provider through
-    /// `FfiRuntimeContext` during `initialize_fn`. Calls made after
-    /// `initialize` have no effect on the running plugin.
+    /// `FfiRuntimeContext` during `bind_runtime_context_fn`. Calls made after
+    /// binding have no effect on the running plugin.
     async fn set_identity_provider(&self, provider: Arc<dyn IdentityProvider>) {
         // See doc comment above for the timing constraint.
         match self.identity_provider.lock() {
@@ -941,75 +1041,13 @@ extern "C" fn host_bootstrap_write_checkpoint(
 
 impl Drop for ReactionProxy {
     fn drop(&mut self) {
-        // Close the result channel sender to unblock the forwarder's callback.
-        // The callback's rx.recv() will return Err, causing it to return null.
-        // The forwarder then breaks out of its loop and sends a sentinel
-        // callback to signal forwarder_done.
-        if let Ok(mut guard) = self.result_tx.lock() {
-            *guard = None;
-        }
-        // Bug B fix: do NOT drop the receiver here. Sender drop alone unblocks
-        // recv(); leaving the receiver in place avoids racing a callback that
-        // is currently holding `context.rx.lock()`. The receiver lives until
-        // the leaked push-ctx Arc is collected (see the `mem::forget` below).
-
-        // Wait for the forwarder task to fully exit its processing loop.
-        //
-        // Safety argument: the forwarder sends a sentinel callback AFTER
-        // breaking out of its loop. At that point, all enqueue_query_result()
-        // calls have finished and the forwarder will NOT access the
-        // ReactionWrapper again. Therefore, after this signal fires,
-        // it is safe to free the ReactionWrapper.
-        let forwarder_exited = if let Ok(guard) = self._push_ctx.lock() {
-            if let Some(ref ctx) = *guard {
-                let done = ctx.forwarder_done.lock().expect("forwarder_done lock");
-                let (guard, timeout) = ctx
-                    .forwarder_done_cv
-                    .wait_timeout_while(done, std::time::Duration::from_secs(5), |done| !*done)
-                    .expect("forwarder_done condvar wait");
-                !timeout.timed_out() && *guard
-            } else {
-                true // No push context → forwarder was never started
-            }
-        } else {
-            false // Lock poisoned
-        };
-
-        if forwarder_exited {
-            // Safe to free the ReactionWrapper — forwarder won't access it.
-            let drop_fn = self.vtable.drop_fn;
-            let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
-            super::drop_worker::execute_drop_fn(drop_fn, state);
-        } else {
-            // Timeout or error — leak the ReactionWrapper to prevent UAF.
-            // Memory leak is preferable to undefined behavior.
-            log::warn!(
-                "ReactionProxy::drop: forwarder did not exit within timeout; \
-                 leaking ReactionWrapper to prevent use-after-free"
+        // Drop is not asynchronous disposal. Close admission without blocking;
+        // RetainedCall preserves the owner if awaited cleanup was abandoned.
+        if let Err(error) = self.forwarding.close_sender() {
+            log::error!(
+                "Reaction '{}' drop could not close admission: {error:#}",
+                self.cached_id
             );
-        }
-
-        // Leak the push context Arc on the timeout path — the forwarder's
-        // spawn_blocking callback may still reference it. On the success path
-        // this is unnecessary but harmless, and keeps the logic simple.
-        if let Ok(mut guard) = self._push_ctx.lock() {
-            if let Some(ctx) = guard.take() {
-                std::mem::forget(ctx);
-            }
-        }
-
-        // Bug C fix: leak the per-instance callback context Arc unconditionally.
-        // The strong reference handed to the plugin via `Arc::into_raw` in
-        // initialize() is never reclaimed — late log/lifecycle callbacks
-        // emitted by the plugin (during stop_fn or from internal tasks) must
-        // still find a valid pointer. The cdylib itself is intentionally
-        // leaked process-wide (see host-sdk/src/loader.rs), so this small
-        // per-instance Arc leak is the price of closing the late-callback
-        // UAF window.
-        if let Ok(mut guard) = self._callback_ctx.lock() {
-            if let Some(ctx) = guard.take() {
-                std::mem::forget(ctx);
-            }
         }
     }
 }
@@ -1283,7 +1321,7 @@ mod resource_observer_tests {
         fn query_ids(&self) -> Vec<String> {
             vec![]
         }
-        async fn initialize(&self, context: ReactionRuntimeContext) {
+        async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
             assert!(context.resource_observer.is_none());
         }
         async fn start(&self) -> anyhow::Result<()> {
@@ -1359,7 +1397,8 @@ mod resource_observer_tests {
                 if observed {
                     context.resource_observer = Some(observer.clone());
                 }
-                reaction.initialize(context).await;
+                reaction.bind_runtime_context(context).await;
+                reaction.initialize().await.unwrap();
                 let expected = if observed && !id.is_empty() && version == Some("1.2.3") {
                     vec![PluginOrigin {
                         id: id.into(),
@@ -1372,6 +1411,7 @@ mod resource_observer_tests {
                 assert_eq!(observer.reports.lock().await.len(), usize::from(observed));
                 assert_eq!(reaction.status().await, ComponentStatus::Stopped);
                 assert!(rx.try_recv().is_err());
+                reaction.dispose().await.unwrap();
             }
         }
     }
@@ -1391,9 +1431,11 @@ mod resource_observer_tests {
         let mut context =
             ReactionRuntimeContext::new("instance", "reaction", None, update_tx, None);
         context.resource_observer = Some(observer.clone());
-        reaction.initialize(context).await;
+        reaction.bind_runtime_context(context).await;
+        reaction.initialize().await.unwrap();
         assert!(observer.origins.lock().await.is_empty());
         assert_eq!(observer.reports.lock().await.len(), 1);
+        reaction.dispose().await.unwrap();
     }
 
     #[tokio::test]
@@ -1410,7 +1452,8 @@ mod resource_observer_tests {
             let mut context =
                 ReactionRuntimeContext::new("instance", "reaction", None, update_tx, None);
             context.resource_observer = Some(observer.clone());
-            reaction.initialize(context).await;
+            reaction.bind_runtime_context(context).await;
+            assert!(reaction.initialize().await.is_err());
             assert_eq!(observer.origins.lock().await.len(), 1);
             assert_eq!(observer.reports.lock().await.len(), 1);
             assert_eq!(reaction.status().await, ComponentStatus::Error);
@@ -1421,6 +1464,7 @@ mod resource_observer_tests {
             let message = message.unwrap();
             assert!(message.contains("origin rejected"));
             assert_eq!(message.contains("inventory rejected"), reject_inventory);
+            reaction.dispose().await.unwrap();
         }
     }
 }

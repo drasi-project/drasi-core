@@ -154,32 +154,6 @@ impl Credentials {
         }
     }
 
-    /// Extract username and password/token for connection string building.
-    ///
-    /// # Panics
-    /// Panics if called on `Certificate` credentials.
-    ///
-    /// # Deprecated
-    /// Use [`try_into_auth_pair`](Self::try_into_auth_pair) instead.
-    #[deprecated(note = "Use try_into_auth_pair() which returns Result instead of panicking")]
-    pub(crate) fn into_auth_pair(self) -> (String, String) {
-        self.try_into_auth_pair()
-            .unwrap_or_else(|_| panic!("Certificate credentials cannot be converted to an auth pair. Use try_into_auth_pair() or try_into_certificate() instead."))
-    }
-
-    /// Extract certificate and key for TLS client authentication.
-    ///
-    /// # Panics
-    /// Panics if called on non-Certificate credentials.
-    ///
-    /// # Deprecated
-    /// Use [`try_into_certificate`](Self::try_into_certificate) instead.
-    #[deprecated(note = "Use try_into_certificate() which returns Result instead of panicking")]
-    pub(crate) fn into_certificate(self) -> (String, String, Option<String>) {
-        self.try_into_certificate()
-            .unwrap_or_else(|_| panic!("Not certificate credentials. Use try_into_certificate() or try_into_auth_pair() instead."))
-    }
-
     /// Returns `true` if this is a `Certificate` variant.
     pub fn is_certificate(&self) -> bool {
         matches!(self, Credentials::Certificate { .. })

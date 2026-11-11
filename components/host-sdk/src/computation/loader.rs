@@ -51,6 +51,7 @@ impl NativePlugin {
                 || Some(exported.telemetry()),
                 || Some(exported.telemetry_v2()),
                 || Some(exported.telemetry_v3()),
+                || Some(exported.processing()),
             )
         }
     }
@@ -65,11 +66,16 @@ impl NativePlugin {
         &self.bootstrap_factories
     }
 
-    /// Atomic with respect to duplicate registration: failures leave registry as-is.
+    /// Register native factories and their supported query-authoring recipe identities.
+    /// This does not select an instance's default query factory. Registration is
+    /// atomic: failures leave the registry unchanged.
     pub fn register_factories(&self, registry: &mut FactoryRegistry) -> anyhow::Result<()> {
         let mut next = registry.clone();
         for factory in &self.factories {
             next.register(factory.clone())?;
+            if factory.supports_ordinary_queries() {
+                next.register(factory.for_ordinary_queries()?)?;
+            }
         }
         *registry = next;
         Ok(())
@@ -359,6 +365,7 @@ impl NativePlugin {
                 || None,
                 || None,
                 || None,
+                || None,
             )
         }
     }
@@ -386,11 +393,12 @@ impl NativePlugin {
         activation_credentials: impl FnOnce() -> Option<
             *const abi::activation_credentials::PluginActivationCredentialsV1,
         >,
-        output_reads: impl FnOnce() -> Option<*const abi::output_reads::PluginOutputReadsV1>,
-        output_follow: impl FnOnce() -> Option<*const abi::output_follow::PluginOutputFollowV1>,
+        output_reads: impl FnOnce() -> Option<*const abi::output_reads::PluginOutputReadsV2>,
+        output_follow: impl FnOnce() -> Option<*const abi::output_follow::PluginOutputFollowV2>,
         telemetry: impl FnOnce() -> Option<*const abi::telemetry::PluginTelemetryV1>,
         telemetry_v2: impl FnOnce() -> Option<*const abi::telemetry::PluginTelemetryV2>,
         telemetry_v3: impl FnOnce() -> Option<*const abi::telemetry::PluginTelemetryV3>,
+        processing: impl FnOnce() -> Option<*const abi::processing::PluginProcessingV1>,
     ) -> anyhow::Result<Arc<Self>> {
         let manifest = unsafe { read_metadata(metadata())? };
         let telemetry = unsafe { read_telemetry(telemetry())? };
@@ -408,6 +416,7 @@ impl NativePlugin {
         });
         let output_reads = unsafe { read_output_reads(output_reads(), &manifest)? };
         let output_follow = unsafe { read_output_follow(output_follow(), &manifest)? };
+        let processing = unsafe { read_processing(processing(), &manifest)? };
         let mut configurations = unsafe { read_configuration(configuration(), &manifest)? };
         let batching = unsafe { read_batching(batching())? };
         let output_snapshots = unsafe { read_output_snapshots(output_snapshots())? };
@@ -594,6 +603,7 @@ impl NativePlugin {
                 .with_source_schema(source_schema)
                 .with_output_reads(output_reads)
                 .with_output_follow(output_follow)
+                .with_processing(processing)?
                 .with_configuration_details(configurations.remove(&metadata.implementation))
             }));
         }
@@ -746,6 +756,10 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
         unsafe { library.get::<abi::telemetry::TelemetryFnV3>(abi::telemetry::SYMBOL_V3) }
             .ok()
             .map(|symbol| *symbol);
+    let processing =
+        unsafe { library.get::<abi::processing::ProcessingFn>(abi::processing::SYMBOL) }
+            .ok()
+            .map(|symbol| *symbol);
     if metadata.is_none()
         && entry.is_none()
         && services.is_none()
@@ -764,6 +778,7 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
         && telemetry.is_none()
         && telemetry_v2.is_none()
         && telemetry_v3.is_none()
+        && processing.is_none()
     {
         return Ok(None);
     }
@@ -795,6 +810,7 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
             || telemetry.map(|entry| entry()),
             || telemetry_v2.map(|entry| entry()),
             || telemetry_v3.map(|entry| entry()),
+            || processing.map(|entry| entry()),
         )?
     }))
 }
@@ -1084,9 +1100,9 @@ unsafe fn read_source_schema(
 
 /// The extension is required exactly when some factory declares output reads.
 unsafe fn read_output_reads(
-    entry: Option<*const abi::output_reads::PluginOutputReadsV1>,
+    entry: Option<*const abi::output_reads::PluginOutputReadsV2>,
     manifest: &PluginMetadata,
-) -> anyhow::Result<Option<abi::output_reads::PluginOutputReadsV1>> {
+) -> anyhow::Result<Option<abi::output_reads::PluginOutputReadsV2>> {
     let table = entry
         .map(|entry| -> anyhow::Result<_> {
             let table = *unsafe { checked_table(entry)? };
@@ -1112,9 +1128,9 @@ unsafe fn read_output_reads(
 
 /// The extension is required exactly when some factory declares output follows.
 unsafe fn read_output_follow(
-    entry: Option<*const abi::output_follow::PluginOutputFollowV1>,
+    entry: Option<*const abi::output_follow::PluginOutputFollowV2>,
     manifest: &PluginMetadata,
-) -> anyhow::Result<Option<abi::output_follow::PluginOutputFollowV1>> {
+) -> anyhow::Result<Option<abi::output_follow::PluginOutputFollowV2>> {
     let table = entry
         .map(|entry| -> anyhow::Result<_> {
             let table = *unsafe { checked_table(entry)? };
@@ -1134,6 +1150,33 @@ unsafe fn read_output_follow(
                 .iter()
                 .any(|factory| factory.capabilities.declares_output_follows()),
         "native factory declares output follows without the negotiated extension"
+    );
+    Ok(table)
+}
+
+unsafe fn read_processing(
+    entry: Option<*const abi::processing::PluginProcessingV1>,
+    manifest: &PluginMetadata,
+) -> anyhow::Result<Option<abi::processing::PluginProcessingV1>> {
+    let table = entry
+        .map(|entry| -> anyhow::Result<_> {
+            let table = *unsafe { checked_table(entry)? };
+            anyhow::ensure!(
+                table.version == abi::processing::VERSION
+                    && table.reserved == 0
+                    && table.create.is_some(),
+                "incompatible or incomplete native indexed processing extension"
+            );
+            Ok(table)
+        })
+        .transpose()?;
+    anyhow::ensure!(
+        table.is_some()
+            || !manifest
+                .factories
+                .iter()
+                .any(|factory| factory.capabilities.indexed_processing),
+        "native transformer declares indexed processing without its extension"
     );
     Ok(table)
 }
@@ -1306,6 +1349,10 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
         unsafe { library.get::<abi::telemetry::TelemetryFnV3>(abi::telemetry::SYMBOL_V3) }
             .ok()
             .map(|symbol| *symbol);
+    let processing =
+        unsafe { library.get::<abi::processing::ProcessingFn>(abi::processing::SYMBOL) }
+            .ok()
+            .map(|symbol| *symbol);
     if metadata.is_none()
         && !has_entry
         && activation_credentials.is_none()
@@ -1324,6 +1371,7 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
         && telemetry.is_none()
         && telemetry_v2.is_none()
         && telemetry_v3.is_none()
+        && processing.is_none()
     {
         return Ok(None);
     }
@@ -1347,6 +1395,7 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
     unsafe { read_bootstrap_coordination(coordination.map(|entry| entry()))? };
     unsafe { read_output_reads(output_reads.map(|entry| entry()), &manifest)? };
     unsafe { read_output_follow(output_follow.map(|entry| entry()), &manifest)? };
+    unsafe { read_processing(processing.map(|entry| entry()), &manifest)? };
     let bootstrap = unsafe { read_bootstrap(bootstrap.map(|entry| entry()))? };
     anyhow::ensure!(
         !manifest.factories.is_empty() || bootstrap.is_some(),

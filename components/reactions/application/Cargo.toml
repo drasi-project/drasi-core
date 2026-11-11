@@ -13,6 +13,7 @@
 # limitations under the License.
 
 [package]
+rust-version.workspace = true
 name = "drasi-reaction-application"
 version = "0.3.13"
 edition = "2021"

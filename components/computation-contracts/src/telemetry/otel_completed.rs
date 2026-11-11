@@ -127,7 +127,7 @@ impl<P: SpanProcessor, S: ShouldSample + Clone + 'static> CompletedSpanProcessor
         );
         let state = result.trace_state.header();
         Ok(RootSpanDecision {
-            sampled: result.decision == opentelemetry::trace::SamplingDecision::RecordAndSample,
+            sampled: result.decision == opentelemetry_sdk::trace::SamplingDecision::RecordAndSample,
             trace_state: (!state.is_empty()).then_some(state),
         })
     }

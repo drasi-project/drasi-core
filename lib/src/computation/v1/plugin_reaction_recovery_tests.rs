@@ -17,7 +17,7 @@
 
 use super::*;
 use crate::{
-    channels::ComponentStatusHandle,
+    channels::{ComponentStatusHandle, QueryResult},
     metrics::{LifecycleMetrics, ReactionMetrics},
     state_store::{MemoryStateStoreProvider, StateStoreProvider},
 };
@@ -139,7 +139,7 @@ impl Reaction for TestReaction {
     fn auto_start(&self) -> bool {
         false
     }
-    async fn initialize(&self, context: ReactionRuntimeContext) {
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
         self.status.wire(context.update_tx).await;
     }
     async fn start(&self) -> anyhow::Result<()> {
@@ -205,7 +205,9 @@ impl Harness {
                 .query("MATCH (n:Person) RETURN n.name AS name")
                 .with_outbox_capacity(capacity)
                 .enable_bootstrap(false)
-                .build();
+                .build()
+                .unwrap()
+                .with_assigned_id(ComponentId::try_new(*id).unwrap());
             configuration.dispatch_mode = Some(crate::DispatchMode::Broadcast);
             configuration.dispatch_buffer_capacity = Some(1);
             let mut query = ContinuousQueryTransformer::new(
@@ -487,7 +489,7 @@ async fn fresh_trigger_broadcast_gap_during_gate_wait_recovers_after_subscriptio
     reaction.start_gate = Some(gate.clone());
     let reaction = Arc::new(reaction);
     let host = harness.host(reaction.clone());
-    let mut subscription = harness.catalog.subscribe_query("q1").unwrap();
+    let mut subscription = harness.catalog.subscribe_query("q1").await.unwrap();
     let heads = BTreeMap::from([("q1".into(), subscription.head().unwrap())]);
     let start = tokio::spawn({
         let host = host.clone();
@@ -723,7 +725,7 @@ async fn auto_reset_bootstrap_snapshot_failure_propagates_without_advancing_chec
     )
     .unwrap();
     harness.queries["q1"]
-        .results()
+        .output_owner()
         .state
         .write()
         .unwrap()

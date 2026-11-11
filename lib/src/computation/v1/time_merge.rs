@@ -22,7 +22,11 @@ use tokio::{sync::watch, time::Instant};
 
 use super::{output_bindings::OutputBindingState, producer_progress::GraphInputProgress, *};
 
+mod factory;
 mod recovery;
+mod storage;
+pub use factory::SourceTimeMergeFactory;
+pub use storage::SourceTimeMergeStorage;
 
 /// A late event is strictly older than the last event emitted on `out`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,11 +183,13 @@ impl WakeupSource for MergeWakeup {
 /// new stream/sequence; original identities, timestamps and payloads are retained.
 pub struct SourceTimeMergeTransformer {
     definition: SourceTimeMergeDefinition,
+    construction_scope: Arc<str>,
     descriptor: ComponentDescriptor,
     codec: BinaryEnvelopeCodec,
     schema: Arc<Schema>,
     state: State,
     transaction: Option<Arc<ComputationTransaction>>,
+    _storage_lease: Option<storage::SourceTimeMergeStorageLease>,
     bindings: Arc<OutputBindingState>,
     failed: Arc<AtomicBool>,
     wakeup: Arc<MergeWakeup>,
@@ -236,6 +242,102 @@ impl SourceTimeMergeTransformer {
         schema: Arc<Schema>,
         persistent: bool,
     ) -> anyhow::Result<Self> {
+        let descriptor = definition.descriptor(&schema, persistent)?;
+        let codec_limit = definition
+            .max_buffered_bytes
+            .get()
+            .checked_mul(4)
+            .and_then(|bytes| bytes.checked_add(65536))
+            .and_then(NonZeroUsize::new)
+            .ok_or_else(|| anyhow::anyhow!("merge envelope limit overflow"))?;
+        let mut codec = BinaryEnvelopeCodec::new(codec_limit);
+        codec.register_schema(schema.clone())?;
+        let identity = |stream: StreamId| {
+            GraphProducerIdentity::new(
+                definition.graph_id.clone(),
+                definition.graph_id.clone(),
+                definition.id.clone(),
+                stream,
+                persistent,
+            )
+        };
+        let state = State {
+            sources: vec![SourceState::default(); definition.sources.len()],
+            active_at: vec![Instant::now(); definition.sources.len()],
+            buffer: BTreeMap::new(),
+            deadlines: BTreeSet::new(),
+            bytes: 0,
+            pending: None,
+            held: None,
+            last_emitted: None,
+            logical_sequence: 0,
+            late_sequence: 0,
+            emission_sequence: 0,
+            late_events: 0,
+            discarded: 0,
+            identity: identity(definition.output_stream.clone())?,
+            late_identity: definition
+                .late_output_stream
+                .clone()
+                .map(identity)
+                .transpose()?,
+            destinations: OutputBindings::default(),
+        };
+        let failed = Arc::new(AtomicBool::new(false));
+        Ok(Self {
+            construction_scope: Arc::from(definition.graph_id.as_str()),
+            definition,
+            descriptor,
+            codec,
+            schema,
+            state,
+            transaction: None,
+            _storage_lease: None,
+            bindings: OutputBindingState::new(failed.clone()),
+            failed,
+            wakeup: Arc::new(MergeWakeup(watch::channel(Schedule::default()).0)),
+            observations: watch::channel(SourceTimeMergeSnapshot::default()).0,
+            running: false,
+            loaded: false,
+            in_flight: None,
+            replayed_inputs: 0,
+        })
+    }
+
+    fn set_construction_scope(&mut self, scope: Arc<str>) -> anyhow::Result<()> {
+        let identity = |identity: &GraphProducerIdentity| {
+            GraphProducerIdentity::for_epoch(
+                scope.to_string(),
+                identity.graph_id().to_owned(),
+                identity.component_id().clone(),
+                identity.stream().clone(),
+                identity.incarnation(),
+                identity.persistent(),
+            )
+        };
+        let main = identity(&self.state.identity)?;
+        let late = self
+            .state
+            .late_identity
+            .as_ref()
+            .map(identity)
+            .transpose()?;
+        self.state.identity = main;
+        self.state.late_identity = late;
+        self.construction_scope = scope;
+        Ok(())
+    }
+}
+
+impl SourceTimeMergeDefinition {
+    /// Validate the definition and describe its ports without constructing a
+    /// component, acquiring storage or starting work.
+    pub fn descriptor(
+        &self,
+        schema: &Schema,
+        persistent: bool,
+    ) -> anyhow::Result<ComponentDescriptor> {
+        let definition = self;
         data::validate_identifier("merge graph", &definition.graph_id)?;
         anyhow::ensure!(
             definition.graph_id.len() <= 256
@@ -244,7 +346,7 @@ impl SourceTimeMergeTransformer {
                 && definition
                     .late_output_stream
                     .as_ref()
-                    .map_or(true, |stream| stream.as_str().len() <= 256),
+                    .is_none_or(|stream| stream.as_str().len() <= 256),
             "merge producer identifiers must not exceed 256 bytes"
         );
         anyhow::ensure!(
@@ -321,66 +423,18 @@ impl SourceTimeMergeTransformer {
                 output_requirements,
             ));
         }
-        let descriptor = ComponentDescriptor::try_new(definition.id.clone(), ports)?;
-        let codec_limit = definition
+        definition
             .max_buffered_bytes
             .get()
             .checked_mul(4)
             .and_then(|bytes| bytes.checked_add(65536))
             .and_then(NonZeroUsize::new)
             .ok_or_else(|| anyhow::anyhow!("merge envelope limit overflow"))?;
-        let mut codec = BinaryEnvelopeCodec::new(codec_limit);
-        codec.register_schema(schema.clone())?;
-        let identity = |stream: StreamId| {
-            GraphProducerIdentity::new(
-                definition.graph_id.clone(),
-                definition.graph_id.clone(),
-                definition.id.clone(),
-                stream,
-                persistent,
-            )
-        };
-        let state = State {
-            sources: vec![SourceState::default(); definition.sources.len()],
-            active_at: vec![Instant::now(); definition.sources.len()],
-            buffer: BTreeMap::new(),
-            deadlines: BTreeSet::new(),
-            bytes: 0,
-            pending: None,
-            held: None,
-            last_emitted: None,
-            logical_sequence: 0,
-            late_sequence: 0,
-            emission_sequence: 0,
-            late_events: 0,
-            discarded: 0,
-            identity: identity(definition.output_stream.clone())?,
-            late_identity: definition
-                .late_output_stream
-                .clone()
-                .map(identity)
-                .transpose()?,
-            destinations: OutputBindings::default(),
-        };
-        let failed = Arc::new(AtomicBool::new(false));
-        Ok(Self {
-            definition,
-            descriptor,
-            codec,
-            schema,
-            state,
-            transaction: None,
-            bindings: OutputBindingState::new(failed.clone()),
-            failed,
-            wakeup: Arc::new(MergeWakeup(watch::channel(Schedule::default()).0)),
-            observations: watch::channel(SourceTimeMergeSnapshot::default()).0,
-            running: false,
-            loaded: false,
-            in_flight: None,
-            replayed_inputs: 0,
-        })
+        Ok(ComponentDescriptor::try_new(definition.id.clone(), ports)?)
     }
+}
 
+impl SourceTimeMergeTransformer {
     pub fn subscribe(&self) -> watch::Receiver<SourceTimeMergeSnapshot> {
         self.observations.subscribe()
     }
@@ -818,7 +872,7 @@ impl Transformer for SourceTimeMergeTransformer {
         anyhow::ensure!(
             producer
                 .as_ref()
-                .map_or(true, |identity| !identity.persistent())
+                .is_none_or(|identity| !identity.persistent())
                 || source.sequence.checked_add(1) == Some(progress.sequence),
             "merge input logical progress has a gap"
         );

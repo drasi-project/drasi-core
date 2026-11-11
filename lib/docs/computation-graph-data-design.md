@@ -539,8 +539,8 @@ expansion need not change the representation contract.
 An **event filter** decides what to emit for the current change; it does not
 necessarily maintain a filtered dataset. Suppose it emits a product while
 `quantity < 10`, then ignores a later update to quantity 12. The earlier output
-is not automatically retracted. A **maintained view transform** would remember
-that output and emit its deletion. The same distinction matters when a mapping
+is not automatically retracted. The separate **maintained view transform**
+remembers that output and emits its deletion. The same distinction matters when a mapping
 changes a key or expands one input into several children. Query evaluation
 maintains its answer; a stateless event mapper does not gain that behavior just
 because its schema is unchanged. The built-in middleware rules and their
@@ -1587,9 +1587,12 @@ Sources: [graph codec][graph-codec], [element image][element-image],
 
 ### 12.1 Processing owners and stored data
 
-All continuous queries use `ContinuousQueryTransformer`, `ComputationQuery` and
-`QueryEvaluator`. The wrapper owns input/output progress; the evaluator owns
-work against the supplied query indexes. A **processing owner** is the actual
+The selected query component uses `ComputationQuery` and the existing
+`QueryEvaluator`. The native plugin and explicit linked
+`ContinuousQueryTransformer` reference share query configuration, execution and
+publication logic in `drasi-query-common`. The component manages input/output
+progress through the actual Host/Core resource owner; the evaluator works
+against its supplied query indexes. A **processing owner** is the actual
 component/transaction path responsible for committing that work, not a name
 in the envelope.
 
@@ -2358,10 +2361,14 @@ maintained views in [section 6.1](#61-each-side-has-its-own-data-contract):
   configured processing failures remain errors.
 - `Future` changes pass through unmapped so scheduling is preserved.
 
-A maintained view transform would retain input/output state to retract filtered
-rows, delete one-to-many children and remove old mapped identities. That separate
-component is tracked as [CW-68](computation-graph-remaining-work.md#cw-68); it does
-not exist as a `map`/`jq` mode. Its storage would be its own design choice.
+The [maintained view transformer](../../components/computation-plugins/transformers/view/README.md)
+retains full input images and actual output associations to retract filtered
+rows, delete one-to-many children and remove old mapped identities. It applies
+map/relabel to reconstructed complete images, not historical events. It is not
+a `map`/`jq` mode. Its current memory-backed profile exposes coherent snapshots
+and volatile producer progress, but no replay, durable storage, transactional
+processing, bootstrap input or input deduplication. Whole-envelope staging
+protects its state on failure; reconstruction still needs full initial input.
 
 Query-local middleware runs inside the evaluator input pipeline. The runtime
 selects its scope from the actual connected `(input port, stream)` binding:
@@ -2380,7 +2387,7 @@ query's local preprocessing.
 ### 16.6 Native wire and port format selection
 
 The native plugin boundary carries binary envelope frames with native wire
-version 1 and ABI layout 1.0. There is no reader for an earlier native wire or
+version 2 and ABI layout 2.0. There is no reader for an earlier native wire or
 earlier query-row records: build the host and native libraries from matching
 sources. These are deployment compatibility constraints, not another record schema.
 
@@ -2481,13 +2488,13 @@ or plugin-authoring structure.
 | Schema, record images and ordered changes | [data.rs][records] |
 | Envelope metadata, derivation and context | [envelope.rs][envelopes] |
 | Standard payload codecs | [graph_codec.rs][graph-codec], [element_image.rs][element-image], [element_patch.rs][element-patch], [result_node.rs][result-node], [query_codec.rs][query-codec], [source_transaction.rs][source-transactions] |
-| Shared lossless values | [data_value.rs][data-value]; [value_codec.rs][value-codec] for the ordinary JSON boundary |
+| Shared lossless values and their codecs | [data_value.rs][data-value], including the ordinary JSON boundary |
 | Outer envelope serialization | [codec.rs][json-codec], [binary_codec.rs][binary-codec] |
 | Port contracts and forwarding | [ports.rs][ports], [component.rs][component-dataflow], [graph.rs][graph-routing] |
 | Pipe delivery and acknowledgement | [pipe.rs][pipes], [retained_pipe.rs][retained-pipe], [qos_pipe.rs][qos] |
 | Graph-driven retained admission | [SourceAdmission][admission], [session and receipt types][admission-data] |
 | Input ordering and preprocessing | [ranked_pipe.rs][ranked], [middleware.rs][middleware], [time_merge.rs][time-merge] |
-| Query processing and result transitions | [query.rs][query], [query_adapter.rs][query-adapter], [evaluator.rs][evaluator], [query_results.rs][transaction-results] |
+| Query processing and result transitions | [Native indexed adapter][query], [query_adapter.rs][query-adapter], [evaluator.rs][evaluator], [transaction_projection.rs][transaction-results] |
 | Query working state | [element_index.rs][element-index], [result_index.rs][result-index], [indexes.rs][indexes] |
 | Initial data and scheduled data | [bootstrap.rs][bootstrap-data], [query_recovery.rs][query-recovery], [query_scheduling.rs][scheduling] |
 | Current rows, output history and read access | [query_state.rs][query-state], [query_catalog.rs][catalog], [native_query.rs][native-query] |
@@ -2505,7 +2512,6 @@ or plugin-authoring structure.
 [envelopes]: ../../components/computation-contracts/src/envelope.rs
 [graph-codec]: ../../components/computation-contracts/src/graph_codec.rs
 [query-codec]: ../../components/computation-contracts/src/query_codec.rs
-[value-codec]: ../../components/computation-contracts/src/internal/typed_change/value_codec.rs
 [element-image]: ../../components/computation-contracts/src/element_image.rs
 [element-patch]: ../../components/computation-contracts/src/element_patch.rs
 [result-node]: ../../components/computation-contracts/src/graph_codec/result_node.rs
@@ -2527,17 +2533,17 @@ or plugin-authoring structure.
 [admission-data]: ../../components/computation-contracts/src/admission_messages.rs
 [time-merge]: ../src/computation/v1/time_merge.rs
 [middleware]: ../src/computation/v1/middleware.rs
-[query]: ../src/computation/v1/query.rs
+[query]: ../../components/computation-plugins/transformers/query/src/indexed.rs
 [query-adapter]: ../../core/src/computation/query_adapter.rs
 [evaluator]: ../../core/src/query/evaluator.rs
-[transaction-results]: ../../core/src/computation/query_results.rs
-[element-index]: ../../core/src/interface/element_index.rs
-[result-index]: ../../core/src/interface/result_index.rs
+[transaction-results]: ../../core/src/query/transaction_projection.rs
+[element-index]: ../../core-types/src/interface/element_index.rs
+[result-index]: ../../core-types/src/interface/result_index.rs
 [scheduling]: ../src/computation/v1/query_scheduling.rs
 [bootstrap-data]: ../../components/computation-contracts/src/bootstrap.rs
 [query-bootstrap]: ../src/computation/v1/query_bootstrap.rs
 [query-recovery]: ../src/computation/v1/query_recovery.rs
-[query-state]: ../src/computation/internal/query_state.rs
+[query-state]: ../../components/query-common/src/query_state.rs
 [catalog]: ../src/computation/v1/query_catalog.rs
 [query-exchange]: ../src/queries/output_state.rs
 [native-query]: ../src/computation/runtime/native_query.rs

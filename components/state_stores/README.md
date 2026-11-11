@@ -87,11 +87,10 @@ provider declares no crash survival. Redb explicitly commits mutations with
 `redb::Durability::Immediate` and declares process-restart and power-loss survival,
 assuming the filesystem and device honor sync requests. It does not recover from
 permanent loss of its local database. Custom providers default to unknown;
-`is_durable()` alone does not establish a specific failure guarantee. Existing
-ABI 0.17 FFI proxies forward these descriptions, including Redb's
-`LOCAL_POWER_LOSS` capability. The supported older ABI 0.16 prefix has no
-durability callback, so those proxies remain unknown; successful loading does
-not grant a stronger recovery guarantee.
+`is_durable()` alone does not establish a specific failure guarantee. Ordinary
+ABI 0.18 FFI proxies forward these descriptions, including Redb's
+`LOCAL_POWER_LOSS` capability. Earlier ordinary component layouts are rejected;
+successful loading still does not grant a stronger recovery guarantee.
 
 ### Partitioning with StoreId
 

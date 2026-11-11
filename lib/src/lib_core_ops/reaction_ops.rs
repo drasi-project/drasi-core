@@ -16,13 +16,16 @@
 //!
 //! This module provides all reaction-related operations including adding, removing,
 //! starting, and stopping reactions.
+//! String selectors are exact current reaction names, including UUID-shaped names.
+//! Use the paired `_by_id` methods for explicit [`crate::config::ComponentId`]
+//! selection.
 
 use futures::stream::Stream;
 use std::collections::HashMap;
 
 use crate::channels::{ComponentEvent, ComponentStatus};
 use crate::component_ops::map_component_error;
-use crate::config::ReactionRuntime;
+use crate::config::{ComponentId, ReactionRuntime};
 use crate::error::Result;
 use crate::lib_core::DrasiLib;
 use crate::reactions::Reaction;
@@ -50,8 +53,12 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn add_reaction(&self, reaction: impl Reaction + 'static) -> Result<()> {
-        self.add_reaction_with_metadata(reaction, HashMap::new())
+    pub async fn add_reaction(
+        &self,
+        name: impl Into<String>,
+        reaction: impl Reaction + 'static,
+    ) -> Result<()> {
+        self.add_reaction_with_metadata(name, reaction, HashMap::new())
             .await
     }
 
@@ -68,23 +75,53 @@ impl DrasiLib {
     /// `DrasiError::Internal`, including the rejected addition's recovery handle.
     pub async fn add_reaction_with_handle(
         &self,
+        name: impl Into<String>,
         reaction: impl Reaction + 'static,
     ) -> Result<crate::computation::v1::ComponentHandle> {
-        self.add_reaction_with_metadata_and_handle(reaction, HashMap::new())
+        self.add_reaction_with_metadata_and_handle(name, reaction, HashMap::new())
             .await
+    }
+
+    /// Declare a native factory-built reaction in the instance's computation graph.
+    ///
+    /// The factory specification must explicitly declare semantic kind
+    /// [`crate::computation::v1::ComponentSemanticKind::Reaction`]. Use
+    /// [`crate::computation::v1::ComponentAddition::from_specification`] with a
+    /// factory, or `ComponentAddition::declaration` to register the factory
+    /// later. Input connections use the ordinary computation connection APIs;
+    /// subscriptions and storage are never inferred from configuration names.
+    ///
+    /// Success acknowledges declaration, not readiness. Missing dependencies
+    /// and failed configuration, secret resolution or construction remain
+    /// visible and retryable through [`Self::start_reaction`]. Await the returned
+    /// handle for creation/activation outcomes. The object-based
+    /// [`Self::add_reaction`] remains supported; native recipes do not construct
+    /// legacy [`Reaction`] objects.
+    pub async fn add_reaction_from_factory(
+        &self,
+        addition: crate::computation::v1::ComponentAddition,
+    ) -> Result<crate::computation::v1::ComponentHandle> {
+        self.add_factory_component(
+            addition,
+            crate::computation::v1::ComponentSemanticKind::Reaction,
+        )
+        .await
     }
 
     async fn add_reaction_with_metadata_and_handle(
         &self,
+        name: impl Into<String>,
         reaction: impl Reaction + 'static,
         metadata: HashMap<String, String>,
     ) -> Result<crate::computation::v1::ComponentHandle> {
         self.state_guard.require_initialized()?;
-        let _lifecycle = self.instance_graph.lifecycle.lock().await;
         let id = reaction.id().to_owned();
+        let name =
+            crate::config::ComponentName::try_new(name.into()).map_err(anyhow::Error::from)?;
         self.computation_runtime
-            .add_reaction(Box::new(reaction), metadata, self.is_running().await)
+            .add_reaction(name, Box::new(reaction), metadata, self.is_running().await)
             .await
+            .and_then(|handle| self.computation_runtime.public_handle(handle))
             .map_err(|error| {
                 crate::computation::runtime::map_addition_error("reaction", &id, error)
             })
@@ -96,13 +133,113 @@ impl DrasiLib {
     /// (e.g. `pluginId`) into the component graph node.
     pub async fn add_reaction_with_metadata(
         &self,
+        name: impl Into<String>,
         reaction: impl Reaction + 'static,
         extra_metadata: HashMap<String, String>,
     ) -> Result<()> {
         self.state_guard.require_initialized()?;
-        self.add_reaction_with_metadata_and_handle(reaction, extra_metadata)
+        self.add_reaction_with_metadata_and_handle(name, reaction, extra_metadata)
             .await
             .map(|_| ())
+    }
+
+    /// Create and admit a reaction with a library-assigned UUID.
+    pub async fn create_reaction<R: Reaction + 'static>(
+        &self,
+        name: impl Into<String>,
+        inputs: Vec<crate::config::ComponentReference>,
+        auto_start: bool,
+        factory: impl FnOnce(crate::config::ComponentId, Vec<crate::config::ComponentId>) -> anyhow::Result<R>
+            + Send
+            + 'static,
+    ) -> Result<crate::computation::v1::ComponentHandle> {
+        self.state_guard.require_initialized()?;
+        let name =
+            crate::config::ComponentName::try_new(name.into()).map_err(anyhow::Error::from)?;
+        self.computation_runtime
+            .create_reaction(name, inputs, auto_start, move |id, inputs| {
+                Ok(Box::new(factory(id, inputs)?) as Box<dyn Reaction>)
+            })
+            .await
+            .and_then(|handle| self.computation_runtime.public_handle(handle))
+            .map_err(Into::into)
+    }
+
+    /// Declare a reaction before its named queries exist. The graph binds each
+    /// reference once; the constructor runs only when those UUIDs are available.
+    /// Opaque constructors are memory-only. Persistent creation uses managed recipes.
+    pub async fn create_reaction_with_inputs<R: Reaction + 'static>(
+        &self,
+        name: impl Into<String>,
+        inputs: Vec<crate::config::ComponentReference>,
+        auto_start: bool,
+        factory: impl FnOnce(crate::config::ComponentId, Vec<crate::config::ComponentId>) -> anyhow::Result<R>
+            + Send
+            + 'static,
+    ) -> Result<crate::computation::v1::ComponentHandle> {
+        self.state_guard.require_initialized()?;
+        let name =
+            crate::config::ComponentName::try_new(name.into()).map_err(anyhow::Error::from)?;
+        self.computation_runtime
+            .create_reaction_with_inputs(
+                name,
+                None,
+                inputs,
+                auto_start,
+                crate::computation::runtime::ReactionConstructor::Sync(Box::new(
+                    move |id, inputs| Ok(Box::new(factory(id, inputs)?) as Box<dyn Reaction>),
+                )),
+                self.is_running().await,
+            )
+            .await
+            .and_then(|handle| self.computation_runtime.public_handle(handle))
+            .map_err(Into::into)
+    }
+
+    /// Declare an asynchronous reaction constructor. The graph binds input names
+    /// once and supplies UUIDs to the constructor. Admission is not readiness:
+    /// await the returned handle's `wait_created` to read constructed metadata.
+    /// A requested UUID requires immutable instance opt-in. The future has the
+    /// same cancellation/partial-acquisition contract as `create_source_async`.
+    pub async fn create_reaction_async<R, F, Fut>(
+        &self,
+        name: impl Into<String>,
+        requested_id: Option<crate::config::ComponentId>,
+        inputs: Vec<crate::config::ComponentReference>,
+        auto_start: bool,
+        factory: F,
+    ) -> Result<crate::computation::v1::ComponentHandle>
+    where
+        R: Reaction + 'static,
+        F: FnOnce(crate::config::ComponentId, Vec<crate::config::ComponentId>) -> Fut
+            + Send
+            + 'static,
+        Fut: std::future::Future<Output = anyhow::Result<(R, HashMap<String, String>)>>
+            + Send
+            + 'static,
+    {
+        self.state_guard.require_initialized()?;
+        let name =
+            crate::config::ComponentName::try_new(name.into()).map_err(anyhow::Error::from)?;
+        self.computation_runtime
+            .create_reaction_with_inputs(
+                name,
+                requested_id,
+                inputs,
+                auto_start,
+                crate::computation::runtime::ReactionConstructor::Async(Box::new(
+                    move |id, inputs| {
+                        Box::pin(async move {
+                            let (reaction, metadata) = factory(id, inputs).await?;
+                            Ok((Box::new(reaction) as Box<dyn Reaction>, metadata))
+                        })
+                    },
+                )),
+                self.is_running().await,
+            )
+            .await
+            .and_then(|handle| self.computation_runtime.public_handle(handle))
+            .map_err(Into::into)
     }
 
     /// Remove a reaction from a running server
@@ -117,52 +254,52 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn remove_reaction(&self, id: &str, cleanup: bool) -> Result<()> {
+    pub async fn remove_reaction(&self, name: &str, cleanup: bool) -> Result<()> {
+        let id = self.resolve_component_name(name, "reaction")?;
+        self.remove_reaction_by_id(&id, cleanup).await
+    }
+
+    /// Remove the reaction with the supplied immutable UUID.
+    pub async fn remove_reaction_by_id(&self, id: &ComponentId, cleanup: bool) -> Result<()> {
         self.state_guard.require_initialized()?;
         map_component_error(
             self.computation_runtime
-                .remove_component(id, "reaction", cleanup)
+                .remove_component(id.as_str(), "reaction", cleanup)
                 .await,
             "reaction",
-            id,
+            id.as_str(),
             "remove",
         )
     }
 
-    /// Update a reaction by replacing it with a new instance.
+    /// Submit an updated registered reaction recipe through the configuration owner.
     ///
-    /// Uses the `Reconfiguring` state transition to preserve the graph node, edges,
-    /// and event history. The old reaction is stopped, the runtime is swapped, and the
-    /// reaction is restarted if it was running.
-    ///
-    /// The new reaction must have the same ID as the existing one.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the reaction doesn't exist, if the IDs don't match,
-    /// if referenced queries don't exist, or if provisioning fails.
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use drasi_lib::DrasiLib;
-    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// // let new_reaction = MyReaction::new(updated_config);
-    /// // core.update_reaction("my-reaction", new_reaction).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// The UUID and graph-owned name must match the current reaction. Its factory
+    /// provides the update plan; retained-object plans cannot change bound inputs.
+    /// Opaque objects and one-off creation callbacks are not update mechanisms.
+    /// Unsupported plans are rejected before the configuration is accepted.
     pub async fn update_reaction(
         &self,
-        id: &str,
-        new_reaction: impl crate::reactions::Reaction + 'static,
+        name: &str,
+        definition: crate::management::OrdinaryComponentRecord,
+    ) -> Result<()> {
+        let id = self.resolve_component_name(name, "reaction")?;
+        self.update_reaction_by_id(&id, definition).await
+    }
+
+    /// Update the reaction with the supplied immutable UUID.
+    pub async fn update_reaction_by_id(
+        &self,
+        id: &ComponentId,
+        definition: crate::management::OrdinaryComponentRecord,
     ) -> Result<()> {
         self.state_guard.require_initialized()?;
         map_component_error(
             self.computation_runtime
-                .update_reaction(id, Box::new(new_reaction))
+                .update_ordinary_definition(id.as_str(), "reaction", definition)
                 .await,
             "reaction",
-            id,
+            id.as_str(),
             "update",
         )
     }
@@ -170,7 +307,7 @@ impl DrasiLib {
     /// Start a stopped reaction
     ///
     /// This will create the necessary subscriptions to query result streams.
-    /// The QueryProvider was already injected when the reaction was added via `add_reaction()`.
+    /// Scoped query readers are supplied through the reaction's runtime context.
     ///
     /// # Example
     /// ```no_run
@@ -180,14 +317,20 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn start_reaction(&self, id: &str) -> Result<()> {
+    pub async fn start_reaction(&self, name: &str) -> Result<()> {
+        let id = self.resolve_component_name(name, "reaction")?;
+        self.start_reaction_by_id(&id).await
+    }
+
+    /// Start the reaction with the supplied immutable UUID.
+    pub async fn start_reaction_by_id(&self, id: &ComponentId) -> Result<()> {
         self.state_guard.require_initialized()?;
         map_component_error(
             self.computation_runtime
-                .start_component(id, "reaction")
+                .start_component(id.as_str(), "reaction")
                 .await,
             "reaction",
-            id,
+            id.as_str(),
             "start",
         )
     }
@@ -202,14 +345,20 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn stop_reaction(&self, id: &str) -> Result<()> {
+    pub async fn stop_reaction(&self, name: &str) -> Result<()> {
+        let id = self.resolve_component_name(name, "reaction")?;
+        self.stop_reaction_by_id(&id).await
+    }
+
+    /// Stop the reaction with the supplied immutable UUID.
+    pub async fn stop_reaction_by_id(&self, id: &ComponentId) -> Result<()> {
         self.state_guard.require_initialized()?;
         map_component_error(
             self.computation_runtime
-                .stop_component(id, "reaction")
+                .stop_component(id.as_str(), "reaction")
                 .await,
             "reaction",
-            id,
+            id.as_str(),
             "stop",
         )
     }
@@ -244,8 +393,14 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_reaction_info(&self, id: &str) -> Result<ReactionRuntime> {
-        self.inspection.get_reaction_info(id).await
+    pub async fn get_reaction_info(&self, name: &str) -> Result<ReactionRuntime> {
+        let id = self.resolve_component_name(name, "reaction")?;
+        self.get_reaction_info_by_id(&id).await
+    }
+
+    /// Get detailed reaction information by immutable UUID.
+    pub async fn get_reaction_info_by_id(&self, id: &ComponentId) -> Result<ReactionRuntime> {
+        self.inspection.get_reaction_info(id.as_str()).await
     }
 
     /// Get the current status of a specific reaction
@@ -259,8 +414,14 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_reaction_status(&self, id: &str) -> Result<ComponentStatus> {
-        self.inspection.get_reaction_status(id).await
+    pub async fn get_reaction_status(&self, name: &str) -> Result<ComponentStatus> {
+        let id = self.resolve_component_name(name, "reaction")?;
+        self.get_reaction_status_by_id(&id).await
+    }
+
+    /// Get reaction status by immutable UUID.
+    pub async fn get_reaction_status_by_id(&self, id: &ComponentId) -> Result<ComponentStatus> {
+        self.inspection.get_reaction_status(id.as_str()).await
     }
 
     /// Get lifecycle events for a specific reaction as an async stream.
@@ -282,9 +443,18 @@ impl DrasiLib {
     /// ```
     pub async fn get_reaction_events(
         &self,
-        id: &str,
+        name: &str,
     ) -> Result<impl Stream<Item = ComponentEvent>> {
-        self.inspection.get_reaction_events(id).await
+        let id = self.resolve_component_name(name, "reaction")?;
+        self.get_reaction_events_by_id(&id).await
+    }
+
+    /// Get reaction lifecycle events by immutable UUID.
+    pub async fn get_reaction_events_by_id(
+        &self,
+        id: &ComponentId,
+    ) -> Result<impl Stream<Item = ComponentEvent>> {
+        self.inspection.get_reaction_events(id.as_str()).await
     }
 
     /// Get all lifecycle events across all reactions as an async stream.
@@ -352,12 +522,24 @@ impl DrasiLib {
     /// ```
     pub async fn subscribe_reaction_logs(
         &self,
-        id: &str,
+        name: &str,
     ) -> Result<(
         Vec<crate::observability::LogMessage>,
         tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
     )> {
-        self.inspection.subscribe_reaction_logs(id).await
+        let id = self.resolve_component_name(name, "reaction")?;
+        self.subscribe_reaction_logs_by_id(&id).await
+    }
+
+    /// Subscribe to reaction logs by immutable UUID.
+    pub async fn subscribe_reaction_logs_by_id(
+        &self,
+        id: &ComponentId,
+    ) -> Result<(
+        Vec<crate::observability::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
+    )> {
+        self.inspection.subscribe_reaction_logs(id.as_str()).await
     }
 
     /// Subscribe to live events for a reaction.
@@ -367,12 +549,24 @@ impl DrasiLib {
     /// Error, Stopped.
     pub async fn subscribe_reaction_events(
         &self,
-        id: &str,
+        name: &str,
     ) -> Result<(
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
-        self.inspection.subscribe_reaction_events(id).await
+        let id = self.resolve_component_name(name, "reaction")?;
+        self.subscribe_reaction_events_by_id(&id).await
+    }
+
+    /// Subscribe to reaction lifecycle events by immutable UUID.
+    pub async fn subscribe_reaction_events_by_id(
+        &self,
+        id: &ComponentId,
+    ) -> Result<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        self.inspection.subscribe_reaction_events(id.as_str()).await
     }
 }
 
@@ -381,6 +575,7 @@ mod tests {
     use crate::channels::{ComponentStatus, QueryResult};
     use crate::error::DrasiError;
     use crate::sources::tests::TestMockSource;
+    use crate::test_helpers::creation::{BuilderFixtures, CoreFixtures, ReactionFixture};
     use crate::{DrasiLib, Query};
     use anyhow::Result as AnyhowResult;
     use async_trait::async_trait;
@@ -398,14 +593,22 @@ mod tests {
     }
 
     impl TestMockReaction {
-        fn new(id: String, queries: Vec<String>) -> Self {
-            let status_handle = crate::component_graph::ComponentStatusHandle::new(&id);
-            Self {
-                id,
-                queries,
-                auto_start: true,
-                status_handle,
-            }
+        fn fixture(name: String, queries: Vec<String>, auto_start: bool) -> ReactionFixture<Self> {
+            ReactionFixture::new(
+                name,
+                queries
+                    .into_iter()
+                    .map(|name| crate::config::ComponentReference::by_name(name).unwrap())
+                    .collect(),
+                auto_start,
+                move |id, inputs| {
+                    Ok(Self::with_auto_start(
+                        id.to_string(),
+                        inputs.iter().map(ToString::to_string).collect(),
+                        auto_start,
+                    ))
+                },
+            )
         }
 
         fn with_auto_start(id: String, queries: Vec<String>, auto_start: bool) -> Self {
@@ -441,7 +644,7 @@ mod tests {
             self.auto_start
         }
 
-        async fn initialize(&self, context: crate::context::ReactionRuntimeContext) {
+        async fn bind_runtime_context(&self, context: crate::context::ReactionRuntimeContext) {
             self.status_handle.wire(context.update_tx.clone()).await;
         }
 
@@ -492,16 +695,29 @@ mod tests {
 
     /// Build a started DrasiLib with a mock source and one query.
     async fn build_core_with_query() -> DrasiLib {
-        let source = TestMockSource::new("test-source".to_string()).unwrap();
+        let source = TestMockSource::fixture("test-source", true);
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("test")
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
                     .from_input("test-source")
                     .auto_start(false)
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .await
@@ -518,8 +734,8 @@ mod tests {
     async fn add_reaction_happy_path() {
         let core = build_core_with_query().await;
 
-        let reaction = TestMockReaction::with_auto_start("r1".into(), vec!["q1".into()], false);
-        core.add_reaction(reaction).await.unwrap();
+        let reaction = TestMockReaction::fixture("r1".into(), vec!["q1".into()], false);
+        core.add_reaction_fixture(reaction).await.unwrap();
 
         let reactions = core.list_reactions().await.unwrap();
         assert!(reactions.iter().any(|(id, _)| id == "r1"));
@@ -529,11 +745,11 @@ mod tests {
     async fn add_reaction_duplicate_returns_error() {
         let core = build_core_with_query().await;
 
-        let r1 = TestMockReaction::with_auto_start("r-dup".into(), vec!["q1".into()], false);
-        core.add_reaction(r1).await.unwrap();
+        let r1 = TestMockReaction::fixture("r-dup".into(), vec!["q1".into()], false);
+        core.add_reaction_fixture(r1).await.unwrap();
 
-        let r2 = TestMockReaction::with_auto_start("r-dup".into(), vec!["q1".into()], false);
-        let result = core.add_reaction(r2).await;
+        let r2 = TestMockReaction::fixture("r-dup".into(), vec!["q1".into()], false);
+        let result = core.add_reaction_fixture(r2).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         {
@@ -566,9 +782,8 @@ mod tests {
     async fn remove_reaction_happy_path() {
         let core = build_core_with_query().await;
 
-        let reaction =
-            TestMockReaction::with_auto_start("r-remove".into(), vec!["q1".into()], false);
-        core.add_reaction(reaction).await.unwrap();
+        let reaction = TestMockReaction::fixture("r-remove".into(), vec!["q1".into()], false);
+        core.add_reaction_fixture(reaction).await.unwrap();
 
         core.remove_reaction("r-remove", false).await.unwrap();
 
@@ -597,10 +812,10 @@ mod tests {
         assert!(reactions.is_empty(), "expected no reactions initially");
 
         // Add two reactions
-        let r1 = TestMockReaction::with_auto_start("r-list-1".into(), vec!["q1".into()], false);
-        let r2 = TestMockReaction::with_auto_start("r-list-2".into(), vec!["q1".into()], false);
-        core.add_reaction(r1).await.unwrap();
-        core.add_reaction(r2).await.unwrap();
+        let r1 = TestMockReaction::fixture("r-list-1".into(), vec!["q1".into()], false);
+        let r2 = TestMockReaction::fixture("r-list-2".into(), vec!["q1".into()], false);
+        core.add_reaction_fixture(r1).await.unwrap();
+        core.add_reaction_fixture(r2).await.unwrap();
 
         let reactions = core.list_reactions().await.unwrap();
         let ids: Vec<&str> = reactions.iter().map(|(id, _)| id.as_str()).collect();
@@ -617,9 +832,8 @@ mod tests {
     async fn get_reaction_status_returns_correct_status() {
         let core = build_core_with_query().await;
 
-        let reaction =
-            TestMockReaction::with_auto_start("r-status".into(), vec!["q1".into()], false);
-        core.add_reaction(reaction).await.unwrap();
+        let reaction = TestMockReaction::fixture("r-status".into(), vec!["q1".into()], false);
+        core.add_reaction_fixture(reaction).await.unwrap();
 
         let status = core.get_reaction_status("r-status").await.unwrap();
         assert_eq!(status, ComponentStatus::Added);
@@ -646,9 +860,8 @@ mod tests {
     async fn start_and_stop_reaction_lifecycle() {
         let core = build_core_with_query().await;
 
-        let reaction =
-            TestMockReaction::with_auto_start("r-lifecycle".into(), vec!["q1".into()], false);
-        core.add_reaction(reaction).await.unwrap();
+        let reaction = TestMockReaction::fixture("r-lifecycle".into(), vec!["q1".into()], false);
+        core.add_reaction_fixture(reaction).await.unwrap();
 
         // Subscribe to events before triggering actions
         let mut event_rx = core.subscribe_all_component_events();
@@ -690,13 +903,18 @@ mod tests {
     async fn get_reaction_info_returns_correct_fields() {
         let core = build_core_with_query().await;
 
-        let reaction = TestMockReaction::with_auto_start("r-info".into(), vec!["q1".into()], false);
-        core.add_reaction(reaction).await.unwrap();
+        let reaction = TestMockReaction::fixture("r-info".into(), vec!["q1".into()], false);
+        core.add_reaction_fixture(reaction).await.unwrap();
 
         let info = core.get_reaction_info("r-info").await.unwrap();
         assert_eq!(info.id, "r-info");
         assert_eq!(info.reaction_type, "test-log");
         assert_eq!(info.status, ComponentStatus::Added);
-        assert_eq!(info.queries, vec!["q1".to_string()]);
+        assert_eq!(
+            info.queries,
+            vec![crate::config::ComponentReference::by_id(
+                core.component_by_name("q1").unwrap().id().clone()
+            )]
+        );
     }
 }

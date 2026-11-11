@@ -401,16 +401,23 @@ async fn graph_binding_matrix() -> anyhow::Result<()> {
                     binding: "identity".into(),
                 })?
                 .provide_resource(resource_id, resource)?
-                .source(Box::new(PendingSource(ComponentDescriptor::try_new(
-                    source_id.clone(),
-                    vec![PortDescriptor::new(
-                        out.clone(),
-                        PortDirection::Output,
-                        GraphChangeCodec::schema().descriptor().clone(),
-                        PipeRequirements::default(),
-                    )],
-                )?)))
-                .component(specification, factory.clone())
+                .source(
+                    ComponentName::try_new("input")?,
+                    Box::new(PendingSource(ComponentDescriptor::try_new(
+                        source_id.clone(),
+                        vec![PortDescriptor::new(
+                            out.clone(),
+                            PortDirection::Output,
+                            GraphChangeCodec::schema().descriptor().clone(),
+                            PipeRequirements::default(),
+                        )],
+                    )?)),
+                )
+                .component(
+                    ComponentName::try_new("credential-source")?,
+                    specification,
+                    factory.clone(),
+                )
                 .bind_stream(
                     Endpoint::new(source_id.clone(), out.clone()),
                     StreamId::try_new("input/out")?,

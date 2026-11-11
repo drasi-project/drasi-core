@@ -27,7 +27,7 @@ async fn cancelled_storage_call_and_close_retain_lease_until_actual_io_finishes(
     let old = store.open("instance").await?;
     let desired = changed();
     let blocker = store.owner.database.begin_write()?;
-    let mut commit = Box::pin(old.commit(0, "accepted", &desired));
+    let mut commit = Box::pin(old.commit(0, "accepted", &desired, None, &[]));
     pending(commit.as_mut()).await;
     drop(commit);
     let mut close = Box::pin(old.close());
@@ -56,7 +56,7 @@ async fn cancelled_storage_call_and_close_retain_lease_until_actual_io_finishes(
     );
     old.close().await?;
     assert!(matches!(
-        old.commit(1, "stale", &DesiredInstance::default())
+        old.commit(1, "stale", &DesiredInstance::default(), None, &[])
             .await
             .unwrap_err()
             .downcast_ref(),
@@ -73,7 +73,7 @@ async fn cancelled_storage_call_and_close_retain_lease_until_actual_io_finishes(
         Some(ManagementError::AlreadyOwned(_))
     ));
     replacement
-        .commit(1, "new-owner", &DesiredInstance::default())
+        .commit(1, "new-owner", &DesiredInstance::default(), None, &[])
         .await?;
     replacement.close().await?;
     Ok(())
@@ -87,10 +87,10 @@ async fn snapshots_and_commits_are_serialized_even_when_the_first_caller_cancels
         let session = store.open("instance").await?;
         let before = changed();
         let after = DesiredInstance::default();
-        session.commit(0, "before", &before).await?;
+        session.commit(0, "before", &before, None, &[]).await?;
         let blocker = store.owner.database.begin_write()?;
         let mut snapshot = Box::pin(session.snapshot("cut"));
-        let mut commit = Box::pin(session.commit(1, "after", &after));
+        let mut commit = Box::pin(session.commit(1, "after", &after, None, &[]));
         if snapshot_first {
             pending(snapshot.as_mut()).await;
             pending(commit.as_mut()).await;
@@ -144,10 +144,10 @@ async fn damaged_configuration_records_fail_explicitly_without_releasing_other_i
             let store =
                 RedbConfigurationStore::new(directory.path().join("records.redb"), [43; 32])?;
             let session = store.open("damaged").await?;
-            session.commit(0, "accepted", &changed()).await?;
+            session.commit(0, "accepted", &changed(), None, &[]).await?;
             session.snapshot("saved").await?;
             let healthy = store.open("healthy").await?;
-            healthy.commit(0, "accepted", &changed()).await?;
+            healthy.commit(0, "accepted", &changed(), None, &[]).await?;
             let (table, record, context) = match kind {
                 "current" => (CURRENT, "damaged".to_owned(), "current:damaged".to_owned()),
                 "request" => {
@@ -199,6 +199,18 @@ async fn damaged_configuration_records_fail_explicitly_without_releasing_other_i
             session.close().await?;
             if kind == "current" {
                 let result = drasi_lib::DrasiLib::builder()
+                    .with_query_factory(
+                        drasi_lib::computation::v1::FactoryRegistry::standard()
+                            .get(
+                                &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                                    "drasi/continuous-query",
+                                    "1",
+                                )
+                                .expect("reference query identity"),
+                            )
+                            .expect("reference query factory")
+                            .clone(),
+                    )
                     .with_id("damaged")
                     .with_configuration_store(Arc::new(store.clone()))
                     .build()
@@ -233,10 +245,24 @@ async fn unsupported_persisted_configuration_version_rejects_restore_without_ove
     )?);
     let session = store.open("instance").await?;
     let mut future = changed();
-    future.version = 2;
-    session.commit(0, "future-version", &future).await?;
+    future.version = 3;
+    session
+        .commit(0, "future-version", &future, None, &[])
+        .await?;
     session.close().await?;
     assert!(drasi_lib::DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1"
+                    )
+                    .expect("reference query identity")
+                )
+                .expect("reference query factory")
+                .clone()
+        )
         .with_id("instance")
         .with_configuration_store(store.clone())
         .build()

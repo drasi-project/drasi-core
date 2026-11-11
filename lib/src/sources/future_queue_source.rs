@@ -82,10 +82,9 @@ impl FutureQueueSource {
         let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(1000);
         let receiver = dispatcher.create_receiver().await.map_err(
             |e| -> Box<dyn std::error::Error + Send + Sync> {
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to create receiver for future queue subscription: {e}"),
-                ))
+                Box::new(std::io::Error::other(format!(
+                    "Failed to create receiver for future queue subscription: {e}"
+                )))
             },
         )?;
         *self.dispatcher.write().await = Some(Box::new(dispatcher));

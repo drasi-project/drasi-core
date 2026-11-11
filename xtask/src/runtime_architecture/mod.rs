@@ -162,6 +162,7 @@ const SCOPED_CRATES: &[(&str, &str)] = &[
         "drasi_computation_contracts",
         "components/computation-contracts",
     ),
+    ("drasi_query_common", "components/query-common"),
 ];
 
 fn scoped(module: &str) -> bool {

@@ -29,6 +29,12 @@ use std::{
 use tracing::instrument::WithSubscriber;
 use tracing_subscriber::prelude::*;
 
+const SOURCE_ID: &str = "e07b5b54-840c-4c48-bac0-0bbdf637d306";
+const MIDDLE_ID: &str = "3531a429-8ac1-4c60-985f-82ea080c5281";
+const COLLECTED_ID: &str = "f027d30c-f549-4d41-a5cf-bd7f0bc1e606";
+const BATCH_SOURCE_ID: &str = "8342ceea-94a0-4511-9ae5-c35d894ebf5f";
+const BATCH_SINK_ID: &str = "b9ac4ff2-60b2-4689-ad89-a9e1d37795cf";
+
 fn fixture(base: bool) -> PathBuf {
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -144,7 +150,10 @@ impl EnvelopeSink for Collector {
         assert_eq!(ExecutionContext::current(), input.execution_context);
         let scope = ExecutionScope::current_component().context("receiver scope")?;
         assert_eq!(scope.identity.instance_id(), self.instance);
-        assert_eq!(scope.identity.component_id().unwrap().as_str(), "collected");
+        assert_eq!(
+            scope.identity.component_id().unwrap().as_str(),
+            COLLECTED_ID
+        );
         self.contexts.lock().unwrap().push(input.execution_context);
         Ok(())
     }
@@ -171,8 +180,9 @@ async fn pipeline(plugin: &NativePlugin, instance: &str, seed: u8, sampled: bool
             .with_context_adapter(Arc::new(OpenTelemetryContextAdapter)),
         )
         .component(
+            ComponentName::try_new("source")?,
             source.specification(
-                ComponentId::try_new("source")?,
+                ComponentId::try_new(SOURCE_ID)?,
                 json!({
                     "trace": true, "seed": seed, "sampled": sampled,
                 }),
@@ -180,30 +190,34 @@ async fn pipeline(plugin: &NativePlugin, instance: &str, seed: u8, sampled: bool
             source,
         )
         .component(
-            middle.specification(ComponentId::try_new("middle")?, json!({"trace": true}))?,
+            ComponentName::try_new("middle")?,
+            middle.specification(ComponentId::try_new(MIDDLE_ID)?, json!({"trace": true}))?,
             middle,
         )
-        .sink(Box::new(Collector {
-            descriptor: ComponentDescriptor::try_new(
-                ComponentId::try_new("collected")?,
-                vec![PortDescriptor::new(
-                    PortId::try_new("in")?,
-                    PortDirection::Input,
-                    GraphChangeCodec::schema().descriptor().clone(),
-                    PipeRequirements::default(),
-                )],
-            )?,
-            contexts: contexts.clone(),
-            instance: format!("graph-{instance}"),
-        }))
-        .bind_stream(endpoint("source", "out"), StreamId::try_new("source/out")?)
-        .bind_stream(endpoint("middle", "out"), StreamId::try_new("middle/out")?)
+        .sink(
+            ComponentName::try_new("collected")?,
+            Box::new(Collector {
+                descriptor: ComponentDescriptor::try_new(
+                    ComponentId::try_new(COLLECTED_ID)?,
+                    vec![PortDescriptor::new(
+                        PortId::try_new("in")?,
+                        PortDirection::Input,
+                        GraphChangeCodec::schema().descriptor().clone(),
+                        PipeRequirements::default(),
+                    )],
+                )?,
+                contexts: contexts.clone(),
+                instance: format!("graph-{instance}"),
+            }),
+        )
+        .bind_stream(endpoint(SOURCE_ID, "out"), StreamId::try_new("source/out")?)
+        .bind_stream(endpoint(MIDDLE_ID, "out"), StreamId::try_new("middle/out")?)
         .connect(
-            EdgeDefinition::new(endpoint("source", "out"), endpoint("middle", "in")),
+            EdgeDefinition::new(endpoint(SOURCE_ID, "out"), endpoint(MIDDLE_ID, "in")),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .connect(
-            EdgeDefinition::new(endpoint("middle", "out"), endpoint("collected", "in")),
+            EdgeDefinition::new(endpoint(MIDDLE_ID, "out"), endpoint(COLLECTED_ID, "in")),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()?;
@@ -221,20 +235,23 @@ async fn batch_and_cancellation(plugin: &NativePlugin) -> Result<()> {
         .with_adapter(Some(Arc::new(OpenTelemetryContextAdapter)));
     let mut sink = scope.in_scope(|| {
         factory(plugin, "sink")
-            .create_component(ComponentId::try_new("batch")?, json!({"trace": true}))
+            .create_component(ComponentId::try_new(BATCH_SINK_ID)?, json!({"trace": true}))
     })?;
+    sink.initialize().await?;
     sink.start().await?;
     scope
         .scope(sink.handle_batch(vec![input(52), input(53)]))
         .await?;
     sink.stop().await?;
+    sink.dispose().await?;
 
     let mut middle = scope.in_scope(|| {
         factory(plugin, "transformer").create_component(
-            ComponentId::try_new("cancelled")?,
+            ComponentId::try_new("e4cd95ba-c4fd-4a83-8a11-ea66904c2be0")?,
             json!({"trace": true, "block": true}),
         )
     })?;
+    middle.initialize().await?;
     middle.start().await?;
     let result = tokio::time::timeout(
         Duration::from_millis(100),
@@ -246,6 +263,7 @@ async fn batch_and_cancellation(plugin: &NativePlugin) -> Result<()> {
         "pending native callback should be cancelled by its owner"
     );
     middle.stop().await?;
+    middle.dispose().await?;
     assert!(ExecutionContext::current().is_empty());
     let observed = observations()?;
     assert!(
@@ -343,28 +361,29 @@ async fn graph_created_native_batch(plugin: &NativePlugin, sampled: bool) -> Res
                 .with_instance_id(instance)
                 .with_context_adapter(Arc::new(OpenTelemetryContextAdapter)),
             )
-            .source(Box::new(BatchSource {
-                descriptor: ComponentDescriptor::try_new(
-                    ComponentId::try_new("batch-source")?,
-                    vec![PortDescriptor::new(
-                        PortId::try_new("out")?,
-                        PortDirection::Output,
-                        GraphChangeCodec::schema().descriptor().clone(),
-                        PipeRequirements::default(),
-                    )],
-                )?,
-                outputs,
-            }))
+            .source(
+                ComponentName::try_new("batch-source")?,
+                Box::new(BatchSource {
+                    descriptor: ComponentDescriptor::try_new(
+                        ComponentId::try_new(BATCH_SOURCE_ID)?,
+                        vec![PortDescriptor::new(
+                            PortId::try_new("out")?,
+                            PortDirection::Output,
+                            GraphChangeCodec::schema().descriptor().clone(),
+                            PipeRequirements::default(),
+                        )],
+                    )?,
+                    outputs,
+                }),
+            )
             .component(
-                sink.specification(
-                    ComponentId::try_new("native-batch")?,
-                    json!({"trace": true}),
-                )?,
+                ComponentName::try_new("batch-sink")?,
+                sink.specification(ComponentId::try_new(BATCH_SINK_ID)?, json!({"trace": true}))?,
                 sink,
             )
             .bind_stream(
                 Endpoint::new(
-                    ComponentId::try_new("batch-source")?,
+                    ComponentId::try_new(BATCH_SOURCE_ID)?,
                     PortId::try_new("out")?,
                 ),
                 StreamId::try_new("batch-source/out")?,
@@ -372,13 +391,10 @@ async fn graph_created_native_batch(plugin: &NativePlugin, sampled: bool) -> Res
             .connect(
                 EdgeDefinition::new(
                     Endpoint::new(
-                        ComponentId::try_new("batch-source")?,
+                        ComponentId::try_new(BATCH_SOURCE_ID)?,
                         PortId::try_new("out")?,
                     ),
-                    Endpoint::new(
-                        ComponentId::try_new("native-batch")?,
-                        PortId::try_new("in")?,
-                    ),
+                    Endpoint::new(ComponentId::try_new(BATCH_SINK_ID)?, PortId::try_new("in")?),
                 ),
                 Box::new(BoundedPipeConfig { capacity: 8 }),
             )
@@ -515,7 +531,7 @@ fn actual_native_libraries_preserve_context_parentage_and_owned_cancellation() -
                 call["phase"] == "transform" && call["instance"] == format!("graph-{instance}")
             })
             .context("scoped native transform")?;
-        assert_eq!(middle["component"], "middle");
+        assert_eq!(middle["component"], MIDDLE_ID);
         assert_eq!(middle["graph"], format!("graph-{instance}"));
         assert!(middle["generation"].as_u64().unwrap() > 0);
         assert_eq!(middle["operation"], middle["inputs"][0]);
@@ -549,14 +565,19 @@ fn actual_native_libraries_preserve_context_parentage_and_owned_cancellation() -
     let strict = ExecutionScope::new(ExecutionContext::default()).with_required_transport(true);
     assert!(
         strict
-            .in_scope(|| factory(&base, "transformer")
-                .create_component(ComponentId::try_new("required").unwrap(), json!({})))
+            .in_scope(|| factory(&base, "transformer").create_component(
+                ComponentId::try_new("2999619e-88eb-4909-bfc1-95d2e289c0b9").unwrap(),
+                json!({}),
+            ))
             .is_err(),
         "required native propagation must fail before construction even without a current trace"
     );
     runtime.block_on(async {
-        let mut old = factory(&base, "transformer")
-            .create_component(ComponentId::try_new("base")?, json!({}))?;
+        let mut old = factory(&base, "transformer").create_component(
+            ComponentId::try_new("c774822a-9723-46f6-8a50-f35947a3e416")?,
+            json!({}),
+        )?;
+        old.initialize().await?;
         old.start().await?;
         let mut empty = input(61);
         empty.execution_context = ExecutionContext::default();
@@ -566,6 +587,7 @@ fn actual_native_libraries_preserve_context_parentage_and_owned_cancellation() -
             "missing capability must not silently discard context"
         );
         old.stop().await?;
+        old.dispose().await?;
         Ok::<_, anyhow::Error>(())
     })?;
     Ok(())

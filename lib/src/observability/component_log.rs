@@ -121,8 +121,10 @@ impl ComponentLogType {
         role: ComponentRole,
         semantic_kind: Option<ComponentSemanticKind>,
     ) -> Self {
-        // Ordinary API adapters execute as services but keep their public category.
+        // Ordinary API adapters execute as services, and continuous queries as
+        // transformers, but both keep their public category.
         match (role, semantic_kind) {
+            (ComponentRole::Transformer, Some(ComponentSemanticKind::Query)) => Self::Query,
             (ComponentRole::Service, Some(ComponentSemanticKind::Source)) => Self::Source,
             (ComponentRole::Service, Some(ComponentSemanticKind::Query)) => Self::Query,
             (ComponentRole::Service, Some(ComponentSemanticKind::Reaction)) => Self::Reaction,
@@ -156,7 +158,6 @@ impl From<ComponentRole> for ComponentLogType {
         match value {
             ComponentRole::Source => Self::Source,
             ComponentRole::Transformer => Self::Transformer,
-            ComponentRole::Query => Self::Query,
             ComponentRole::Sink => Self::Sink,
             ComponentRole::Service => Self::Service,
         }
@@ -653,6 +654,7 @@ mod tests {
         registry.remove_component_by_key(&key).await.unwrap();
     }
 
+    use std::sync::Arc;
     fn make_key(instance: &str, component_type: ComponentType, component: &str) -> ComponentLogKey {
         ComponentLogKey::new(instance, component_type, component)
     }
@@ -881,7 +883,6 @@ mod tests {
         for role in [
             ComponentRole::Source,
             ComponentRole::Transformer,
-            ComponentRole::Query,
             ComponentRole::Sink,
             ComponentRole::Service,
         ] {
@@ -911,6 +912,13 @@ mod tests {
             ComponentLogType::for_component(
                 ComponentRole::Transformer,
                 Some(ComponentSemanticKind::Query)
+            ),
+            ComponentLogType::Query
+        );
+        assert_eq!(
+            ComponentLogType::for_component(
+                ComponentRole::Transformer,
+                Some(ComponentSemanticKind::Transformer)
             ),
             ComponentLogType::Transformer
         );
@@ -979,14 +987,18 @@ mod tests {
     #[tokio::test]
     async fn native_roles_keep_separate_history_live_streams_and_cleanup() {
         let registry = ComponentLogRegistry::new();
-        for role in [
-            ComponentRole::Source,
-            ComponentRole::Transformer,
-            ComponentRole::Query,
-            ComponentRole::Sink,
-            ComponentRole::Service,
-        ] {
-            let key = ComponentLogKey::new("instance", role, "same-id");
+        let categories = [
+            ComponentLogType::for_component(ComponentRole::Source, None),
+            ComponentLogType::for_component(ComponentRole::Transformer, None),
+            ComponentLogType::for_component(
+                ComponentRole::Transformer,
+                Some(ComponentSemanticKind::Query),
+            ),
+            ComponentLogType::for_component(ComponentRole::Sink, None),
+            ComponentLogType::for_component(ComponentRole::Service, None),
+        ];
+        for category in categories.clone() {
+            let key = ComponentLogKey::new("instance", category.clone(), "same-id");
             let (history, mut live) = registry.subscribe_by_key(&key).await;
             assert!(history.is_empty());
             assert!(registry.try_log(LogMessage::with_instance(
@@ -994,10 +1006,10 @@ mod tests {
                 key.component_type.as_str(),
                 "instance",
                 "same-id",
-                role,
+                category.clone(),
             )));
             let message = live.try_recv().unwrap();
-            assert_eq!(message.component_type, ComponentLogType::from(role));
+            assert_eq!(message.component_type, category);
             assert_eq!(registry.get_history_by_key(&key).await.len(), 1);
         }
         let transformer = ComponentLogKey::new("instance", ComponentRole::Transformer, "same-id");
@@ -1006,13 +1018,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(registry.log_count_by_key(&transformer).await, 0);
-        for role in [
-            ComponentRole::Source,
-            ComponentRole::Query,
-            ComponentRole::Sink,
-            ComponentRole::Service,
-        ] {
-            let key = ComponentLogKey::new("instance", role, "same-id");
+        for category in categories
+            .into_iter()
+            .filter(|category| *category != ComponentLogType::Transformer)
+        {
+            let key = ComponentLogKey::new("instance", category, "same-id");
             assert_eq!(registry.log_count_by_key(&key).await, 1);
         }
     }

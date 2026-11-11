@@ -1,4 +1,5 @@
 [package]
+rust-version.workspace = true
 name = "drasi-query-cypher"
 version = "0.3.6"
 edition.workspace = true

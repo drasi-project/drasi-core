@@ -127,6 +127,18 @@ async fn end_to_end_through_drasilib_delivers_to_http_server() -> Result<()> {
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("http-e2e-core")
             .with_source(mock_source)
             .with_query(query)
@@ -1740,6 +1752,18 @@ async fn adaptive_end_to_end_through_drasilib_delivers_batch() -> Result<()> {
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("http-batch-e2e-core")
             .with_source(mock_source)
             .with_query(query)

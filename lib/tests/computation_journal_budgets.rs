@@ -1,7 +1,6 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-#[allow(dead_code)]
 mod computation_support;
 
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc, time::Duration};
@@ -122,45 +121,39 @@ async fn qos_pressure(channel: &Arc<QosChannel>) -> Result<()> {
         let mut cancelled = Box::pin(channel.publish(&oversized));
         assert!(poll!(&mut cancelled).is_pending());
     }
-    // The next Pending must measure capacity, not an exhausted Tokio lock budget.
-    tokio::task::yield_now().await;
-    let mut blocked = Box::pin(channel.publish(&oversized));
-    assert!(poll!(&mut blocked).is_pending());
-    tokio::time::timeout(Duration::from_secs(2), channel.progress())
-        .await
-        .context("capacity-blocked publication retained the journal lock")??;
-    handle(fast_receiver.as_mut(), 1)
-        .await
-        .context("fast subscriber first delivery")?;
-    handle(fast_receiver.as_mut(), 2)
-        .await
-        .context("fast subscriber second delivery")?;
-    handle(slow_receiver.as_mut(), 1)
-        .await
-        .context("slow subscriber first delivery")?;
-    assert!(poll!(&mut blocked).is_pending());
+    // Keep the publisher driven while acknowledgements acquire the same fair
+    // mutex; a manually polled future can retain its place in that mutex queue.
+    let mut publishers = tokio::task::JoinSet::new();
+    let producer = channel.clone();
+    publishers.spawn(async move { producer.publish(&oversized).await });
+    assert!(publishers.try_join_next().is_none());
+    handle(fast_receiver.as_mut(), 1).await?;
+    handle(fast_receiver.as_mut(), 2).await?;
+    handle(slow_receiver.as_mut(), 1).await?;
+    assert!(publishers.try_join_next().is_none());
     assert_eq!(channel.progress().await?.earliest_available, Some(1));
     handle(slow_receiver.as_mut(), 2).await?;
-    tokio::time::timeout(Duration::from_secs(5), blocked)
-        .await
-        .context("oversized publication stayed blocked after every subscriber handled")??;
+    tokio::time::timeout(Duration::from_secs(5), publishers.join_next())
+        .await?
+        .context("oversized publication task")???;
     let next = root("source", 4, &[4]);
-    let mut blocked = Box::pin(channel.publish(&next));
-    assert!(poll!(&mut blocked).is_pending());
+    let producer = channel.clone();
+    publishers.spawn(async move { producer.publish(&next).await });
+    assert!(publishers.try_join_next().is_none());
     handle(fast_receiver.as_mut(), 3).await?;
-    assert!(poll!(&mut blocked).is_pending());
+    assert!(publishers.try_join_next().is_none());
     slow.control.cancel();
     drop(slow_receiver);
     assert!(
-        poll!(&mut blocked).is_pending(),
+        publishers.try_join_next().is_none(),
         "disconnect is not retirement"
     );
     let mut resumed = subscribe(channel, "slow")?;
     let mut resumed_receiver = resumed.pipe.take_receiver()?;
     handle(resumed_receiver.as_mut(), 3).await?;
-    tokio::time::timeout(Duration::from_secs(5), blocked)
-        .await
-        .context("publication stayed blocked after the reconnected subscriber handled")??;
+    tokio::time::timeout(Duration::from_secs(5), publishers.join_next())
+        .await?
+        .context("subsequent publication task")???;
     assert_eq!(channel.progress().await?.accepted, 4);
     handle(fast_receiver.as_mut(), 4).await?;
     handle(resumed_receiver.as_mut(), 4).await?;

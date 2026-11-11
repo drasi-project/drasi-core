@@ -14,7 +14,6 @@
 
 #![cfg(test)]
 
-#[allow(dead_code)]
 mod computation_support;
 use computation_support::*;
 use drasi_lib::{computation::v1::*, DrasiLib};
@@ -76,8 +75,28 @@ fn components() -> ComponentBatch {
 
 #[tokio::test]
 async fn inspection_history_is_coherent_for_instance_components() {
-    let drasi = DrasiLib::builder().build().await.expect("instance");
-    drasi.add_components(components()).await.expect("register");
+    let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
+        .build()
+        .await
+        .expect("instance");
+    drasi
+        .add_components(components())
+        .await
+        .expect("register")
+        .ensure_committed()
+        .expect("desired topology committed");
     let inspector = drasi.inspect_computation_graph().expect("inspection");
     let before = inspector.snapshot().sequence;
     let control = drasi.computation_control().unwrap();
@@ -156,11 +175,28 @@ async fn computation_topology_is_queryable_as_typed_graph_changes() {
 
 #[tokio::test]
 async fn orphan_relationships_remain_queryable_and_history_eviction_is_explicit() {
-    let drasi = DrasiLib::builder().build().await.expect("instance");
+    let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
+        .build()
+        .await
+        .expect("instance");
     drasi
         .add_components(components().auto_start(false))
         .await
-        .expect("register");
+        .expect("register")
+        .ensure_committed()
+        .expect("desired topology committed");
     let control = drasi.computation_control().unwrap();
     let preview = control
         .preview(
@@ -175,7 +211,9 @@ async fn orphan_relationships_remain_queryable_and_history_eviction_is_explicit(
     control
         .reconcile(preview, TopologyBindings::default())
         .await
-        .expect("unbind");
+        .expect("unbind")
+        .ensure_committed()
+        .expect("desired topology committed");
     let inspector = control.inspector();
     let mut source = ComputationTopologySource::new(
         component("topology"),

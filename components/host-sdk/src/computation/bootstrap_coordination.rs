@@ -43,8 +43,8 @@ impl NativeSourceBootstrapProgress {
             .scope
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("source bootstrap requires graph scope"))?;
-        ComponentId::try_new(scope.instance_id.as_str())?;
-        ComponentId::try_new(scope.graph_id.as_str())?;
+        drasi_computation_contracts::validate_identifier("instance", &scope.instance_id)?;
+        drasi_computation_contracts::validate_identifier("graph", &scope.graph_id)?;
         match self {
             Self::Single(owner) => anyhow::ensure!(
                 owner.graph_id() == scope.graph_id && owner.component_id() != &request.id,

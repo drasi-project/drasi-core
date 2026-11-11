@@ -5,7 +5,7 @@ use crate::MySqlStoredProcConfig;
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_computation_contracts::{
-    ComponentDescriptor, ComponentId, InputBinding, InputEnvelope, SinkCompletion,
+    ComponentDescriptor, ComponentId, InputBinding, InputEnvelope, PortDescriptor, SinkCompletion,
 };
 use drasi_computation_plugin_sdk::{ActivationCredentials, NativeComponent, NativeSink};
 use drasi_mysql_common::storedproc::runtime::MySqlStoredProcSink as Sink;
@@ -32,6 +32,9 @@ impl MySqlStoredProcSink {
     }
     pub fn describe(id: ComponentId) -> Result<ComponentDescriptor> {
         Sink::describe(id)
+    }
+    pub(crate) fn ports() -> Result<Vec<PortDescriptor>> {
+        Sink::ports()
     }
 }
 

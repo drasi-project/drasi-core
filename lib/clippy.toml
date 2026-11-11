@@ -3,7 +3,6 @@
 
 # Performance and efficiency
 avoid-breaking-exported-api = true
-msrv = "1.70.0"
 
 # Cognitive complexity thresholds
 cognitive-complexity-threshold = 25

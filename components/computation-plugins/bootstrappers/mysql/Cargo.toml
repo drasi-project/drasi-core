@@ -1,4 +1,5 @@
 [package]
+rust-version.workspace = true
 name = "drasi-computation-bootstrap-mysql"
 description = "Native MySQL snapshots and consumer-owned binlog handover"
 readme = "README.md"
@@ -18,7 +19,7 @@ dynamic-plugin = []
 
 [package.metadata.drasi-plugin]
 abi-family = "computation"
-abi-version = "1.0.0"
+abi-version = "2.0.0"
 kind = "bootstrap-mysql"
 
 [dependencies]

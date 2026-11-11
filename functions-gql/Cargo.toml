@@ -1,4 +1,5 @@
 [package]
+rust-version.workspace = true
 name = "drasi-functions-gql"
 version = "0.5.10"
 edition = "2021"

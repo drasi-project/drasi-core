@@ -14,7 +14,7 @@
 
 use crate::common::{derive_removes_output, derived_property_is_set, ErrorHandling};
 use async_trait::async_trait;
-use drasi_core::{
+use drasi_core_types::{
     interface::{
         ElementIndex, MiddlewareError, MiddlewareSetupError, SourceMiddleware,
         SourceMiddlewareFactory,

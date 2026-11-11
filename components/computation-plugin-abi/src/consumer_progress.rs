@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! Optional read-only progress for a producer's immutable consumer set. This
-//! extension changes neither base ABI 1.0 nor the single-owner recovery-v1 ABI.
+//! extension changes neither base ABI 2.0 nor the single-owner recovery-v1 ABI.
 
 use super::*;
 
@@ -132,8 +132,8 @@ mod tests {
             16 + 4 * pointer
         );
         assert_eq!(size_of::<ComponentVTable>(), 16 + 5 * pointer);
-        assert_eq!(ABI_VERSION, "1.0.0");
-        assert_eq!(WIRE_VERSION, 1);
+        assert_eq!(ABI_VERSION, "2.0.0");
+        assert_eq!(WIRE_VERSION, 2);
         assert!(ConsumerProgressSubscriptionV1::null().context.is_null());
     }
 }

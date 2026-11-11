@@ -347,7 +347,7 @@ async fn connected_pipeline(root: &Path, boundary: &str, crash: bool) -> Result<
     anyhow::ensure!(profiles.len() == 2, "expected two downstream pipe profiles");
     let mut builder = ComputationGraph::builder("transaction-crash")
         .transformer(Box::new(transaction_unstarted(root, false).await?))
-        .query(Box::new(query_unstarted(root, "connected-query").await?))
+        .transformer(Box::new(query_unstarted(root, "connected-query").await?))
         .sink(Box::new(CrashSink {
             descriptor: ComponentDescriptor::try_new(
                 ComponentId::try_new("sink")?,

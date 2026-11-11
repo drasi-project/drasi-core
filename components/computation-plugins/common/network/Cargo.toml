@@ -1,4 +1,5 @@
 [package]
+rust-version.workspace = true
 name = "drasi-computation-network-common"
 version.workspace = true
 edition.workspace = true

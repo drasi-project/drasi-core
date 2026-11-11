@@ -189,6 +189,18 @@ fn definition(revision: u32) -> DesiredInstance {
 
 async fn open(state: &Arc<State>) -> Result<DrasiLib> {
     Ok(DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("resource-dependencies")
         .with_management_resources(Arc::new(Resolver(state.clone())))
         .build()
@@ -725,6 +737,18 @@ impl ManagementResourceResolver for IndependentResolver {
 async fn existing_resolvers_cannot_silently_ignore_declared_dependencies() -> Result<()> {
     let state = Arc::new(State::default());
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_management_resources(Arc::new(IndependentResolver(Resolver(state.clone()))))
         .build()
         .await?;

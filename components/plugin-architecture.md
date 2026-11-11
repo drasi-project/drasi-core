@@ -1,6 +1,6 @@
 # Drasi Plugin Architecture
 
-**Current development architecture, reviewed 17 October 2026.**
+**Current development architecture.**
 
 This guide explains which interfaces a component implements, what the host owns,
 and how separately built libraries are loaded. Use matching Core and Server
@@ -37,7 +37,8 @@ their callers move. Native libraries are selected explicitly, not substituted
 automatically for an ordinary plugin with a similar name.
 
 The dependency rule is directional: native libraries cannot depend on the
-ordinary SDK or query runtime. An ordinary Rust compatibility entry point may
+ordinary SDK or graph runtime. Only the query transformer may depend on the
+query evaluator and parser. An ordinary Rust compatibility entry point may
 delegate to a native implementation instead of copying it; that does not give
 the native library a dependency on the old host. Protocol, mapping and SQL logic
 shared by both families belongs in the relevant `*-common` crate.
@@ -50,13 +51,31 @@ Package versions follow workspace release tooling; native ABI metadata and
 configuration versions are independently checked and are not inferred from
 the package version.
 
-**Queries remain built in.** Ordinary and explicitly assembled native queries
-use `ContinuousQueryTransformer` and the existing query engine in the main
-graph. There is no extra query host/private graph. Independently loaded Query
-plugins are still rejected because the complete storage/recovery/read interface
-is unfinished. The
-[CW-43 investigation](../lib/docs/computation-graph-remaining-work.md#cw-43-optional-native-query-plugin)
-is not a released capability.
+**Ordinary queries require an explicitly registered factory.** The native query
+plugin runs the existing Core evaluator inside a normal Transformer. The Host
+SDK's ordinary-query adapter supplies the actual selected index provider,
+progress owner, bootstrap provider, result catalogue and scheduling resource.
+There is no private graph, fallback evaluator or implicit query-plugin
+dependency in `drasi-lib`. The linked `ContinuousQueryTransformer` remains an
+explicit reference implementation, not an automatically selected default.
+
+The indexed plugin supports normal memory, persistent atomic and explicitly
+non-atomic providers, including bootstrap, archives, joins, middleware, scheduled work,
+test clocks, replacement and removal. Query configuration and canonical
+result/recovery behavior are shared through `drasi-query-common`. Ordinary
+read APIs, indefinite subscriptions and reactions use the existing graph-owned
+result outlet. Large snapshots/history and snapshot/live attachment transfer
+one immutable observation in bounded pages; the Host keeps no result mirror.
+Query output metrics use canonical metadata, and recovery consumers can read
+positively retained state after completed cleanup without enabling ordinary
+inactive reads or recreating an evaluator.
+Server registers the unique eligible loaded query factory before ordinary
+query creation. Non-atomic publication reuses the existing pending-output/reset
+protocol and never claims atomicity for independent writers. Remaining
+payload, native-coverage, full-suite, performance and reference-retirement work
+is tracked in [CW-76 through CW-80](../lib/docs/computation-graph-remaining-work.md#cw-76).
+[CW-43](../lib/docs/computation-graph-remaining-work.md#cw-43) records the completed
+query integration rather than an open implementation checklist.
 
 ## Architecture Diagram
 
@@ -68,18 +87,19 @@ flowchart TD
     Native["Native component library"]
     Ordinary["Existing Source/Reaction-family library"]
     Adapters["Graph-owned ordinary adapters"]
-    Query["Built-in ContinuousQueryTransformer"]
+    Query["Explicitly registered native query transformer"]
     Engine["Existing Core query evaluator"]
     Providers["Host-supplied storage and resource owners"]
 
     Application --> Registry
     Application --> Graph
     Registry --> Native
+    Registry --> Query
     Registry --> Ordinary
     Graph -->|"Host proxy, bounded native operations"| Native
     Graph --> Adapters
     Adapters --> Ordinary
-    Graph --> Query
+    Graph -->|"Same native transformer contract"| Query
     Query --> Engine
     Graph --> Providers
 ```
@@ -102,13 +122,14 @@ Paths below are relative to the Core repository unless noted otherwise.
 | `drasi-ffi-primitives` | `components/ffi-primitives/` | Dependency-free C-compatible types and declarative macros |
 | `drasi-lib` | `lib/` | Graph ownership, query assembly, lifecycle, ordinary APIs and injected storage |
 | `drasi-core` | `core/` | Shared query algorithms and transaction/index machinery |
+| `drasi-query-common` | `components/query-common/` | Existing query configuration, builder and canonical result/read implementation shared by linked and loaded query adapters |
 | `drasi-server` | Sibling `drasi-server/` repository | Configuration, verified plugin installation, APIs, UI and process lifecycle |
 
 Native plugin data/interfaces must not pull in `drasi-lib`, the evaluator,
 parsers or the ordinary plugin SDK. Use
 [`make check-native-dependencies`](../Makefile) to protect that separation.
-The planned query plugin is a separate migration, not permission to weaken
-dependency checks for the existing non-query components.
+The query plugin is the explicit evaluator-dependent exception; it does not
+weaken dependency checks for the SDK or non-query components.
 
 ## Plugin Types
 
@@ -121,6 +142,12 @@ and actually implemented capabilities. Snapshot replacement is declared per sink
 input port and must match the handlers the constructed sink actually registers.
 Construction is configuration-only;
 activation and I/O belong to lifecycle operations.
+
+Sinks and transformers may separately opt into input-binding updates. The graph
+then supplies actual incoming producer endpoints and streams before startup and
+at processing boundaries, including after rebinding. This is distinct from
+construction-time bindings, which can require reconstructing a component. See
+the native SDK guide for repetition, cancellation and transaction-step limits.
 
 Native bootstrap providers are negotiated through the bootstrap extension,
 not another graph processing role. Handled-consumer factories use the consumer
@@ -210,21 +237,28 @@ serve different purposes. Do not substitute one for another.
 
 | Host interface | Accepted plugin interface |
 |---|---|
-| Native computation ABI 1.0.0 | Compatible native tables, matching target and wire version 1; supported extensions are validated separately |
-| Ordinary ABI 0.17.x | Ordinary 0.17.x on the same target |
-| Ordinary ABI 0.17.x loading 0.16.x | The explicitly supported older behavior/prefix; no automatic upgrade to new recovery capabilities |
+| Native computation ABI 2.0.0 | Matching native tables, target and wire version 2; advertised capabilities/extensions are validated separately |
+| Ordinary ABI 0.18.x | Ordinary 0.18.x on the same target; mandatory binding and fallible lifecycle tables |
+| Ordinary ABI 0.16.x / 0.17.x component layouts | Reject before plugin initialization; rebuild with the current ordinary SDK |
 | Missing metadata, wrong target, incompatible or unknown interface | Reject; never guess a compatible layout |
 
-Native base tables and strict metadata are checked independently of the v1
+Native base tables and strict metadata are checked independently of the version 2
 MessagePack payload definition. Build hosts and native libraries from matching
-sources. Capabilities use the existing extension pattern rather than changing
-an unrelated table's layout.
+sources. ABI 2.0 carries the native lifecycle/update contract; an advertised
+capability must match the implemented tables rather than follow from SDK presence.
 
-In ordinary ABI 0.17, state-store listing can report failure rather than an
-empty result. A versioned durability callback follows the 0.16 table prefix.
+Ordinary ABI 0.18 separates required runtime-context binding from optional
+once-per-object initialization, adds disposal and temporary processing-pause
+hooks, and names destructive cleanup `delete_owned_resources`. Initialization
+and disposal return failures through the vtable instead of reporting success
+before cleanup completes.
+
+The state-store layout and transferred ownership introduced in 0.17 are
+unchanged. Listing reports failure rather than an empty result, and a versioned
+durability callback follows the older table prefix.
 It describes the actual provider; unavailable evidence cannot satisfy a stronger
-recovery assertion. The 0.17 proxy releases its transferred service ownership,
-while loading 0.16 preserves the supported older lifetime behavior.
+recovery assertion. The proxy releases its transferred service ownership.
+Preserving that layout does not make old Source/Reaction component tables loadable.
 Bootstrap settings/properties are bounded and forwarded, and explicit source
 replay from sequence zero is preserved. None of these facts alone establishes
 atomic snapshot/live handover or exactly-once external effects.
@@ -236,7 +270,7 @@ built libraries. Rust memory layouts are not part of that contract.
 
 ### Serialized Payload Pattern
 
-Native metadata/configuration are JSON. Native wire version 1 carries typed
+Native metadata/configuration are JSON. Native wire version 2 carries typed
 envelopes and bulk byte buffers as named MessagePack records. The persisted
 envelope representation is a separate contract; changing transport encoding
 does not authorize rewriting saved state.
@@ -255,7 +289,8 @@ The old cross-library Rust-layout failure is documented in
 
 ### Vtable Pattern
 
-Tables contain a validated header and function pointers; opaque state remains
+Native tables carry validated headers; ordinary tables use checked metadata
+to select a known layout. Both carry function pointers, and opaque state remains
 owned by its producer. The native SDK turns asynchronous work into an operation
 handle with cooperative polling, wake, cancel and release operations. The Host
 proxy adapts these operations to graph traits.
@@ -327,22 +362,68 @@ An `extern "C"` entry point is synchronous, but a **native** call can return an
 operation handle whose future is then polled asynchronously. It need not start
 an OS thread and block until all work finishes.
 
-The **ordinary compatibility** wrappers retain their thread/runtime bridging
-where required. Their blocking behavior is not the native execution model.
-Do not rely on asynchronous Rust trait syntax alone to establish cancellation
-or nonblocking behavior across either interface.
+The **ordinary compatibility** lifecycle callbacks remain synchronous C calls,
+but their Host proxies submit them to per-instance retained blocking workers.
+Waiting does not block a `current_thread` executor. Cancellation/timeouts retain
+the worker, actual component and library; retry joins the original call before
+conflicting lifecycle work can proceed. A synchronous callback cannot be
+force-cancelled safely. This is not the native operation-handle model, and async
+Rust syntax alone is not evidence that unfinished effects have stopped.
 
 ## Lifecycle observations
 
-The graph owns start, processing and stop. Normal stop waits for admitted work
-and required delivery; a timeout does not authorize abandoning it. Explicit
-cancellation or force has different recovery consequences.
+The graph owns an object's initialization, repeatable activation cycles and final
+disposal, separately from destructive resource deletion:
+
+```text
+construct → mandatory framework binding → initialize
+              start → stop → start → stop
+              [delete_owned_resources, only when explicitly requested]
+              dispose → final release
+```
+
+For ordinary Source/Reaction implementations, required
+`bind_runtime_context(SourceRuntimeContext/ReactionRuntimeContext)` is async and
+returns `()`. It wires base services independently of optional developer hooks.
+`initialize`, `start`, `stop`, `dispose`, `pause_processing`, and
+`resume_processing` are no-argument async `Result<()>` hooks with no-op defaults.
+Native authors use `NativeComponent` and the role interfaces from the
+[native SDK](computation-plugin-sdk/README.md), not ordinary bases or vtables.
+
+Initialize once per **actual constructed object**, not per UUID, port,
+subscription, wrapper or loaded library. A stopped object remains initialized;
+same-instance restart does not reconstruct, initialize or dispose it. A new
+object with the same logical UUID has its own lifecycle. Borrowed objects remain
+the actual owner's responsibility.
+
+Failed initialization prevents start and still requires disposal of the partial
+object; a new initialization attempt needs a new object. Failed start may require
+stop to settle acquired work. Initialized-but-never-started objects also receive
+dispose. Failed, timed-out or cancelled cleanup retains the owner and unfinished
+work for retry and blocks conflicting restart/replacement. A successful disposal
+transition occurs once; interrupted cleanup must be retry-safe.
+
+Normal stop settles activation work according to the actual delivery contract,
+not inferred guarantees about external effects. Dispose releases remaining
+instance-lifetime resources; neither operation deletes persistent data.
+`delete_owned_resources` defaults to unsupported and runs only on explicit
+destructive removal, after successful stop and before dispose. Deletion failure
+does not become successful removal. Temporary `pause_processing` /
+`resume_processing` retains activation and is not an alias or mandatory prelude
+to stop/start.
+
+Ordinary ABI **0.18 is creation-only for managed updates**: its descriptor/FFI
+tables do not export factory planning or `apply_update`. A loaded plugin or
+creation descriptor does not authorize same-UUID replacement, state loss,
+drainage, or pause-dependent updates. Managed updates require explicit
+author-provided planning and implemented capabilities, not opaque replacement
+callbacks. No-op lifecycle hooks are not capability evidence.
 
 Native SDK operations retain panic-damage state, reject further normal work on
 a damaged component, and allow cleanup. The Host preserves typed failure causes.
-The ordinary 0.17 initializer catches supported source/reaction initialization
-panics and prevents reuse of that damaged instance. Loading an older binary does
-not retrofit new safeguards into it. Neither family can contain `panic=abort`,
+The ordinary 0.18 bridge returns supported source/reaction initialization
+panics as failures and prevents reuse of that damaged instance while allowing
+disposal. Old component layouts are rejected, not upgraded. Neither family can contain `panic=abort`,
 unsafe-memory corruption or arbitrary non-yielding code within the process.
 
 Graph-supplied `ComponentUpdateSender` coalesces readiness, the first unobserved
@@ -389,7 +470,7 @@ dynamic-plugin = []
 
 [package.metadata.drasi-plugin]
 abi-family = "computation"
-abi-version = "1.0.0"
+abi-version = "2.0.0"
 kind = "example-native"
 ```
 

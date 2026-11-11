@@ -213,6 +213,15 @@ impl PublicationObserver for Events {
                     Some(format!("Reconfiguring {kind:?}")),
                 );
             }
+            if let Some(node) = current.desired.component(id) {
+                if previous
+                    .desired
+                    .component(id)
+                    .is_some_and(|previous| previous.name != node.name)
+                {
+                    emit(status, Some(format!("Renamed {kind:?} to '{}'", node.name)));
+                }
+            }
             let old_status = old.map(|old| observed_status(old, ComponentStatus::Added));
             // Requesting a first start changes intent before the lifecycle
             // transitions. It is not a stop of a previously running component.
@@ -288,11 +297,14 @@ mod publication_tests {
     fn graph(count: usize) -> ComputationGraph {
         let mut builder = ComputationGraph::builder("event-publication");
         for index in 0..count {
-            builder = builder.service(Box::new(Service(
-                ComponentDescriptor::try_new(id(index), vec![])
-                    .unwrap()
-                    .with_semantic_kind(ComponentSemanticKind::Source),
-            )));
+            builder = builder.service(
+                crate::config::ComponentName::try_new(format!("source-{index}")).unwrap(),
+                Box::new(Service(
+                    ComponentDescriptor::try_new(id(index), vec![])
+                        .unwrap()
+                        .with_semantic_kind(ComponentSemanticKind::Source),
+                )),
+            );
         }
         builder.build().unwrap()
     }

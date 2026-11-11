@@ -75,6 +75,12 @@ async fn main() -> Result<()> {
         .build()?;
 
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_host_sdk::computation::NativePlugin::from_definition(
+                drasi_computation_transformer_query::plugin()?,
+            )?
+            .query_factory()?,
+        )
         .with_id("kubernetes-getting-started")
         .with_source(source)
         .with_query(query)

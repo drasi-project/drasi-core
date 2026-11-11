@@ -39,16 +39,15 @@ use drasi_core::{
     },
     interface::{
         AccumulatorIndex, CheckpointStore, CreatedIndexes, ElementArchiveIndex, ElementIndex,
-        ElementStream, FutureElementRef, FutureQueue, IndexBackendPlugin, IndexError, IndexSet,
-        LazySortedSetStore, LiveResultsWriter, OutboxWriter, PushType, ResultIndex, ResultKey,
-        ResultOwner, ResultSequence, ResultSequenceCounter, RowMutation, SessionControl,
+        ElementStream, FutureElementRef, FutureQueue, IndexBackendPlugin, IndexError, IndexJoin,
+        IndexSet, LazySortedSetStore, LiveResultsWriter, OutboxWriter, PushType, ResultIndex,
+        ResultKey, ResultOwner, ResultSequence, ResultSequenceCounter, RowMutation, SessionControl,
         SourceCheckpoint,
     },
     models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementTimestamp,
-        QueryJoin, SourceChange, TimestampRange,
+        SourceChange, TimestampRange,
     },
-    path_solver::match_path::MatchPath,
 };
 use futures::FutureExt;
 use ordered_float::OrderedFloat;
@@ -301,11 +300,12 @@ impl ElementIndex for TransactionalIndexes {
         Ok(())
     }
 
-    async fn set_joins(&self, _match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
+    async fn set_joins(&self, joins: &[IndexJoin]) -> Result<(), IndexError> {
         assert!(
             joins.is_empty(),
             "the fixture does not implement synthetic joins"
         );
+        Ok(())
     }
 }
 
@@ -1008,8 +1008,8 @@ impl Source for CharacterizationSource {
         self
     }
 
-    async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: crate::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn remove_position_handle(&self, query_id: &str) {
@@ -1029,15 +1029,29 @@ struct PipelineHarness {
 impl PipelineHarness {
     async fn new(backend: Arc<CharacterizationBackend>) -> Self {
         let (subscription_tx, subscription_rx) = mpsc::unbounded_channel();
-        let source = CharacterizationSource::new(SOURCE_ID, subscription_tx);
         let core = crate::DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("pipeline-characterization")
             .with_index_provider("characterization", backend)
-            .with_source(source)
+            .with_source_factory(SOURCE_ID, true, move |id| {
+                Ok(CharacterizationSource::new(id.as_str(), subscription_tx))
+            })
             .build()
             .await
             .unwrap();
-        core.start_source(SOURCE_ID).await.unwrap();
+        let id = core.component_by_name(SOURCE_ID).unwrap().id().to_string();
+        core.start_source(&id).await.unwrap();
         Self {
             core,
             subscription_rx,
@@ -1110,12 +1124,13 @@ impl ResultReceiver {
 
 fn query_config() -> QueryConfig {
     QueryConfig {
-        id: QUERY_ID.to_string(),
+        id: None,
+        name: QUERY_ID.to_string(),
         query: "MATCH (n:Person) RETURN n.name AS name".to_string(),
         query_language: QueryLanguage::Cypher,
         middleware: vec![],
         inputs: vec![QueryInputConfig {
-            component: SOURCE_ID.to_string(),
+            component: crate::config::ComponentReference::by_name(SOURCE_ID).unwrap(),
             nodes: vec![],
             relations: vec![],
             pipeline: vec![],

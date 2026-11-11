@@ -25,27 +25,23 @@ use std::{
 
 use anyhow::Context;
 use async_trait::async_trait;
-use bincode::Options;
 use bytes::Bytes;
 use chrono::Utc;
 use drasi_core::{
     computation::{ComputationIndexProvider, ComputationQuery},
-    evaluation::functions::FunctionRegistry,
-    interface::{FutureQueue, IndexError, RowMutation, SourceCheckpoint},
-    query::QueryBuilder,
+    interface::{IndexError, SourceCheckpoint},
 };
-use drasi_functions_cypher::CypherFunctionSet;
-use drasi_functions_gql::GQLFunctionSet;
-use drasi_query_ast::api::QueryParser;
-use drasi_query_cypher::CypherParser;
-use drasi_query_gql::GQLParser;
-use serde::{Deserialize, Serialize};
+pub use drasi_query_common::ContinuousQueryDefinition;
+use drasi_query_common::{
+    parser, query_builder, query_descriptor, FutureWakeup, QueryExecutionSettingsExt,
+    QueryOperation,
+};
 
 use crate::{
-    computation::internal::query_state::QueryOutputState,
     observability::{ComponentObservations, QueryProcessingPhase},
     profiling::{timestamp_ns, ProfilingMetadata},
 };
+use drasi_query_common::QueryOutputOwner;
 
 pub use crate::computation::internal::query_state::{
     QueryHistoryError, QueryRecoveryView, QueryResultSnapshot, QueryResults,
@@ -56,11 +52,10 @@ use super::{
     ComponentSpecification, ComputationBootstrapProvider, ComputationComponent, ConfigurationField,
     ConfigurationSchema, ConfigurationType, ConfigurationValue, ConstructedComponent,
     ConstructionContext, EnvelopeCodec, FactoryDescriptor, GraphChangeCodec,
-    ImplementationIdentity, InputEnvelope, OutputEnvelope, PipeRequirements, PortDescriptor,
-    PortDirection, PortId, QueryBootstrapResource, QueryChangeCodec, QueryOptions,
-    QueryOutputMetadata, QueryPublicationMode, QueryRecoveryError, QueryRecoveryPolicy, Record,
-    RecordId, RecordImage, ResourceRequirement, ResourceRole, StreamId, SystemMetadata,
-    Transformer, WakeupSource,
+    ImplementationIdentity, InputEnvelope, OutputEnvelope, PortId, QueryBootstrapResource,
+    QueryChangeCodec, QueryOptions, QueryOutputMetadata, QueryPublicationMode, QueryRecoveryError,
+    QueryRecoveryPolicy, ResourceRequirement, ResourceRole, StreamId, SystemMetadata, Transformer,
+    WakeupSource,
 };
 use super::{QueryExecutionSettings, QueryMiddlewareResource};
 use super::{
@@ -70,11 +65,8 @@ use super::{
 pub(crate) const QUERY_CONFIGURATION: &str = "\0computation:query-configuration:v1";
 const INPUT_PREFIX: &str = "computation:input:";
 const BOOTSTRAP: &str = "\0computation:query-bootstrap:v1";
-const PENDING_OUTPUT: &str = "\0computation:pending-output:v1";
-
-pub(crate) fn query_reset_key(query: &str) -> String {
-    format!("computation-reset-v1:{query}")
-}
+pub(crate) use drasi_query_common::query_reset_key;
+use drasi_query_common::{QueryPublicationCheckpoint, PENDING_QUERY_OUTPUT as PENDING_OUTPUT};
 
 #[path = "query_delivery.rs"]
 mod delivery;
@@ -90,125 +82,7 @@ mod recovery;
 #[path = "query_volatile_progress_tests.rs"]
 mod volatile_progress_tests;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum ComputationQueryLanguage {
-    #[default]
-    Cypher,
-    Gql,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContinuousQueryDefinition {
-    pub graph_id: String,
-    pub id: ComponentId,
-    pub query: String,
-    pub language: ComputationQueryLanguage,
-    pub output_stream: StreamId,
-    pub outbox_capacity: NonZeroUsize,
-}
-
-impl ContinuousQueryDefinition {
-    pub fn descriptor(&self) -> ComponentDescriptor {
-        query_descriptor(self.id.clone())
-    }
-
-    pub(crate) fn configuration_bytes(
-        &self,
-        execution: &QueryExecutionSettings,
-    ) -> anyhow::Result<Bytes> {
-        let execution = execution.fingerprint_settings();
-        if execution.source_transactions.is_some() {
-            // Admission limits may increase to resume rejected input without
-            // resetting already committed state. Grouped semantics may not.
-            let mut semantics = execution;
-            semantics.source_transactions = None;
-            return Ok(Bytes::from(serde_json::to_vec(&(
-                6u32,
-                &self.query,
-                self.language,
-                self.output_stream.as_str(),
-                &semantics,
-                "complete-source-transactions-v1",
-                drasi_core::query::SOURCE_CHANGE_SEMANTICS_VERSION,
-            ))?));
-        }
-        Ok(Bytes::from(serde_json::to_vec(&(
-            5u32,
-            &self.query,
-            self.language,
-            self.output_stream.as_str(),
-            execution,
-            drasi_core::query::SOURCE_CHANGE_SEMANTICS_VERSION,
-        ))?))
-    }
-
-    fn configuration_hash(&self, execution: &QueryExecutionSettings) -> anyhow::Result<u64> {
-        use std::hash::Hasher;
-        let mut hasher = fnv::FnvHasher::default();
-        hasher.write(&self.configuration_bytes(execution)?);
-        Ok(hasher.finish())
-    }
-}
-
-fn query_descriptor(id: ComponentId) -> ComponentDescriptor {
-    ComponentDescriptor::try_new(
-        id,
-        vec![
-            PortDescriptor::new(
-                PortId::try_new("in").expect("port"),
-                PortDirection::Input,
-                GraphChangeCodec::schema().descriptor().clone(),
-                PipeRequirements::default(),
-            ),
-            PortDescriptor::new(
-                PortId::try_new("out").expect("port"),
-                PortDirection::Output,
-                GraphChangeCodec::schema().descriptor().clone(),
-                PipeRequirements::default(),
-            ),
-        ],
-    )
-    .expect("typed query descriptor")
-}
-
-fn parser(language: ComputationQueryLanguage) -> (Arc<dyn QueryParser>, Arc<FunctionRegistry>) {
-    match language {
-        ComputationQueryLanguage::Cypher => {
-            let functions = Arc::new(FunctionRegistry::new()).with_cypher_function_set();
-            (Arc::new(CypherParser::new(functions.clone())), functions)
-        }
-        ComputationQueryLanguage::Gql => {
-            let functions = Arc::new(FunctionRegistry::new()).with_gql_function_set();
-            (Arc::new(GQLParser::new(functions.clone())), functions)
-        }
-    }
-}
-
-struct FutureWakeup {
-    queue: Arc<dyn FutureQueue>,
-}
-
-#[async_trait]
-impl WakeupSource for FutureWakeup {
-    async fn wait(&self) -> anyhow::Result<()> {
-        loop {
-            if let Some(due) = self.queue.peek_due_time().await? {
-                let now = u64::try_from(Utc::now().timestamp_millis())
-                    .map_err(|_| anyhow::anyhow!("clock before epoch"))?;
-                if due <= now {
-                    return Ok(());
-                }
-                tokio::time::sleep(std::time::Duration::from_millis((due - now).min(25))).await;
-            } else {
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            }
-        }
-    }
-    async fn has_pending(&self) -> anyhow::Result<bool> {
-        Ok(self.queue.peek_due_time().await?.is_some())
-    }
-}
+pub use drasi_computation_contracts::ComputationQueryLanguage;
 
 struct ProcessingGuard {
     failure: Arc<AtomicBool>,
@@ -226,20 +100,7 @@ impl Drop for ProcessingGuard {
     }
 }
 
-struct TransactionTimer {
-    metrics: Option<Arc<crate::metrics::QueryOutputMetrics>>,
-    started: std::time::Instant,
-}
-
-impl Drop for TransactionTimer {
-    fn drop(&mut self) {
-        if let Some(metrics) = &self.metrics {
-            metrics.record_transaction_duration_ns(
-                self.started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-            );
-        }
-    }
-}
+use crate::metrics::query_metrics::QueryOperationTimer as TransactionTimer;
 
 struct InputProgress {
     graph: super::producer_progress::GraphInputProgress,
@@ -267,7 +128,7 @@ fn input_progress(input: &super::ChangeEnvelope) -> anyhow::Result<InputProgress
         .map(|metadata| metadata.source_id.clone())
         .unwrap_or_else(|| input.system().stream().as_str().to_owned());
     Ok(InputProgress {
-        graph: super::producer_progress::GraphInputProgress::from_envelope(input)?,
+        graph: super::producer_progress::GraphInputProgress::for_query(input, None)?,
         source_id,
         profiling: raw.and_then(|metadata| metadata.profiling),
     })
@@ -319,7 +180,7 @@ fn validate_watermarks(
                 || watermark
                     .producer
                     .as_ref()
-                    .map_or(true, super::GraphProducerIdentity::persistent),
+                    .is_none_or(super::GraphProducerIdentity::persistent),
             "persistent query cannot bootstrap from a volatile output"
         );
         if !sources.insert(progress_key(
@@ -339,7 +200,7 @@ pub struct ContinuousQueryTransformer {
     provider: Arc<dyn ComputationIndexProvider>,
     query: Option<ComputationQuery>,
     recovery_contract: super::ComponentRecovery,
-    results: QueryResults,
+    results: QueryOutputOwner,
     output_reader: Arc<super::query_output::QueryOutputProvider>,
     codec: EnvelopeCodec,
     failure: Arc<AtomicBool>,
@@ -354,7 +215,7 @@ pub struct ContinuousQueryTransformer {
     middleware: Option<Arc<drasi_core::middleware::MiddlewareTypeRegistry>>,
     registration: Option<super::query_catalog::QueryRegistration>,
     catalog: Option<super::QueryResultsCatalog>,
-    api_configuration: Option<crate::config::QueryConfig>,
+    api_configuration: Option<crate::config::AssignedQueryConfig>,
     api_view: std::sync::OnceLock<Arc<super::QueryApi>>,
     metrics: Option<Arc<crate::metrics::QueryOutputMetrics>>,
     reset_configuration: bool,
@@ -437,23 +298,8 @@ impl ContinuousQueryTransformer {
         let mut codec =
             EnvelopeCodec::new(NonZeroUsize::new(64 * 1024 * 1024).expect("storage limit"));
         codec.register_schema(QueryChangeCodec::schema())?;
-        let projector = super::ResultNodeProjector::try_new(
-            &super::output_identity::dataset_namespace(
-                &definition.graph_id,
-                &definition.graph_id,
-                &definition.id,
-                &PortId::try_new("out")?,
-            )?,
-            execution.result.label.as_deref(),
-        )?;
-        let results = QueryResults {
-            state: Arc::new(RwLock::new(QueryOutputState::new(
-                definition.outbox_capacity,
-                projector.clone(),
-            ))),
-            notify: Arc::new(tokio::sync::Notify::new()),
-            telemetry: Arc::new(crate::observability::QueryProgressObservations::default()),
-        };
+        let projector = definition.projector(&definition.graph_id, &execution)?;
+        let results = QueryOutputOwner::new(definition.outbox_capacity, projector.clone());
         let mut instance = Self {
             output_reader: super::query_output::QueryOutputProvider::new(
                 &results,
@@ -514,6 +360,11 @@ impl ContinuousQueryTransformer {
     }
 
     pub fn results(&self) -> QueryResults {
+        self.results.reader()
+    }
+
+    #[cfg(test)]
+    pub(super) fn output_owner(&self) -> QueryOutputOwner {
         self.results.clone()
     }
 
@@ -570,7 +421,7 @@ impl ContinuousQueryTransformer {
         if catalog.graph_id() != self.definition.graph_id {
             anyhow::bail!("query catalogue belongs to another graph");
         }
-        let configuration = self.api_configuration();
+        let configuration = self.api_configuration()?;
         let hash = self.definition.configuration_hash(&self.execution)?;
         catalog.configure_delivery(
             &configuration,
@@ -596,7 +447,7 @@ impl ContinuousQueryTransformer {
 
     pub fn with_query_configuration(
         mut self,
-        configuration: crate::config::QueryConfig,
+        configuration: crate::config::AssignedQueryConfig,
     ) -> anyhow::Result<Self> {
         self.api_view.take();
         anyhow::ensure!(
@@ -623,14 +474,16 @@ impl ContinuousQueryTransformer {
         Ok(self)
     }
 
-    fn api_configuration(&self) -> crate::config::QueryConfig {
-        self.api_configuration.clone().unwrap_or_else(|| {
-            self.execution.query_configuration(
+    fn api_configuration(&self) -> anyhow::Result<crate::config::AssignedQueryConfig> {
+        match self.api_configuration.clone() {
+            Some(configuration) => Ok(configuration),
+            None => super::query_configuration::query_configuration(
+                &self.execution,
                 &self.definition,
                 self.bootstrap.is_some(),
                 self.options.recovery,
-            )
-        })
+            ),
+        }
     }
 
     pub fn with_bootstrap(mut self, provider: Arc<dyn ComputationBootstrapProvider>) -> Self {
@@ -773,9 +626,10 @@ impl ContinuousQueryTransformer {
                 "persistent query recovery requires persistent checkpoint, outbox and live-result resources"
             );
         }
-        let (parser, functions) = parser(self.definition.language);
-        let builder = self.execution.configure(
-            QueryBuilder::new(&self.definition.query, parser).with_function_registry(functions),
+        let builder = query_builder(
+            &self.definition.query,
+            self.definition.language,
+            &self.execution,
             self.middleware.clone(),
         )?;
         let query = ComputationQuery::try_build(builder, resources).await?;
@@ -853,22 +707,7 @@ impl ContinuousQueryTransformer {
     }
 
     fn stamp_output_identity(&self, output: &mut super::ChangeEnvelope) -> anyhow::Result<()> {
-        let state = self
-            .results
-            .state
-            .read()
-            .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
-        let identity = state
-            .identity
-            .as_ref()
-            .ok_or(QueryHistoryError::MissingIdentity)?;
-        QueryChangeCodec::set_generation(output, &self.definition.id, state.generation)?;
-        identity.annotate(output, &self.definition.id)?;
-        let producer =
-            identity.output_producer(output.system().stream().clone(), state.generation)?;
-        let sequence = output.system().sequence();
-        super::GraphProducerProgress::annotate(output, &producer, sequence)?;
-        Ok(())
+        self.results.stamp(output, &self.definition.id)
     }
 
     async fn recover(&self) -> anyhow::Result<()> {
@@ -890,11 +729,9 @@ impl ContinuousQueryTransformer {
             }
             self.bootstrap_complete.store(true, Ordering::Release);
         }
-        if checkpoint
-            .read_checkpoint(PENDING_OUTPUT)
-            .await?
-            .is_some_and(|marker| marker.sequence > 0 || marker.source_position.is_some())
-        {
+        if QueryPublicationCheckpoint::is_incomplete(
+            checkpoint.read_checkpoint(PENDING_OUTPUT).await?.as_ref(),
+        ) {
             return Err(QueryRecoveryError::PendingPublication.into());
         }
         let reset = self.read_reset_marker().await?;
@@ -967,115 +804,40 @@ impl ContinuousQueryTransformer {
             && reset
                 .as_ref()
                 .is_some_and(|marker| !marker.in_progress && marker.sequence == sequence);
-        if sequence > 0
-            && !baseline
-            && outbox.last().map(|(sequence, _)| *sequence) != Some(sequence)
-        {
-            return Err(QueryRecoveryError::Inconsistent(
-                "retained tail differs from committed sequence".into(),
-            )
-            .into());
-        }
         let mut rows = im::HashMap::new();
         for (signature, bytes) in live {
-            let reference = GraphChangeCodec::element_reference(
-                &self.projector.reference(&signature.to_be_bytes())?,
-            )?;
-            let row = Record::try_new(
-                &QueryChangeCodec::schema(),
-                reference.identity().clone(),
-                RecordImage::Full,
-                Bytes::from(bytes),
-            )
-            .with_context(|| {
-                QueryRecoveryError::Inconsistent(format!(
-                    "failed to deserialize durable live row {signature}"
-                ))
-            })?;
-            QueryChangeCodec::decode_row_in(&self.projector, &row)?;
+            let row =
+                QueryChangeCodec::restore_live_row(&self.projector, signature, Bytes::from(bytes))
+                    .with_context(|| {
+                        QueryRecoveryError::Inconsistent(format!(
+                            "failed to deserialize durable live row {signature}"
+                        ))
+                    })?;
             rows.insert(row.identity().clone(), row);
         }
         let mut recovered = Vec::new();
         let identity = self.recovery_identity()?;
-        let mut previous = None;
-        let mut expected = HashMap::new();
         for (position, bytes) in outbox {
-            if previous.is_some_and(|previous: u64| previous.checked_add(1) != Some(position)) {
-                return Err(QueryRecoveryError::Inconsistent(
-                    "retained history has an interior gap".into(),
-                )
-                .into());
-            }
             let envelope = self.codec.decode(&bytes).with_context(|| {
                 QueryRecoveryError::Inconsistent(format!(
                     "failed to deserialize durable outbox entry {position}"
                 ))
             })?;
-            let metadata = QueryChangeCodec::metadata(&envelope).with_context(|| {
-                QueryRecoveryError::Inconsistent(format!(
-                    "invalid durable outbox metadata at {position}"
-                ))
-            })?;
-            if envelope.system().stream() != &self.definition.output_stream
-                || metadata.query_id != self.definition.id.as_str()
-            {
-                return Err(QueryRecoveryError::OwnershipMismatch.into());
-            }
             if envelope.system().sequence() != position {
                 return Err(QueryRecoveryError::Inconsistent(
                     "retained output identity differs from the query".into(),
                 )
                 .into());
             }
-            if QueryChangeCodec::query_generation(&envelope).with_context(|| {
-                QueryRecoveryError::Inconsistent(format!(
-                    "invalid durable outbox generation at {position}"
-                ))
-            })? != generation
-            {
-                return Err(QueryRecoveryError::Inconsistent(
-                    "retained output belongs to another reset generation".into(),
-                )
-                .into());
-            }
-            match super::QueryRecoveryIdentity::optional_from_envelope(&envelope).with_context(
-                || {
-                    QueryRecoveryError::Inconsistent(format!(
-                        "invalid durable outbox producer identity at {position}"
-                    ))
-                },
-            )? {
-                Some(stored) if stored == identity => {}
-                Some(_) => return Err(QueryRecoveryError::OwnershipMismatch.into()),
-                None => {
-                    return Err(QueryRecoveryError::Inconsistent(
-                        "retained output has no producer identity".into(),
-                    )
-                    .into())
-                }
-            }
-            for operation in envelope.changes().operations() {
-                match operation {
-                    super::ChangeOperation::Added { after, .. }
-                    | super::ChangeOperation::Updated { after, .. } => {
-                        expected.insert(after.identity().clone(), Some(after.payload().clone()));
-                    }
-                    super::ChangeOperation::Deleted { identity, .. } => {
-                        expected.insert(identity.identity().clone(), None);
-                    }
-                }
-            }
-            previous = Some(position);
             recovered.push(envelope);
         }
-        for (id, expected) in expected {
-            if rows.get(&id).map(|row| row.payload()) != expected.as_ref() {
-                return Err(QueryRecoveryError::Inconsistent(
-                    "snapshot contradicts retained history".into(),
-                )
-                .into());
-            }
-        }
+        let cursor = super::OutputCursor::try_new(
+            identity.output_producer(self.definition.output_stream.clone(), generation)?,
+            sequence,
+        )?;
+        drasi_query_common::validate_query_recovery(
+            &cursor, &identity, generation, &rows, &recovered, baseline,
+        )?;
         if configuration_missing {
             self.write_configuration(&configuration).await?;
         }
@@ -1110,14 +872,6 @@ impl ContinuousQueryTransformer {
             })
             .await?;
         Ok(())
-    }
-
-    fn next_sequence(&self) -> anyhow::Result<u64> {
-        self.results
-            .state
-            .read()
-            .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
-            .next_sequence()
     }
 
     async fn stage_output(&self, output: &super::ChangeEnvelope) -> Result<(), IndexError> {
@@ -1157,31 +911,7 @@ impl ContinuousQueryTransformer {
         let query = self
             .query()
             .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
-        let projection = QueryChangeCodec::projection(output).map_err(IndexError::other)?;
-        if projection.projector() != &self.projector {
-            return Err(IndexError::CorruptedData);
-        }
-        let mutations = output
-            .changes()
-            .operations()
-            .iter()
-            .zip(projection.operations())
-            .map(|(operation, metadata)| {
-                let signature = QueryChangeCodec::row_signature(&metadata.row_identity)
-                    .ok_or(IndexError::CorruptedData)?;
-                let data = match operation {
-                    super::ChangeOperation::Added { after, .. }
-                    | super::ChangeOperation::Updated { after, .. } => {
-                        Some(after.payload().as_ref())
-                    }
-                    super::ChangeOperation::Deleted { .. } => None,
-                };
-                Ok(RowMutation {
-                    row_signature: signature,
-                    data,
-                })
-            })
-            .collect::<Result<Vec<_>, IndexError>>()?;
+        let mutations = QueryChangeCodec::live_row_mutations(&self.projector, output)?;
         query
             .resources()
             .live_results_writer()
@@ -1254,7 +984,15 @@ impl ContinuousQueryTransformer {
         drop(state);
         crate::observability::ComponentObservations::current_or_disabled()
             .query_state(outbox, live);
-        self.results.telemetry.publish(head);
+        if let Some(entry) = self
+            .catalog
+            .as_ref()
+            .map(|catalog| catalog.get(&self.definition.id))
+            .transpose()?
+            .flatten()
+        {
+            entry.telemetry.publish(head);
+        }
         Ok(())
     }
 
@@ -1271,133 +1009,104 @@ impl ContinuousQueryTransformer {
         let Some((progress, changes, reservations, transaction_deadline)) =
             ComponentObservations::current_or_disabled()
                 .query_phase(QueryProcessingPhase::PrepareInput, async {
-        let ordering = input.envelope.system().ordering();
-        if ordering == drasi_core::models::ChangeOrdering::ProducerSequence {
-            anyhow::ensure!(
-                super::GraphProducerProgress::from_envelope(&input.envelope)?.is_some(),
-                "producer-sequence ordering requires an explicit current output identity"
-            );
-        }
-        let source_transaction = self
-            .execution
-            .source_transactions
-            .filter(|_| SOURCE_TRANSACTION)
-            .map(|limits| super::SourceTransactionCodec::decode(&input.envelope, limits))
-            .transpose()?;
-        let transaction_deadline = self
-            .execution
-            .source_transactions
-            .filter(|_| SOURCE_TRANSACTION)
-            .map(|limits| {
-                tokio::time::Instant::now()
-                    .checked_add(limits.duration())
-                    .ok_or(super::SourceTransactionError::InvalidDeadline)
-            })
-            .transpose()?;
-        let mut progress = input_progress(&input.envelope)?;
-        progress.graph = progress
-            .graph
-            .with_consumer_boundary(&input.envelope, self.source_progress.as_deref())?;
-        let transaction_changes = source_transaction.map(|transaction| {
-            progress.source_id = transaction.source_id().to_owned();
-            transaction.into_changes()
-        });
-        let saved = if let Some(checkpoint) = query.resources().checkpoint_store() {
-            progress
-                .graph
-                .validate(
-                    checkpoint.as_ref(),
-                    !self.provider.is_volatile() && checkpoint.is_persistent(),
-                )
-                .await?
-        } else {
-            let watermarks = self
-                .watermarks
-                .lock()
-                .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?;
-            let producers = self
-                .input_producers
-                .lock()
-                .map_err(|_| anyhow::anyhow!("input producer identities poisoned"))?;
-            progress.graph.validate_owner(
-                watermarks.get(&progress.graph.key).copied(),
-                producers.get(&progress.graph.key),
-            )?;
-            None
-        };
-        let positioned = self
-            .source_progress
-            .as_ref()
-            .map(|owner| owner.position_handled(&progress.graph, saved.as_ref()))
-            .transpose()?
-            .flatten();
-        let duplicate = match positioned {
-            Some(handled) => handled,
-            None => {
-                self.watermarks
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
-                    .get(&progress.key)
-                    .is_some_and(|saved| *saved >= progress.sequence)
-                    || saved
-                        .as_ref()
-                        .is_some_and(|saved| saved.sequence >= progress.sequence)
-            }
-        };
-        if duplicate {
-            if let Some(checkpoint) = query.resources().checkpoint_store() {
-                if progress
-                    .graph
-                    .needs_transport_update(checkpoint.as_ref())
-                    .await?
-                {
-                    query
-                        .resource_transaction(|| async {
-                            progress.graph.stage_transport(checkpoint.as_ref()).await
+                    let ordering = input.envelope.system().ordering();
+                    let prepared_input = drasi_query_common::prepare_query_input::<
+                        SOURCE_TRANSACTION,
+                    >(
+                        &input.envelope, self.execution.source_transactions
+                    )?;
+                    let transaction_deadline = self
+                        .execution
+                        .source_transactions
+                        .filter(|_| SOURCE_TRANSACTION)
+                        .map(|limits| {
+                            tokio::time::Instant::now()
+                                .checked_add(limits.duration())
+                                .ok_or(super::SourceTransactionError::InvalidDeadline)
                         })
-                        .await?;
-                    self.publish_source_progress(true).await?;
-                }
-            } else if let Some(owner) = &self.source_progress {
-                let mut snapshot = (*owner.snapshot()).clone();
-                progress
-                    .graph
-                    .record_transport(&mut snapshot.transport_sequences);
-                owner.publish(snapshot);
-            }
-            return Ok(None);
-        }
-        if query.resources().checkpoint_store().is_some()
-            && progress.position.as_ref().is_some_and(|position| {
-                position.len() > crate::sources::SourceBase::MAX_SOURCE_POSITION_BYTES
-            })
-        {
-            log::warn!("Query {} retains its last valid checkpoint cursor because the new source position is oversized", self.definition.id);
-            progress.position = saved.and_then(|saved| saved.source_position);
-        }
-        let changes = match transaction_changes {
-            Some(changes) => changes,
-            None => GraphChangeCodec::decode_changes(&input.envelope)?,
-        };
-        let mut changes = drasi_core::computation::QueryInputBatch::new(changes, ordering);
-        if let Some(scopes) = &self.input_scopes {
-            let scope = scopes
-                .get(&(input.port.clone(), input.envelope.system().stream().clone()))
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "query input port '{}' stream '{}' has no declared middleware scope",
-                        input.port,
-                        input.envelope.system().stream(),
+                        .transpose()?;
+                    let mut progress = input_progress(&input.envelope)?;
+                    progress.graph = progress
+                        .graph
+                        .with_consumer_boundary(&input.envelope, self.source_progress.as_deref())?;
+                    if let Some(source) = &prepared_input.source_id {
+                        progress.source_id = source.clone();
+                    }
+                    let saved = if let Some(checkpoint) = query.resources().checkpoint_store() {
+                        progress
+                            .graph
+                            .validate(
+                                checkpoint.as_ref(),
+                                !self.provider.is_volatile() && checkpoint.is_persistent(),
+                            )
+                            .await?
+                    } else {
+                        let watermarks = self
+                            .watermarks
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?;
+                        let producers = self
+                            .input_producers
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("input producer identities poisoned"))?;
+                        progress.graph.validate_owner(
+                            watermarks.get(&progress.graph.key).copied(),
+                            producers.get(&progress.graph.key),
+                        )?;
+                        None
+                    };
+                    let watermark = self
+                        .watermarks
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
+                        .get(&progress.key)
+                        .copied();
+                    let duplicate = progress.graph.is_duplicate(
+                        saved.as_ref(),
+                        watermark,
+                        self.source_progress.as_deref(),
+                    )?;
+                    if duplicate {
+                        if let Some(checkpoint) = query.resources().checkpoint_store() {
+                            if progress
+                                .graph
+                                .needs_transport_update(checkpoint.as_ref())
+                                .await?
+                            {
+                                query
+                                    .resource_transaction(|| async {
+                                        progress.graph.stage_transport(checkpoint.as_ref()).await
+                                    })
+                                    .await?;
+                                self.publish_source_progress(true).await?;
+                            }
+                        } else if let Some(owner) = &self.source_progress {
+                            let mut snapshot = (*owner.snapshot()).clone();
+                            progress
+                                .graph
+                                .record_transport(&mut snapshot.transport_sequences);
+                            owner.publish(snapshot);
+                        }
+                        return Ok(None);
+                    }
+                    if query.resources().checkpoint_store().is_some() {
+                        progress
+                            .graph
+                            .retain_valid_position(saved.as_ref(), &self.definition.id);
+                    }
+                    let changes = drasi_core::computation::QueryInputBatch::new(
+                        prepared_input.into_changes(&input.envelope)?,
+                        ordering,
                     )
-                })?;
-            changes = changes.with_input_scope(scope.clone());
-        }
-        let reservations = if self.output_bindings.has_shared() {
-            Some(Box::pin(self.output_bindings.reserve()).await?)
-        } else {
-            None
-        };
-        self.begin_non_atomic().await?;
+                    .with_optional_input_scope(
+                        drasi_query_common::query_input_scope(self.input_scopes.as_ref(), &input)?,
+                    );
+                    let reservations = if self.output_bindings.has_shared() {
+                        Some(Box::pin(self.output_bindings.reserve()).await?)
+                    } else {
+                        None
+                    };
+                    self.begin_non_atomic().await?;
                     Ok::<_, anyhow::Error>(Some((
                         progress,
                         changes,
@@ -1410,49 +1119,26 @@ impl ContinuousQueryTransformer {
             return Ok(Vec::new());
         };
         let prepared = Mutex::new(None);
-        let mut profiling = progress.profiling.clone().unwrap_or_default();
-        // An input may carry another query's timings; this commit has not completed.
-        profiling.query_core_return_ns = None;
-        profiling.query_send_ns = None;
-        profiling.query_receive_ns = Some(timestamp_ns());
-        profiling.query_core_call_ns = Some(timestamp_ns());
+        let operation = QueryOperation::from_metadata(
+            &input.envelope,
+            progress.source_id.clone(),
+            progress.profiling.clone(),
+        );
         let hook = |results: Arc<[drasi_core::evaluation::context::QueryPartEvaluationContext]>| {
             let prepared = &prepared;
-            let input = &input;
             let progress = &progress;
-            let profiling = profiling.clone();
+            let operation = &operation;
             ComponentObservations::current_or_disabled().query_phase(
                 QueryProcessingPhase::PrepareOutput,
                 async move {
-                    let sequence = if results.iter().any(|result| {
-                        !matches!(
-                            result,
-                            drasi_core::evaluation::context::QueryPartEvaluationContext::Noop
-                        )
-                    }) {
-                        self.next_sequence()
-                            .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?
-                    } else {
-                        0
-                    };
-                    let mut output = QueryChangeCodec::encode_evaluation(
-                        Some(&input.envelope),
-                        &self.definition.id,
-                        SystemMetadata::new(self.definition.output_stream.clone(), sequence)
-                            .with_timestamp(
-                                input.envelope.system().timestamp().unwrap_or_else(Utc::now),
-                            ),
-                        &self.projector,
+                    let sequence = QueryOperation::output_sequence(
+                        self.results.head().map_err(IndexError::other)?.sequence,
                         &results,
-                        QueryOutputMetadata {
-                            query_id: self.definition.id.to_string(),
-                            source_id: Some(progress.source_id.clone()),
-                            timestamp: Utc::now(),
-                            metadata: HashMap::new(),
-                            profiling: Some(profiling),
-                        },
                     )
-                    .map_err(IndexError::other)?;
+                    .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
+                    let mut output = operation
+                        .project(&self.definition, &self.projector, sequence, &results)
+                        .map_err(IndexError::other)?;
                     if let Some(output) = &mut output {
                         self.stamp_output_identity(output)
                             .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
@@ -1469,12 +1155,8 @@ impl ContinuousQueryTransformer {
                                 if self.options.publication == QueryPublicationMode::Atomic {
                                     self.stage_output(output).await?;
                                 } else {
-                                    checkpoint
-                                        .stage_checkpoint(
-                                            PENDING_OUTPUT,
-                                            output.system().sequence(),
-                                            None,
-                                        )
+                                    QueryPublicationCheckpoint::Pending(output.system().sequence())
+                                        .stage(checkpoint.as_ref())
                                         .await?;
                                 }
                             }
@@ -1573,12 +1255,7 @@ impl ContinuousQueryTransformer {
                     .insert(progress.graph.key.clone(), progress.sequence);
                 // Keep completion timings on the live branch, not in already committed outbox bytes.
                 if let Some(output) = &mut output {
-                    QueryChangeCodec::append_post_commit_profiling(
-                        output,
-                        &self.definition.id,
-                        core_return_ns,
-                        timestamp_ns(),
-                    )?;
+                    QueryOperation::committed(output, &self.definition.id, core_return_ns)?;
                 }
                 let outputs = self.publish(output)?;
                 if SOURCE_TRANSACTION || !GraphChangeCodec::is_futures_due(&input.envelope) {
@@ -1631,35 +1308,18 @@ impl ComputationComponent for ContinuousQueryTransformer {
     }
 
     async fn bind_inputs(&mut self, bindings: &[super::InputBinding]) -> anyhow::Result<()> {
-        let mut aliases = BTreeMap::new();
-        if let Some(configuration) = &self.api_configuration {
-            for input in &configuration.inputs {
-                aliases.insert(
-                    super::ComputationPipelineBuilder::source_component_id(
-                        self.definition.id.as_str(),
-                        &input.component,
-                    )?,
-                    Arc::<str>::from(input.component.as_str()),
-                );
-            }
-        }
-        let mut scopes = BTreeMap::new();
-        for binding in bindings {
-            let scope = aliases
-                .get(&binding.output.component)
-                .cloned()
-                .unwrap_or_else(|| Arc::from(binding.output.component.as_str()));
-            let key = (binding.input_port.clone(), binding.stream.clone());
-            if let Some(previous) = scopes.insert(key, scope.clone()) {
-                anyhow::ensure!(
-                    previous == scope,
-                    "query input port '{}' stream '{}' has ambiguous producer scopes",
-                    binding.input_port,
-                    binding.stream,
-                );
-            }
-        }
-        self.input_scopes = Some(scopes);
+        let inputs: Vec<_> = self
+            .api_configuration
+            .as_ref()
+            .into_iter()
+            .flat_map(|config| &config.inputs)
+            .map(crate::config::QueryInputConfig::execution_input)
+            .collect();
+        self.input_scopes = Some(drasi_query_common::query_input_scopes(
+            self.definition.id.as_str(),
+            &inputs,
+            bindings,
+        )?);
         Ok(())
     }
 
@@ -1682,27 +1342,37 @@ impl ComputationComponent for ContinuousQueryTransformer {
     }
 
     fn query_api(&self) -> Option<Arc<super::QueryApi>> {
+        let config = match self.api_configuration() {
+            Ok(config) => config,
+            Err(error) => {
+                log::error!("Query configuration has unresolved component identities: {error:#}");
+                return None;
+            }
+        };
         Some(
             self.api_view
                 .get_or_init(|| {
                     Arc::new(super::QueryApi {
-                        config: self.api_configuration(),
+                        config,
                         catalog: self.catalog.clone(),
                         metrics: self.metrics.clone().expect("query metrics"),
+                        native_progress: Default::default(),
+                        _registration: None,
                         links: Mutex::new(Vec::new()),
-                        output: super::query_catalog::CatalogQuery {
-                            generation: 0,
-                            config_hash: self
-                                .definition
-                                .configuration_hash(&self.execution)
-                                .expect("query configuration encoding"),
-                            results: self.results.clone(),
-                            reader: self.output_reader.clone(),
-                            progress: self.source_progress.clone(),
-                            incarnation: self.publication_identity.clone(),
-                            checkpoint: self.checkpoint_view.clone(),
-                            output_persistence: self.output_persistence_view.clone(),
-                        },
+                        output: Arc::new(super::query_api::QueryApiOutput::Local(
+                            super::query_catalog::LocalQueryOutput {
+                                config_hash: self
+                                    .definition
+                                    .configuration_hash(&self.execution)
+                                    .expect("query configuration encoding"),
+                                results: self.results.reader(),
+                                reader: self.output_reader.clone(),
+                                progress: self.source_progress.clone(),
+                                incarnation: self.publication_identity.clone(),
+                                _checkpoint: self.checkpoint_view.clone(),
+                                output_persistence: self.output_persistence_view.clone(),
+                            },
+                        )),
                     })
                 })
                 .clone(),
@@ -1739,15 +1409,7 @@ impl ComputationComponent for ContinuousQueryTransformer {
     }
 
     async fn start(&mut self) -> anyhow::Result<()> {
-        {
-            let mut state = self
-                .results
-                .state
-                .write()
-                .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
-            state.ready = false;
-            state.recovery_ready = false;
-        }
+        self.results.begin_activation()?;
         if let Some(scheduling) = &self.scheduling {
             scheduling.stopped();
         }
@@ -1760,16 +1422,11 @@ impl ComputationComponent for ContinuousQueryTransformer {
             progress: self.source_progress.clone(),
         };
         if let Some(declaration) = &self.declaration {
-            if !self.provider.is_volatile() {
-                for source in &declaration.sources {
-                    anyhow::ensure!(
-                        source.source()?.supports_replay(),
-                        "IncompatibleSource: sources that do not support replay cannot feed persistent query '{}' (source '{}', supports_replay=false)",
-                        self.definition.id,
-                        source.id()
-                    );
-                }
-            }
+            super::validate_query_sources(
+                !self.provider.is_volatile(),
+                &self.definition.id,
+                &declaration.sources,
+            )?;
         }
         if let Some(provider) = &self.bootstrap {
             provider.validate_query_scope(
@@ -1802,7 +1459,7 @@ impl ComputationComponent for ContinuousQueryTransformer {
         if self.query.is_none() {
             self.build().await?;
         }
-        self.results.telemetry.publish(None);
+        self.sync_metrics()?;
         self.bind_query_observer(crate::observability::QueryPhase::Bootstrap, false)?;
         Box::pin(self.initialize_recovery()).await?;
         self.prepare_delivery().await?;
@@ -1813,16 +1470,7 @@ impl ComputationComponent for ContinuousQueryTransformer {
         self.publish_source_progress(true).await?;
         guard.complete = true;
         self.failure.store(false, Ordering::Release);
-        {
-            let mut state = self
-                .results
-                .state
-                .write()
-                .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
-            state.ready = true;
-            state.recovery_ready = true;
-        }
-        self.results.notify.notify_waiters();
+        self.results.activate()?;
         self.sync_metrics()?;
         #[cfg(feature = "test-support")]
         if let Some(control) = self
@@ -1839,8 +1487,8 @@ impl ComputationComponent for ContinuousQueryTransformer {
         Ok(())
     }
 
-    async fn deprovision(&mut self) -> anyhow::Result<()> {
-        self.deprovision_state().await
+    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
+        self.delete_owned_state().await
     }
 
     async fn stop(&mut self) -> anyhow::Result<()> {
@@ -1854,16 +1502,8 @@ impl ComputationComponent for ContinuousQueryTransformer {
         if let Some(progress) = &self.source_progress {
             progress.pending();
         }
-        {
-            let mut state = self
-                .results
-                .state
-                .write()
-                .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
-            state.ready = false;
-            state.follow.retire()?;
-        }
-        self.results.telemetry.publish(None);
+        self.results.suspend()?;
+        self.sync_metrics()?;
         if let Some(bootstrap) = &self.bootstrap {
             bootstrap.stop().await?;
         }
@@ -1926,9 +1566,10 @@ impl Transformer for ContinuousQueryTransformer {
         if self.delivery_tracking {
             return self.query.as_ref().map(|query| {
                 Arc::new(delivery::QueryDeliveryWakeup {
-                    scheduled: self.scheduling.is_none().then(|| FutureWakeup {
-                        queue: query.future_queue(),
-                    }),
+                    scheduled: self
+                        .scheduling
+                        .is_none()
+                        .then(|| FutureWakeup::for_queue(query.future_queue())),
                     pending: self.replay_pending.clone(),
                     changed: self.delivery_changed.clone(),
                 }) as Arc<dyn WakeupSource>
@@ -1938,9 +1579,7 @@ impl Transformer for ContinuousQueryTransformer {
             return None;
         }
         self.query.as_ref().map(|query| {
-            Arc::new(FutureWakeup {
-                queue: query.future_queue(),
-            }) as Arc<dyn WakeupSource>
+            Arc::new(FutureWakeup::for_queue(query.future_queue())) as Arc<dyn WakeupSource>
         })
     }
 
@@ -2010,7 +1649,7 @@ impl Transformer for ContinuousQueryTransformer {
             .future_queue()
             .peek_due_time()
             .await?
-            .map_or(true, |due| due > now)
+            .is_none_or(|due| due > now)
         {
             self.draining_futures = false;
             #[cfg(feature = "test-support")]
@@ -2049,6 +1688,10 @@ impl Transformer for ContinuousQueryTransformer {
                             )
                         }) {
                             owner
+                                .results
+                                .state
+                                .read()
+                                .map_err(|_| IndexError::CorruptedData)?
                                 .next_sequence()
                                 .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?
                         } else {
@@ -2198,7 +1841,7 @@ impl ContinuousQueryTransformer {
             None
         };
         if futures_due
-            && progress.as_ref().map_or(true, |progress| {
+            && progress.as_ref().is_none_or(|progress| {
                 !progress.identity().persistent() && self.provider.is_volatile()
             })
         {
@@ -2236,6 +1879,7 @@ pub struct QueryIndexProviderResource(pub Arc<dyn ComputationIndexProvider>);
 
 pub struct ContinuousQueryFactory {
     descriptor: FactoryDescriptor,
+    constructor: Option<Arc<dyn super::QueryConstructor>>,
 }
 
 impl Default for ContinuousQueryFactory {
@@ -2265,10 +1909,11 @@ impl Default for ContinuousQueryFactory {
         })
         .collect();
         Self {
+            constructor: None,
             descriptor: FactoryDescriptor {
                 implementation: ImplementationIdentity::try_new("drasi/continuous-query", "1")
                     .expect("implementation"),
-                role: ComponentRole::Query,
+                role: ComponentRole::Transformer,
                 configuration_version: 1,
                 configuration: ConfigurationSchema {
                     fields,
@@ -2364,7 +2009,9 @@ impl Default for ContinuousQueryFactory {
     }
 }
 
-fn language(value: Option<&serde_json::Value>) -> anyhow::Result<ComputationQueryLanguage> {
+pub(super) fn language(
+    value: Option<&serde_json::Value>,
+) -> anyhow::Result<ComputationQueryLanguage> {
     match value
         .and_then(serde_json::Value::as_str)
         .unwrap_or("cypher")
@@ -2375,7 +2022,9 @@ fn language(value: Option<&serde_json::Value>) -> anyhow::Result<ComputationQuer
     }
 }
 
-fn options(config: &BTreeMap<Arc<str>, serde_json::Value>) -> anyhow::Result<QueryOptions> {
+pub(super) fn options(
+    config: &BTreeMap<Arc<str>, serde_json::Value>,
+) -> anyhow::Result<QueryOptions> {
     let recovery = match config
         .get("recovery")
         .and_then(serde_json::Value::as_str)
@@ -2401,10 +2050,21 @@ fn options(config: &BTreeMap<Arc<str>, serde_json::Value>) -> anyhow::Result<Que
 }
 
 impl ContinuousQueryFactory {
+    /// Reuse query authoring and resource validation with a selected execution factory.
+    pub fn with_constructor(
+        implementation: ImplementationIdentity,
+        constructor: Arc<dyn super::QueryConstructor>,
+    ) -> Self {
+        let mut factory = Self::default();
+        factory.descriptor.implementation = implementation;
+        factory.constructor = Some(constructor);
+        factory
+    }
+
     pub(crate) fn query_configuration(
         spec: &ComponentSpecification,
         graph_id: &str,
-    ) -> anyhow::Result<crate::config::QueryConfig> {
+    ) -> anyhow::Result<crate::config::AssignedQueryConfig> {
         let mut values = BTreeMap::new();
         for (name, value) in &spec.configuration {
             if let ConfigurationValue::Literal(value) = value {
@@ -2446,11 +2106,40 @@ impl ContinuousQueryFactory {
             output_stream: StreamId::try_new(stream)?,
             outbox_capacity: outbox,
         };
-        Ok(execution.query_configuration(
+        super::query_configuration::query_configuration(
+            &execution,
             &definition,
             spec.dependencies.contains_key("bootstrap"),
             options(&values)?.recovery,
-        ))
+        )
+    }
+}
+
+impl super::QueryAuthoring for ContinuousQueryFactory {
+    fn query_descriptor(&self, id: ComponentId) -> anyhow::Result<ComponentDescriptor> {
+        match &self.constructor {
+            Some(constructor) => constructor.query_descriptor(id),
+            None => Ok(query_descriptor(id)),
+        }
+    }
+
+    fn query_configuration(
+        &self,
+        spec: &ComponentSpecification,
+        graph_id: &str,
+    ) -> anyhow::Result<crate::config::AssignedQueryConfig> {
+        Self::query_configuration(spec, graph_id)
+    }
+
+    fn validate_execution(
+        &self,
+        execution: &QueryExecutionSettings,
+        middleware: Option<&drasi_core::middleware::MiddlewareTypeRegistry>,
+    ) -> anyhow::Result<()> {
+        match &self.constructor {
+            Some(constructor) => constructor.validate_execution(execution, middleware),
+            None => execution.validate(middleware),
+        }
     }
 }
 
@@ -2458,6 +2147,19 @@ impl ContinuousQueryFactory {
 impl ComponentFactory for ContinuousQueryFactory {
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
+    }
+    fn query_authoring(&self) -> Option<&dyn super::QueryAuthoring> {
+        Some(self)
+    }
+    fn plan_update(
+        &self,
+        current: &ComponentSpecification,
+        proposed: &ComponentSpecification,
+    ) -> anyhow::Result<super::ComponentUpdatePlan> {
+        self.constructor
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("query factory does not support configuration updates"))?
+            .plan_update(current, proposed)
     }
     fn specification_from_config(
         &self,
@@ -2469,13 +2171,13 @@ impl ComponentFactory for ContinuousQueryFactory {
         configuration
             .entry(Arc::from("stream"))
             .or_insert_with(|| serde_json::json!(format!("{id}/out")));
-        let execution: QueryExecutionSettings = configuration
+        let _execution: QueryExecutionSettings = configuration
             .get("execution")
             .map(|value| serde_json::from_value(value.clone()))
             .transpose()?
             .unwrap_or_default();
         Ok(ComponentSpecification {
-            descriptor: query_descriptor(id),
+            descriptor: super::QueryAuthoring::query_descriptor(self, id)?,
             role: self.descriptor.role,
             completion: None,
             implementation: self.descriptor.implementation.clone(),
@@ -2538,7 +2240,7 @@ impl ComponentFactory for ContinuousQueryFactory {
                         .map(|resource| resource.0.clone())
                 })
                 .transpose()?;
-            execution.validate(registry.as_deref())?;
+            super::QueryAuthoring::validate_execution(self, &execution, registry.as_deref())?;
         }
         for id in spec
             .dependencies
@@ -2561,11 +2263,12 @@ impl ComponentFactory for ContinuousQueryFactory {
         if let Some(ConfigurationValue::Literal(value)) = spec.configuration.get("execution") {
             let execution: QueryExecutionSettings = serde_json::from_value(value.clone())?;
             execution.validate(None)?;
-            if !execution.middleware.is_empty()
+            if self.constructor.is_none()
+                && !execution.middleware.is_empty()
                 && spec
                     .dependencies
                     .get("middleware")
-                    .map_or(true, Vec::is_empty)
+                    .is_none_or(Vec::is_empty)
             {
                 anyhow::bail!("query middleware requires a declared middleware resource");
             }
@@ -2582,10 +2285,7 @@ impl ComponentFactory for ContinuousQueryFactory {
             })
             .collect();
         if options(&literals)?.recovery == QueryRecoveryPolicy::AutoReset
-            && spec
-                .dependencies
-                .get("bootstrap")
-                .map_or(true, Vec::is_empty)
+            && spec.dependencies.get("bootstrap").is_none_or(Vec::is_empty)
         {
             anyhow::bail!("auto_reset requires a declared bootstrap provider");
         }
@@ -2599,7 +2299,9 @@ impl ComponentFactory for ContinuousQueryFactory {
         {
             anyhow::bail!("complete source transactions require atomic publication");
         }
-        if spec.descriptor != query_descriptor(spec.descriptor.id().clone()) {
+        if spec.descriptor
+            != super::QueryAuthoring::query_descriptor(self, spec.descriptor.id().clone())?
+        {
             anyhow::bail!("query ports must use the standard graph-change schema");
         }
         let language_value = spec.configuration.get("language").and_then(|value| {
@@ -2646,158 +2348,45 @@ impl ComponentFactory for ContinuousQueryFactory {
         &self,
         context: ConstructionContext,
     ) -> Result<ConstructedComponent, ComponentCreationError> {
-        let provider = context
-            .resources::<QueryIndexProviderResource>("indexes")
-            .map_err(ComponentCreationError::terminal)?
-            .pop()
-            .ok_or_else(|| {
-                ComponentCreationError::terminal(anyhow::anyhow!("missing index provider"))
-            })?;
-        let config = context.configuration();
-        let text = config
-            .get("query")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| ComponentCreationError::terminal(anyhow::anyhow!("missing query")))?;
-        let stream = config
-            .get("stream")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| ComponentCreationError::terminal(anyhow::anyhow!("missing stream")))?;
-        let capacity = match config.get("outbox_capacity") {
-            None => 1000,
-            Some(value) => value.as_u64().ok_or_else(|| {
-                ComponentCreationError::terminal(anyhow::anyhow!("invalid outbox capacity"))
-            })?,
-        };
-        let capacity = usize::try_from(capacity)
-            .ok()
-            .and_then(NonZeroUsize::new)
-            .ok_or_else(|| {
-                ComponentCreationError::terminal(anyhow::anyhow!("invalid outbox capacity"))
-            })?;
-        let definition = ContinuousQueryDefinition {
-            graph_id: context.graph_id.to_string(),
-            id: context.component_id.clone(),
-            query: text.to_owned(),
-            language: language(config.get("language")).map_err(ComponentCreationError::terminal)?,
-            output_stream: StreamId::try_new(stream).map_err(ComponentCreationError::terminal)?,
-            outbox_capacity: capacity,
-        };
-        let execution: QueryExecutionSettings = config
-            .get("execution")
-            .map(|value| serde_json::from_value(value.clone()))
-            .transpose()
-            .map_err(ComponentCreationError::terminal)?
-            .unwrap_or_default();
-        let middleware = if context
-            .specification
-            .dependencies
-            .contains_key("middleware")
-        {
-            context
-                .resources::<QueryMiddlewareResource>("middleware")
-                .map_err(ComponentCreationError::terminal)?
-                .pop()
-                .map(|resource| resource.0.clone())
-        } else {
-            None
-        };
+        let construction = super::QueryConstruction::prepare(context)?;
+        if let Some(constructor) = &self.constructor {
+            return constructor.create_query(construction).await;
+        }
         let mut query = ContinuousQueryTransformer::construct(
-            definition,
-            provider.0.clone(),
-            options(config).map_err(ComponentCreationError::terminal)?,
-            execution,
-            middleware,
-            config
-                .get("defer_build")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
+            construction.definition,
+            construction.provider,
+            construction.options,
+            construction.execution,
+            construction.middleware,
+            construction.defer_build,
         )
         .await
         .map_err(ComponentCreationError::retryable)?
-        .with_recovery_scope(context.instance_id.clone())
+        .with_recovery_scope(construction.instance_id)
         .map_err(ComponentCreationError::terminal)?;
-        query.reset_configuration = config
-            .get("reset_configuration")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        if context
-            .specification
-            .dependencies
-            .contains_key("declaration")
-        {
-            if let Some(declaration) = context
-                .resources::<super::query_configuration::OrdinaryQueryDeclaration>("declaration")
-                .map_err(ComponentCreationError::terminal)?
-                .pop()
-            {
-                query.default_dispatch_capacity = declaration.default_dispatch_capacity;
-                let mut resolved = (*declaration).clone();
-                if context
-                    .specification
-                    .dependencies
-                    .contains_key("source_hosts")
-                {
-                    resolved.sources = context
-                        .resources::<super::SourcePluginHost>("source_hosts")
-                        .map_err(ComponentCreationError::terminal)?;
-                }
-                query.declaration = Some(Arc::new(resolved));
-            }
+        query.reset_configuration = construction.reset_configuration;
+        query.default_dispatch_capacity = construction.default_dispatch_capacity;
+        query.declaration = construction.declaration;
+        query.scheduling = construction.scheduling;
+        if let Some(bootstrap) = construction.bootstrap {
+            query = query.with_bootstrap(bootstrap);
         }
-        if context
-            .specification
-            .dependencies
-            .contains_key("scheduling")
-        {
-            query.scheduling = context
-                .resources::<super::QuerySchedulingResource>("scheduling")
-                .map_err(ComponentCreationError::terminal)?
-                .pop();
-        }
-        if context.specification.dependencies.contains_key("bootstrap") {
-            if let Some(bootstrap) = context
-                .resources::<QueryBootstrapResource>("bootstrap")
-                .map_err(ComponentCreationError::terminal)?
-                .pop()
-            {
-                query = query.with_bootstrap(bootstrap.0.clone());
-            }
-        }
-        if context
-            .specification
-            .dependencies
-            .contains_key("source_progress")
-        {
-            if let Some(progress) = context
-                .resources::<QuerySourceProgressResource>("source_progress")
-                .map_err(ComponentCreationError::terminal)?
-                .pop()
-            {
-                query = query
-                    .with_source_progress(progress.0.clone())
-                    .map_err(ComponentCreationError::terminal)?;
-            }
-        }
-        if let Some(config) = config.get("query_config") {
+        if let Some(progress) = construction.source_progress {
             query = query
-                .with_query_configuration(
-                    serde_json::from_value(config.clone())
-                        .map_err(ComponentCreationError::terminal)?,
-                )
+                .with_source_progress(progress)
                 .map_err(ComponentCreationError::terminal)?;
         }
-        if context.specification.dependencies.contains_key("catalog") {
-            if let Some(catalog) = context
-                .resources::<super::QueryResultsCatalog>("catalog")
-                .map_err(ComponentCreationError::terminal)?
-                .pop()
-            {
-                query = query
-                    .with_result_catalog(&catalog)
-                    .map_err(ComponentCreationError::terminal)?;
-            }
+        if let Some(config) = construction.configuration {
+            query = query
+                .with_query_configuration(config)
+                .map_err(ComponentCreationError::terminal)?;
         }
-        Ok(ConstructedComponent::query(Box::new(
+        if let Some(catalog) = construction.catalog {
+            query = query
+                .with_result_catalog(&catalog)
+                .map_err(ComponentCreationError::terminal)?;
+        }
+        Ok(ConstructedComponent::transformer(Box::new(
             query.with_delivery_tracking(),
         )))
     }

@@ -15,7 +15,6 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use async_trait::async_trait;
 
 use crate::{
     channels::{ComponentEvent, ComponentStatus, ComponentType},
@@ -75,7 +74,17 @@ impl QueryManager {
     }
 
     pub async fn update_query(&self, id: String, config: QueryConfig) -> Result<()> {
-        self.runtime.update_query(&id, config).await
+        let assigned = crate::config::ComponentId::try_new(id.as_str())?;
+        anyhow::ensure!(
+            config
+                .id
+                .as_ref()
+                .is_none_or(|supplied| supplied == &assigned),
+            "an update cannot change the component UUID"
+        );
+        self.runtime
+            .update_query(&id, config.with_assigned_id(assigned))
+            .await
     }
 
     pub async fn teardown_query(&self, id: String) -> Result<()> {
@@ -86,7 +95,10 @@ impl QueryManager {
         Ok(self.runtime.list_components("query").await?)
     }
 
-    pub async fn get_query_config(&self, id: &str) -> crate::error::Result<QueryConfig> {
+    pub async fn get_query_config(
+        &self,
+        id: &str,
+    ) -> crate::error::Result<crate::config::AssignedQueryConfig> {
         Ok(self.runtime.query_configuration(id).await?)
     }
 
@@ -146,13 +158,6 @@ impl QueryManager {
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
         Ok(self.runtime.subscribe_events(id, "query").await?)
-    }
-}
-
-#[async_trait]
-impl crate::reactions::QueryProvider for QueryManager {
-    async fn get_query_instance(&self, id: &str) -> Result<Arc<dyn Query>> {
-        Ok(self.runtime.query_instance(id).await?)
     }
 }
 

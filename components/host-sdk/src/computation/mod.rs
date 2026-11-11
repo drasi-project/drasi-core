@@ -13,6 +13,7 @@
 mod activation_credentials;
 mod admission;
 mod bootstrap;
+mod bootstrap_consumer;
 mod bootstrap_coordination;
 mod consumer;
 mod consumer_progress;
@@ -23,8 +24,10 @@ mod loader;
 mod output_follow;
 mod output_reads;
 mod output_snapshots;
+mod processing;
 mod progress;
 mod proxy;
+mod query;
 mod source_schema;
 mod telemetry;
 mod timing;
@@ -32,6 +35,7 @@ mod transaction;
 
 pub use activation_credentials::{NativeIdentityProviders, NativeIdentityResource};
 pub use bootstrap::{NativeBootstrapFactories, NativeBootstrapFactory, NativeBootstrapProxy};
+pub use bootstrap_consumer::NativeBootstrapResource;
 pub use bootstrap_coordination::{
     NativeSourceBootstrapFactories, NativeSourceBootstrapProgress, NativeSourceBootstrapResource,
 };
@@ -51,7 +55,9 @@ pub use factory::NativeFactory;
 pub use loader::{load, try_load, NativePlugin};
 pub(crate) use loader::{try_load_library, try_read_metadata};
 pub use output_snapshots::{NativeOutputSnapshotsResource, OutputSelector, OutputSnapshotsService};
+pub use processing::NativeProcessingResource;
 pub use proxy::NativeComponentProxy;
+pub(crate) use query::select_query_factory;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct NativeConsumerFactoryMetadata {

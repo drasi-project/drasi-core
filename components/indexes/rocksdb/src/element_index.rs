@@ -23,9 +23,10 @@ use async_trait::async_trait;
 use bit_set::BitSet;
 use drasi_core::hashing::SpookyHasher;
 use drasi_core::{
-    interface::{ElementIndex, ElementStream, IndexError},
+    interface::{
+        index_joins_by_label, ElementIndex, ElementStream, IndexError, IndexJoin, IndexJoinsByLabel,
+    },
     models::{Element, ElementReference, QueryJoin, QueryJoinKey},
-    path_solver::match_path::MatchPath,
 };
 use prost::{bytes::BytesMut, Message};
 use rocksdb::{Cache, Options, SliceTransform, Transaction};
@@ -53,7 +54,7 @@ pub struct RocksDbElementIndex {
 
 pub struct Context {
     db: Arc<IndexDb>,
-    join_spec_by_label: RwLock<JoinSpecByLabel>,
+    join_spec_by_label: RwLock<IndexJoinsByLabel>,
     options: RocksIndexOptions,
     session_state: Arc<RocksDbSessionState>,
 }
@@ -348,11 +349,15 @@ impl ElementIndex for RocksDbElementIndex {
         }
     }
 
-    #[allow(clippy::unwrap_used)]
-    async fn set_joins(&self, match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
-        let joins_by_label = extract_join_spec_by_label(match_path, joins);
-        let mut join_spec_by_label = self.context.join_spec_by_label.write().unwrap();
+    async fn set_joins(&self, joins: &[IndexJoin]) -> Result<(), IndexError> {
+        let joins_by_label = index_joins_by_label(joins)?;
+        let mut join_spec_by_label = self.context.join_spec_by_label.write().map_err(|error| {
+            IndexError::other(std::io::Error::other(format!(
+                "RocksDB join configuration lock poisoned: {error}"
+            )))
+        })?;
         join_spec_by_label.clone_from(&joins_by_label);
+        Ok(())
     }
 }
 
@@ -992,37 +997,6 @@ fn slots_to_bitset(slots: &Vec<usize>) -> BitSet {
         bs.insert(*slot);
     }
     bs
-}
-
-type JoinSpecByLabel = HashMap<String, Vec<(Arc<QueryJoin>, Vec<usize>)>>;
-
-#[allow(clippy::type_complexity)]
-fn extract_join_spec_by_label(
-    match_path: &MatchPath,
-    joins: &Vec<Arc<QueryJoin>>,
-) -> JoinSpecByLabel {
-    let mut result: HashMap<String, Vec<(Arc<QueryJoin>, Vec<usize>)>> = HashMap::new();
-
-    for join in joins {
-        let mut slots = Vec::new();
-        for (slot_num, slot) in match_path.slots.iter().enumerate() {
-            if slot.spec.labels.contains(&Arc::from(join.id.clone())) {
-                slots.push(slot_num);
-            }
-        }
-        if slots.is_empty() {
-            continue;
-        }
-
-        for jk in &join.keys {
-            result
-                .entry(jk.label.clone())
-                .or_default()
-                .push((join.clone(), slots.clone()));
-        }
-    }
-
-    result
 }
 
 ///hash128(join_label, field_value, node_label, property)

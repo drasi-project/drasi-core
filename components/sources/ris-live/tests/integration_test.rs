@@ -200,6 +200,18 @@ async fn test_change_detection_with_websocket_harness() {
 
     let drasi = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("ris-live-integration-test")
             .with_source(source)
             .with_query(routes_query)

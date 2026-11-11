@@ -20,7 +20,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use drasi_core::{
+use drasi_core_types::{
     interface::{
         ElementIndex, MiddlewareError, MiddlewareSetupError, SourceMiddleware,
         SourceMiddlewareFactory,

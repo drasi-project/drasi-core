@@ -42,6 +42,7 @@ fn request(factory: &NativeFactory, configuration: serde_json::Value) -> CreateR
     CreateRequest {
         inputs: Vec::new(),
         activation_credentials_bound: false,
+        update_directive: None,
         id: id("source"),
         implementation: factory.metadata.implementation.clone(),
         configuration_version: factory.metadata.configuration_version,
@@ -369,9 +370,15 @@ async fn native_recovery_graph_requires_the_actual_host_owner_not_matching_names
             Some(bound),
         )?;
         let graph = ComputationGraph::builder(GRAPH)
-            .source(Box::new(source))
-            .query(Box::new(query(directory.path(), progress).await?))
-            .sink(Box::new(sink("sink", QueryChangeCodec::schema())?))
+            .source(ComponentName::try_new("source")?, Box::new(source))
+            .transformer(
+                ComponentName::try_new("query")?,
+                Box::new(query(directory.path(), progress).await?),
+            )
+            .sink(
+                ComponentName::try_new("sink")?,
+                Box::new(sink("sink", QueryChangeCodec::schema())?),
+            )
             .bind_stream(endpoint("source", "out"), stream("changes"))
             .bind_stream(endpoint("query", "out"), stream("results"))
             .connect(
@@ -695,8 +702,11 @@ async fn native_recovery_graph_factory_resolves_typed_resources_and_revokes_afte
                     Arc::new(QuerySourceProgressResource(progress.clone())),
                 ),
             )?
-            .component(specification, factory)
-            .sink(Box::new(sink("query", GraphChangeCodec::schema())?))
+            .component(ComponentName::try_new("source")?, specification, factory)
+            .sink(
+                ComponentName::try_new("query")?,
+                Box::new(sink("query", GraphChangeCodec::schema())?),
+            )
             .bind_stream(endpoint("source", "out"), stream("changes"))
             .connect(
                 EdgeDefinition::new(endpoint("source", "out"), endpoint("query", "in")),

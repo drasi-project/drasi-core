@@ -4,12 +4,12 @@
 mod component;
 
 use drasi_computation_contracts::{
-    ComponentRole, GraphChangeCodec, ImplementationIdentity, PipeRequirements, PortDescriptor,
-    PortDirection, PortId,
+    ComponentRole, ComponentUpdateMode, ComponentUpdatePlan, GraphChangeCodec,
+    ImplementationIdentity, PipeRequirements, PortDescriptor, PortDirection, PortId,
 };
 use drasi_computation_plugin_sdk::{
     Capabilities, Component, ControlSender, CreateRequest, CreatedComponent, Factory,
-    FactoryMetadata, PluginDefinition,
+    FactoryMetadata, PluginDefinition, UpdateRequest,
 };
 use std::sync::Arc;
 
@@ -31,6 +31,14 @@ pub fn plugin() -> anyhow::Result<PluginDefinition> {
 drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 
 impl Factory for CounterFactory {
+    fn supports_update_planning(&self) -> bool {
+        true
+    }
+
+    fn plan_update(&self, request: &UpdateRequest) -> anyhow::Result<ComponentUpdatePlan> {
+        component::plan_update(request)
+    }
+
     fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
         Some(component::configuration_definition().details())
     }
@@ -50,6 +58,7 @@ impl Factory for CounterFactory {
             completion: None,
             capabilities: Capabilities {
                 control: true,
+                update_modes: vec![ComponentUpdateMode::InPlace],
                 ..Capabilities::default()
             },
         }

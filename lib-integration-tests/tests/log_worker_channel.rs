@@ -256,7 +256,7 @@ async fn wait_for_running(drasi: &DrasiLib, component_id: &str) {
 async fn test_logs_flow_through_channel() {
     let source = SimpleLogSource::new("channel-flow-source").expect("Failed to create source");
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .build()
         .await
@@ -302,7 +302,7 @@ async fn test_high_volume_logging() {
     let source =
         HighVolumeLogSource::new("high-volume-source", log_count).expect("Failed to create source");
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .build()
         .await
@@ -370,7 +370,7 @@ async fn test_high_volume_logging() {
 async fn test_multi_thread_runtime() {
     let source = SimpleLogSource::new("multi-thread-source").expect("Failed to create source");
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .build()
         .await
@@ -412,7 +412,7 @@ async fn test_multi_thread_runtime() {
 async fn test_current_thread_runtime() {
     let source = SimpleLogSource::new("current-thread-source").expect("Failed to create source");
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .build()
         .await
@@ -455,7 +455,7 @@ async fn test_concurrent_logging_from_multiple_tasks() {
     let source = SimpleLogSource::new("concurrent-log-source").expect("Failed to create source");
 
     let instance_id = "concurrent-test-instance";
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_id(instance_id)
         .with_source(source)
         .build()
@@ -563,14 +563,14 @@ async fn test_multiple_drasi_instances_logging() {
     let source1 = SimpleLogSource::new("instance1-source").expect("Failed to create source1");
     let source2 = SimpleLogSource::new("instance2-source").expect("Failed to create source2");
 
-    let drasi1 = DrasiLib::builder()
+    let drasi1 = lib_integration_tests::query_builder()
         .with_id("drasi-instance-1")
         .with_source(source1)
         .build()
         .await
         .expect("Failed to build DrasiLib 1");
 
-    let drasi2 = DrasiLib::builder()
+    let drasi2 = lib_integration_tests::query_builder()
         .with_id("drasi-instance-2")
         .with_source(source2)
         .build()
@@ -644,7 +644,7 @@ async fn test_rapid_start_stop_cycles() {
         let source_id = format!("rapid-cycle-source-{i}");
         let source = SimpleLogSource::new(&source_id).expect("Failed to create source");
 
-        let drasi = DrasiLib::builder()
+        let drasi = lib_integration_tests::query_builder()
             .with_source(source)
             .build()
             .await
@@ -678,7 +678,7 @@ async fn test_rapid_start_stop_cycles() {
 async fn test_log_level_filtering_through_channel() {
     let source = SimpleLogSource::new("level-filter-source").expect("Failed to create source");
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .build()
         .await

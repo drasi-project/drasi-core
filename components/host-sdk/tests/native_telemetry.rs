@@ -37,6 +37,7 @@ async fn real_library_spans_preserve_context_and_share_host_processing() -> anyh
     )?;
     let bound = binding(&graph, "native-spans", 1, logging.clone())?;
     let mut component = create(&plugin, &bound, 5)?;
+    component.initialize().await?;
     component.start().await?;
     let dispatch = tracing::Dispatch::new(
         tracing_subscriber::registry()
@@ -110,6 +111,7 @@ async fn real_library_spans_preserve_context_and_share_host_processing() -> anyh
         vec![0.25, 0.25]
     );
     component.stop().await?;
+    component.dispose().await?;
     drop(component);
     clear()?;
     drop(graph);
@@ -195,6 +197,7 @@ async fn real_library_span_overflow_never_drops_metrics_logs_or_propagated_conte
     )?;
     let bound = binding(&graph, "saturation", 1, logging.clone())?;
     let mut component = create(&plugin, &bound, 5)?;
+    component.initialize().await?;
     component.start().await?;
     for _ in 0..8 {
         run(&mut component, Default::default()).await?;
@@ -224,7 +227,7 @@ async fn real_library_span_overflow_never_drops_metrics_logs_or_propagated_conte
         .get_history_by_key(&ComponentLogKey::new(
             "saturation",
             ComponentLogType::Service,
-            "probe",
+            PROBE_ID,
         ))
         .await;
     assert_eq!(
@@ -235,6 +238,7 @@ async fn real_library_span_overflow_never_drops_metrics_logs_or_propagated_conte
         8
     );
     component.stop().await?;
+    component.dispose().await?;
     drop(component);
     assert!(matches!(
         collector.shutdown(Duration::from_millis(10)).await,

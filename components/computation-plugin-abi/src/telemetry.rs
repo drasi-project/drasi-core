@@ -143,9 +143,9 @@ mod tests {
         assert_eq!(size_of::<super::PluginTelemetryV3>(), 32 + pointer);
         assert_eq!(size_of::<super::HostTimingV3>(), 24 + 5 * pointer);
         assert_eq!(size_of::<crate::ComponentVTable>(), 16 + 5 * pointer);
-        assert_eq!(size_of::<crate::FactoryVTable>(), 16 + 2 * pointer);
+        assert_eq!(size_of::<crate::FactoryVTable>(), 16 + 3 * pointer);
         assert_eq!(size_of::<crate::OperationVTable>(), 16 + 3 * pointer);
-        assert_eq!(crate::ABI_VERSION, "1.0.0");
-        assert_eq!(crate::WIRE_VERSION, 1);
+        assert_eq!(crate::ABI_VERSION, "2.0.0");
+        assert_eq!(crate::WIRE_VERSION, 2);
     }
 }

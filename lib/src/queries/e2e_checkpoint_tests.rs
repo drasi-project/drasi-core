@@ -37,6 +37,7 @@ use crate::config::{QueryConfig, SourceSubscriptionSettings};
 use crate::context::SourceRuntimeContext;
 use crate::indexes::{IndexBackendPlugin, StorageBackendRef};
 use crate::sources::{Source, SourceBase, SourceBaseParams, SourceError};
+use crate::test_helpers::creation::{CoreFixtures, SourceFixture};
 use crate::{DrasiLib, Query, RecoveryPolicy};
 
 use drasi_index_rocksdb::RocksDbIndexProvider;
@@ -48,6 +49,11 @@ use drasi_index_rocksdb::RocksDbIndexProvider;
 struct E2eTestSource {
     base: SourceBase,
     replay_capable: bool,
+    control: Arc<E2eSourceControl>,
+}
+
+#[derive(Default)]
+struct E2eSourceControl {
     /// Records the most recent `resume_from` received in subscribe().
     last_resume_from: Arc<RwLock<Option<Bytes>>>,
     /// Records the most recent `resume_sequence` received in subscribe().
@@ -62,20 +68,48 @@ struct E2eTestSource {
     event_tx: Arc<RwLock<Option<mpsc::Sender<Arc<SourceEventWrapper>>>>>,
 }
 
-impl E2eTestSource {
-    fn new(id: &str, replay_capable: bool) -> anyhow::Result<Self> {
-        Ok(Self {
-            base: SourceBase::new(SourceBaseParams::new(id))?,
-            replay_capable,
-            last_resume_from: Arc::new(RwLock::new(None)),
-            last_resume_sequence: Arc::new(RwLock::new(None)),
-            subscribe_count: Arc::new(AtomicU32::new(0)),
-            remaining_failures: Arc::new(AtomicU32::new(0)),
-            position_handle_removed: Arc::new(AtomicU32::new(0)),
-            event_tx: Arc::new(RwLock::new(None)),
+struct E2eSourceFixture {
+    name: String,
+    replay_capable: bool,
+    control: Arc<E2eSourceControl>,
+}
+
+impl std::ops::Deref for E2eTestSource {
+    type Target = E2eSourceControl;
+    fn deref(&self) -> &Self::Target {
+        &self.control
+    }
+}
+
+impl std::ops::Deref for E2eSourceFixture {
+    type Target = E2eSourceControl;
+    fn deref(&self) -> &Self::Target {
+        &self.control
+    }
+}
+
+impl E2eSourceFixture {
+    fn into_definition(self) -> SourceFixture<E2eTestSource> {
+        SourceFixture::new(self.name, false, move |id| {
+            Ok(E2eTestSource {
+                base: SourceBase::new(SourceBaseParams::new(id.to_string()))?,
+                replay_capable: self.replay_capable,
+                control: self.control,
+            })
         })
     }
 
+    fn new(name: &str, replay_capable: bool) -> anyhow::Result<Self> {
+        crate::config::ComponentName::try_new(name)?;
+        Ok(Self {
+            name: name.into(),
+            replay_capable,
+            control: Arc::new(E2eSourceControl::default()),
+        })
+    }
+}
+
+impl E2eSourceControl {
     fn last_resume_from(&self) -> Arc<RwLock<Option<Bytes>>> {
         self.last_resume_from.clone()
     }
@@ -127,8 +161,8 @@ impl Source for E2eTestSource {
         false
     }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> anyhow::Result<()> {
@@ -225,10 +259,24 @@ async fn build_e2e_lib(
     default_recovery_policy: Option<RecoveryPolicy>,
 ) -> anyhow::Result<Arc<DrasiLib>> {
     let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
-    let mut builder = DrasiLib::builder().with_id(id).with_index_provider(
-        "persistent",
-        Arc::new(provider) as Arc<dyn IndexBackendPlugin>,
-    );
+    let mut builder = DrasiLib::builder()
+        .with_query_factory(
+            crate::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &crate::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
+        .with_id(id)
+        .with_index_provider(
+            "persistent",
+            Arc::new(provider) as Arc<dyn IndexBackendPlugin>,
+        );
 
     if let Some(policy) = default_recovery_policy {
         builder = builder.with_default_recovery_policy(policy);
@@ -254,7 +302,7 @@ fn make_persistent_query(
         q = q.with_recovery_policy(policy);
     }
 
-    q.build()
+    q.build().unwrap()
 }
 
 fn make_volatile_query(id: &str, source_id: &str) -> QueryConfig {
@@ -264,6 +312,7 @@ fn make_volatile_query(id: &str, source_id: &str) -> QueryConfig {
         .auto_start(false)
         .enable_bootstrap(false)
         .build()
+        .unwrap()
 }
 
 /// Send a source change event and wait briefly for processing.
@@ -369,9 +418,11 @@ async fn test_e2e_outbox_persistent_reopen(#[case] sequence: u64) {
     let core = build_e2e_lib("outbox-reopen", &tmp_dir, Some(RecoveryPolicy::Strict))
         .await
         .unwrap();
-    let source = E2eTestSource::new("outbox-src", true).unwrap();
+    let source = E2eSourceFixture::new("outbox-src", true).unwrap();
     let event_tx = source.event_sender();
-    core.add_source(source).await.unwrap();
+    core.add_source_fixture(source.into_definition())
+        .await
+        .unwrap();
     core.add_query(make_persistent_query("outbox-q", "outbox-src", None))
         .await
         .unwrap();
@@ -440,10 +491,13 @@ async fn test_e2e_outbox_persistent_reopen(#[case] sequence: u64) {
     let reopened = build_e2e_lib("outbox-reopen", &tmp_dir, Some(RecoveryPolicy::Strict))
         .await
         .unwrap();
-    let source = E2eTestSource::new("outbox-src", true).unwrap();
+    let source = E2eSourceFixture::new("outbox-src", true).unwrap();
     let resume_sequence = source.last_resume_sequence();
     let event_tx = source.event_sender();
-    reopened.add_source(source).await.unwrap();
+    reopened
+        .add_source_fixture(source.into_definition())
+        .await
+        .unwrap();
     reopened
         .add_query(make_persistent_query("outbox-q", "outbox-src", None))
         .await
@@ -501,13 +555,15 @@ async fn test_e2e_checkpoint_round_trip() {
     let core = build_e2e_lib("e2e-rt", &tmp_dir, None).await.unwrap();
 
     // Create source and grab shared handles before moving
-    let source = E2eTestSource::new("e2e-src", true).unwrap();
+    let source = E2eSourceFixture::new("e2e-src", true).unwrap();
     let resume_from = source.last_resume_from();
     let event_tx = source.event_sender();
     let sub_count = source.subscribe_count_handle();
 
     // Add and start source
-    core.add_source(source).await.unwrap();
+    core.add_source_fixture(source.into_definition())
+        .await
+        .unwrap();
     core.start_source("e2e-src").await.unwrap();
     wait_for_status(&core, "e2e-src", ComponentStatus::Running).await;
 
@@ -566,12 +622,14 @@ async fn test_e2e_resume_sequence_carried_back() {
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let core = build_e2e_lib("e2e-rs", &tmp_dir, None).await.unwrap();
 
-    let source = E2eTestSource::new("e2e-rs-src", true).unwrap();
+    let source = E2eSourceFixture::new("e2e-rs-src", true).unwrap();
     let resume_sequence = source.last_resume_sequence();
     let event_tx = source.event_sender();
     let sub_count = source.subscribe_count_handle();
 
-    core.add_source(source).await.unwrap();
+    core.add_source_fixture(source.into_definition())
+        .await
+        .unwrap();
     core.start_source("e2e-rs-src").await.unwrap();
     wait_for_status(&core, "e2e-rs-src", ComponentStatus::Running).await;
 
@@ -626,14 +684,16 @@ async fn test_e2e_auto_reset_clears_resume_sequence() {
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let core = build_e2e_lib("e2e-rs-reset", &tmp_dir, None).await.unwrap();
 
-    let source = E2eTestSource::new("rs-reset-src", true).unwrap();
+    let source = E2eSourceFixture::new("rs-reset-src", true).unwrap();
     let resume_sequence = source.last_resume_sequence();
     let resume_from = source.last_resume_from();
     let event_tx = source.event_sender();
     let sub_count = source.subscribe_count_handle();
     let remaining_failures = source.remaining_failures_handle();
 
-    core.add_source(source).await.unwrap();
+    core.add_source_fixture(source.into_definition())
+        .await
+        .unwrap();
     core.start_source("rs-reset-src").await.unwrap();
     wait_for_status(&core, "rs-reset-src", ComponentStatus::Running).await;
 
@@ -689,11 +749,13 @@ async fn test_e2e_volatile_query_no_checkpoints() {
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let core = build_e2e_lib("e2e-vol", &tmp_dir, None).await.unwrap();
 
-    let source = E2eTestSource::new("vol-src", true).unwrap();
+    let source = E2eSourceFixture::new("vol-src", true).unwrap();
     let resume_from = source.last_resume_from();
     let event_tx = source.event_sender();
 
-    core.add_source(source).await.unwrap();
+    core.add_source_fixture(source.into_definition())
+        .await
+        .unwrap();
     core.start_source("vol-src").await.unwrap();
     wait_for_status(&core, "vol-src", ComponentStatus::Running).await;
 
@@ -728,8 +790,10 @@ async fn test_e2e_persistent_query_volatile_source_rejected() {
     let core = build_e2e_lib("e2e-compat", &tmp_dir, None).await.unwrap();
 
     // Source that does NOT support replay
-    let source = E2eTestSource::new("compat-src", false).unwrap();
-    core.add_source(source).await.unwrap();
+    let source = E2eSourceFixture::new("compat-src", false).unwrap();
+    core.add_source_fixture(source.into_definition())
+        .await
+        .unwrap();
     core.start_source("compat-src").await.unwrap();
     wait_for_status(&core, "compat-src", ComponentStatus::Running).await;
 
@@ -750,9 +814,11 @@ async fn test_e2e_strict_policy_position_unavailable() {
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let core = build_e2e_lib("e2e-strict", &tmp_dir, None).await.unwrap();
 
-    let source = E2eTestSource::new("strict-src", true).unwrap();
+    let source = E2eSourceFixture::new("strict-src", true).unwrap();
     source.set_fail_count(u32::MAX); // always fail
-    core.add_source(source).await.unwrap();
+    core.add_source_fixture(source.into_definition())
+        .await
+        .unwrap();
     core.start_source("strict-src").await.unwrap();
     wait_for_status(&core, "strict-src", ComponentStatus::Running).await;
 
@@ -773,12 +839,14 @@ async fn test_e2e_auto_reset_position_unavailable() {
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let core = build_e2e_lib("e2e-reset", &tmp_dir, None).await.unwrap();
 
-    let source = E2eTestSource::new("reset-src", true).unwrap();
+    let source = E2eSourceFixture::new("reset-src", true).unwrap();
     source.set_fail_count(1); // fail once, succeed on retry
     let sub_count = source.subscribe_count_handle();
     let resume_from = source.last_resume_from();
 
-    core.add_source(source).await.unwrap();
+    core.add_source_fixture(source.into_definition())
+        .await
+        .unwrap();
     core.start_source("reset-src").await.unwrap();
     wait_for_status(&core, "reset-src", ComponentStatus::Running).await;
 
@@ -811,11 +879,13 @@ async fn test_e2e_remove_query_clears_persistent_state() {
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let core = build_e2e_lib("e2e-remove", &tmp_dir, None).await.unwrap();
 
-    let source = E2eTestSource::new("rm-src", true).unwrap();
+    let source = E2eSourceFixture::new("rm-src", true).unwrap();
     let resume_from = source.last_resume_from();
     let event_tx = source.event_sender();
 
-    core.add_source(source).await.unwrap();
+    core.add_source_fixture(source.into_definition())
+        .await
+        .unwrap();
     core.start_source("rm-src").await.unwrap();
     wait_for_status(&core, "rm-src", ComponentStatus::Running).await;
 
@@ -856,10 +926,12 @@ async fn test_e2e_stop_releases_position_handles() {
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let core = build_e2e_lib("e2e-handles", &tmp_dir, None).await.unwrap();
 
-    let source = E2eTestSource::new("handle-src", true).unwrap();
+    let source = E2eSourceFixture::new("handle-src", true).unwrap();
     let removed_count = source.position_handle_removed_handle();
 
-    core.add_source(source).await.unwrap();
+    core.add_source_fixture(source.into_definition())
+        .await
+        .unwrap();
     core.start_source("handle-src").await.unwrap();
     wait_for_status(&core, "handle-src", ComponentStatus::Running).await;
 
@@ -890,12 +962,14 @@ async fn test_e2e_config_change_triggers_rebootstrap() {
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let core = build_e2e_lib("e2e-cfghash", &tmp_dir, None).await.unwrap();
 
-    let source = E2eTestSource::new("cfg-src", true).unwrap();
+    let source = E2eSourceFixture::new("cfg-src", true).unwrap();
     let resume_from = source.last_resume_from();
     let event_tx = source.event_sender();
     let sub_count = source.subscribe_count_handle();
 
-    core.add_source(source).await.unwrap();
+    core.add_source_fixture(source.into_definition())
+        .await
+        .unwrap();
     core.start_source("cfg-src").await.unwrap();
     wait_for_status(&core, "cfg-src", ComponentStatus::Running).await;
 
@@ -906,7 +980,8 @@ async fn test_e2e_config_change_triggers_rebootstrap() {
         .auto_start(false)
         .enable_bootstrap(false)
         .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
-        .build();
+        .build()
+        .unwrap();
     core.add_query(query1).await.unwrap();
     core.start_query("cfg-q").await.unwrap();
     wait_for_status(&core, "cfg-q", ComponentStatus::Running).await;
@@ -926,7 +1001,8 @@ async fn test_e2e_config_change_triggers_rebootstrap() {
         .auto_start(false)
         .enable_bootstrap(false)
         .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
-        .build();
+        .build()
+        .unwrap();
     core.update_query("cfg-q", query2).await.unwrap();
 
     // Restart — config hash changed, so should NOT resume from checkpoint
@@ -983,9 +1059,11 @@ mod aggregate_snapshot_tests {
                 .await
                 .unwrap();
             core.start().await.unwrap();
-            let source = E2eTestSource::new(SOURCE, true).unwrap();
+            let source = E2eSourceFixture::new(SOURCE, true).unwrap();
             let event_tx = source.event_sender();
-            core.add_source(source).await.unwrap();
+            core.add_source_fixture(source.into_definition())
+                .await
+                .unwrap();
             core.start_source(SOURCE).await.unwrap();
             wait_for_status(&core, SOURCE, ComponentStatus::Running).await;
 
@@ -995,7 +1073,8 @@ mod aggregate_snapshot_tests {
                 .auto_start(false)
                 .enable_bootstrap(false)
                 .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
-                .build();
+                .build()
+                .unwrap();
             core.add_query(config).await.unwrap();
             core.start_query(query_id).await.unwrap();
             wait_for_status(&core, query_id, ComponentStatus::Running).await;

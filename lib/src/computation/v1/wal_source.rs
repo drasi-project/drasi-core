@@ -351,14 +351,13 @@ impl ComponentFactory for WalReplaySourceFactory {
     }
     fn validate(&self, spec: &ComponentSpecification) -> anyhow::Result<()> {
         anyhow::ensure!(
-            !spec
-                .dependencies
+            spec.dependencies
                 .get("source_progress")
-                .is_some_and(|items| !items.is_empty())
-                || !spec
+                .is_none_or(|items| items.is_empty())
+                || spec
                     .dependencies
                     .get("consumer_progress")
-                    .is_some_and(|items| !items.is_empty()),
+                    .is_none_or(|items| items.is_empty()),
             "WAL source cannot bind both single-owner and consumer-set progress"
         );
         if spec.descriptor != descriptor(spec.descriptor.id().clone()) {

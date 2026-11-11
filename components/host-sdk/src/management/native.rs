@@ -45,7 +45,6 @@ impl CompositeBootstrapConfig {
     }
 
     pub fn validate_owner(&self, resource: &ResourceId, topology: &DesiredTopology) -> Result<()> {
-        let query = ContinuousQueryFactory::default();
         for component in &topology.components {
             if let ComponentConstruction::Factory(spec) = &component.construction {
                 if spec
@@ -56,7 +55,8 @@ impl CompositeBootstrapConfig {
                 {
                     anyhow::ensure!(
                         spec.descriptor.id() == &self.component
-                            && spec.implementation == query.descriptor().implementation
+                            && spec.role == ComponentRole::Transformer
+                            && spec.descriptor.semantic_kind() == Some(ComponentSemanticKind::Query)
                             && spec.dependencies.get("bootstrap")
                                 .is_some_and(|ids| ids.as_slice() == std::slice::from_ref(resource)),
                         "composite bootstrap may only be bound to its owning continuous query"
@@ -420,7 +420,6 @@ impl NativeBootstrapConfig {
                 );
             }
         }
-        let query = ContinuousQueryFactory::default();
         for component in &topology.components {
             if let ComponentConstruction::Factory(spec) = &component.construction {
                 if spec
@@ -431,7 +430,8 @@ impl NativeBootstrapConfig {
                 {
                     anyhow::ensure!(
                         spec.descriptor.id() == &self.component
-                            && spec.implementation == query.descriptor().implementation
+                            && spec.role == ComponentRole::Transformer
+                            && spec.descriptor.semantic_kind() == Some(ComponentSemanticKind::Query)
                             && spec
                                 .dependencies
                                 .get("bootstrap")

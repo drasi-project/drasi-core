@@ -18,11 +18,11 @@ use std::{
 };
 
 use super::{
-    BindingState, ComponentDescriptor, ComponentFailure, ComponentGeneration, ComponentId,
-    ComponentRole, ConfigurationValue, DataAvailability, DesiredPipe, DesiredRelationship,
-    EdgeDefinition, GraphRevision, GraphSnapshot, ImplementationIdentity, NodeSnapshot,
-    ObservedComponent, ObservedGraph, ObservedRelationship, ObservedResource, PipeCapabilities,
-    PipeProvider, PluginIdentity, PortId, ResourceId, ResourceRole, ResourceSpecification,
+    BindingState, ComponentFailure, ComponentGeneration, ComponentId, ConfigurationValue,
+    DataAvailability, DesiredPipe, DesiredRelationship, EdgeDefinition, GraphRevision,
+    GraphSnapshot, ImplementationIdentity, NodeSnapshot, ObservedComponent, ObservedGraph,
+    ObservedRelationship, ObservedResource, PipeCapabilities, PipeProvider, PluginIdentity, PortId,
+    ResourceId, ResourceRole, ResourceSpecification,
 };
 
 /// An entity identity scoped to one computation graph. Native pipes use full
@@ -48,10 +48,10 @@ pub(super) fn encode_entity_key(value: &str) -> String {
 impl GraphEntityId {
     /// Stable, collision-free graph-as-data key. Each identifier is encoded
     /// separately, so delimiters in user identifiers cannot alias another entity.
-    /// Component/resource keys retain the original inspection source namespaces.
+    /// Component keys are exactly their UUIDs. Other entity kinds are namespaced.
     pub fn key(&self) -> String {
         match self {
-            Self::Component(id) => format!("component:{}", encode_entity_key(id.as_str())),
+            Self::Component(id) => id.as_str().to_owned(),
             Self::Resource(id) => format!("resource:{}", encode_entity_key(id.as_str())),
             Self::Plugin(identity) => format!(
                 "v1:plugin:{}:{}",

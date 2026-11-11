@@ -32,7 +32,8 @@ pub struct FfiStateStoreProxy {
 }
 
 impl FfiStateStoreProxy {
-    /// Take ownership of a host-provided ABI 0.17 state-store vtable.
+    /// Take ownership of a host-provided state-store vtable using the ownership
+    /// contract introduced in ABI 0.17 and unchanged in ABI 0.18.
     ///
     /// # Safety
     /// `vtable` must be a non-null, uniquely transferred `Box<StateStoreVtable>`

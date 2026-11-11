@@ -159,7 +159,22 @@ fn write_report(report: &Value) -> anyhow::Result<()> {
 async fn default_pipeline_memory_provider_processes_the_same_context_updates() -> anyhow::Result<()>
 {
     let (source, _handle) = mock_source::MockSource::new("source")?;
-    let core = DrasiLib::builder().with_source(source).build().await?;
+    let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
+        .with_source(source)
+        .build()
+        .await?;
     let batch = core
         .computation_pipeline()?
         .source(

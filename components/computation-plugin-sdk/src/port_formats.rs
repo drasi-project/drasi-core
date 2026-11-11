@@ -209,11 +209,14 @@ mod tests {
     #[test]
     fn default_and_selected_ports_resolve_from_configuration() {
         let metadata = metadata(vec![alternative("out", "vendor.batch")]);
-        let default = metadata.descriptor_for(ComponentId::try_new("c").unwrap(), &json!({}));
+        let default = metadata.descriptor_for(
+            ComponentId::try_new("8b7f152c-4c08-4faf-849e-ce60869de4d9").unwrap(),
+            &json!({}),
+        );
         assert_eq!(default.unwrap().ports(), metadata.ports);
         let selected = metadata
             .descriptor_for(
-                ComponentId::try_new("c").unwrap(),
+                ComponentId::try_new("8b7f152c-4c08-4faf-849e-ce60869de4d9").unwrap(),
                 &json!({"ports": {"out": {"format": "vendor.batch-v1"}}}),
             )
             .unwrap();

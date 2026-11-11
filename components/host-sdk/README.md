@@ -2,7 +2,7 @@
 
 ## Shared native telemetry
 
-The loader negotiates telemetry V2 separately from frozen base/V1 and ordinary
+The loader negotiates telemetry V2 separately from native base ABI 2 and ordinary
 plugin interfaces. Native factories bind the actual graph-owned telemetry before
 calling constructors, including service-aware construction. Opaque metric tokens
 are scoped to the binding and generation; updates call the host recorder directly
@@ -25,6 +25,45 @@ recursive telemetry updates.
 
 Rebuild actual libraries after SDK changes. `make test-native-telemetry` runs
 real native telemetry/context/logging checks and a no-OTel metrics/log profile.
+
+## Component lifecycle and managed updates
+
+The host binds runtime services before calling `initialize` once for each
+constructed object. That object may then go through repeated `start`/`stop`
+cycles before final `dispose`. A replacement object has a new lifetime even
+when its logical component UUID is retained. Failed initialization still needs
+disposal; interrupted cleanup remains owned until it actually finishes.
+`pause_processing` and `resume_processing` are temporary processing boundaries,
+not destruction. `delete_owned_resources` is separate, explicit permanent
+cleanup: neither an ordinary stop nor disposal implies deleting persisted data.
+
+Managed updates require a registered factory recipe whose author implements
+update planning. The host asks that factory whether to retain the object,
+restart it, reconstruct it, or reject the change, and whether state can be
+preserved or must be rebuilt from a bootstrap. A plan is not permission to
+discard unconfirmed output, shared history, or another consumer's data. The
+configuration owner records the accepted operation identity before execution
+and confirms completion before processing resumes. Configuration durability
+does not itself provide durable processing state.
+
+**Current Core limitation:** every managed `Rebootstrap` plan is rejected,
+including when a bootstrap provider is available. Initial bootstrap is
+unaffected. Snapshot/live handover, exact queued-work treatment and downstream
+reset acknowledgement still need a graph-owned protocol; see
+[CW-92](../../lib/docs/computation-graph-remaining-work.md#cw-92).
+
+Externally supplied objects without an update-capable recipe use explicit graph
+changes and remove/add instead. Their normal stop/disposal hooks still run.
+The ordinary Source/Reaction ABI **0.18.0** exposes lifecycle hooks but does not
+advertise factory-managed updates. Native ABI **2.0.0** carries factory plans and
+retained-object updates; earlier native ABI layouts are rejected. The generic
+native adapter rejects update assessment requiring unresolved configuration
+references or construction-time input bindings rather than inventing values.
+Native libraries remain process-pinned: reconstructing a component is not
+hot-swapping its library.
+
+See the [native SDK guide](../computation-plugin-sdk/README.md) for plugin hooks,
+capability declarations, and update request types.
 
 ## Native activation identity
 
@@ -388,13 +427,39 @@ not load library paths from stored definitions.
 `management::HostManagementResources` provides standard resource recipes for
 memory indexes, query-result catalogs, source progress, middleware, transactional
 factories and configuration references.
+It also resolves `sourceTimeMergeStorage`: a version-pinned, graph-owned
+`SourceTimeMergeStorage` for one merger with exactly one declared `IndexBackend`
+dependency. Bind that resource to the `drasi/source-time-merge` factory's
+`storage` slot. The owner derives its scope from the constructing instance and
+graph, retains acquired transactions through failed/cancelled construction, and
+awaits cleanup before releasing them. It requires an independent persistent
+atomic provider, not a volatile provider or another producer's shared
+transaction. See [source-time recipes](../../lib/docs/computation-graph-time-merge.md#factory-owned-construction).
+
+Hosts can register a provider with
+`with_versioned_index_provider(name, implementation, configuration_version, provider)`.
+An `indexes` recipe then pins the same `implementation` and
+`configurationVersion` alongside `provider`. The identity comes from the
+embedding application's actual registration; it is never inferred from a Rust
+type, database path or provider name. Both identity fields are required together,
+and mismatches remain resource-construction failures. The older
+`with_index_provider` and unversioned recipes remain supported, but cannot satisfy
+a version-pinned recipe.
+
+Use `GraphConfigurationSnapshot::reconstructible_topology()` to extract a
+factory-only definition with explicit resource recipes. Captured object
+properties are inspection data, not an automatic reconstruction contract, and
+resolved secret values are never substituted into exported references. Restoring
+configuration selects the same declared resource scope; it does not restore an
+earlier processing position.
+
 The `{"kind":"sourceProgress","component":"query"}` recipe creates a checkpoint
 resource for the named consumer in the current graph. Bind that same resource ID
 to the consumer and its replayable source using `source_progress`. The consumer
 publishes its actual recovered state; the recipe cannot supply checkpoints,
 readiness or durability claims. Resolution creates a separate owner per instance,
 not a global cache keyed by component names. Sources across the native boundary
-must explicitly negotiate recovery-v1; ordinary ABI 1.0 compatibility is not
+must explicitly negotiate recovery-v1; native ABI compatibility is not
 recovery support. `{"kind":"queryCatalog"}` creates a catalog shared by queries
 and a result outlet through their `catalog` dependencies.
 Its `configuration` recipe can include local `secrets`, or use an externally
@@ -408,6 +473,24 @@ across multiple instance IDs, and register the required factories on each
 restart. Missing factories remain visible as failed declarations, not silently
 removed components. See [managed configuration](../../lib/docs/managed-configuration.md)
 for acceptance, reconstruction, snapshots and mutation-boundary contracts.
+
+The ordinary `DrasiLib` facade also accepts native factory additions through
+`add_source_from_factory(addition)` and `add_reaction_from_factory(addition)`.
+Use `ComponentAddition::from_specification(specification, factory)` to supply
+the implementation, or `ComponentAddition::declaration(specification)` followed
+by `register_component_factory(factory)` when the implementation arrives later.
+Declare output streams and connections explicitly. Sources use the native
+`Source` role or an explicitly source-labelled service; reactions must declare
+`ComponentSemanticKind::Reaction` on a sink or service descriptor.
+
+The returned handle acknowledges declaration, not readiness. A failed source
+constructor can leave its reaction waiting for the input connection; retry the
+source before awaiting that reaction's creation. Ordinary `start_source` and
+`start_reaction` retry failed unmanaged construction through the same graph.
+For managed definitions, use `reconcile_desired_state`. Imperative additions
+are not automatically adopted by a configuration store. Existing `add_source`
+and `add_reaction` continue to accept legacy trait objects; native recipes do
+not introduce legacy-producing factory constructors.
 
 ## Native fast-path measurement
 
@@ -505,14 +588,16 @@ The result is that the rest of the server code works with normal Rust trait obje
 Plugin-side `NativeComponent` interfaces and shared messages no longer depend on
 the runtime. This host package is where those operations become graph-owned
 components, runtime configuration schemas and actual storage/progress bindings.
-The base ABI and wire formats are unchanged; older native binaries remain valid.
+The current native ABI is **2.0.0**, with wire version **2**. Rebuild native
+libraries against the matching SDK; ABI-1 binaries do not provide the required
+lifecycle/update contract and are rejected.
 
 Optional recovery-v1 source progress binds only an actual
 `QuerySourceProgressResource` under `source_progress`; it is mutually exclusive
 with the source's optional `admission` binding. The proxy retains the real local
 owner for recovery assertions while the plugin receives a bounded, revocable
-read-only capability. Old native binaries remain available for their existing
-fast behavior. See the [native progress contract](../computation-plugin-sdk/README.md#optional-read-only-source-progress).
+read-only capability. Progress support is an explicit capability, not a
+consequence of ABI compatibility. See the [native progress contract](../computation-plugin-sdk/README.md#optional-read-only-source-progress).
 
 Host unit tests also load a separately built, test-only SQLite replay plugin.
 `make build-test-plugins` builds it, or use
@@ -520,7 +605,7 @@ Host unit tests also load a separately built, test-only SQLite replay plugin.
 Set `DRASI_NATIVE_RECOVERY_PLUGIN` to select an explicit fixture path.
 
 The independent `computation` module loads native graph factories without changing
-the legacy ABI 0.15:
+the independent ordinary ABI (0.18; older layouts are rejected):
 
 ```rust,ignore
 use drasi_host_sdk::computation;
@@ -545,7 +630,15 @@ capabilities. Do not fall back to legacy registration after such an error.
 lifetime, including identified candidates whose initialization fails; hot
 unloading is unsupported.
 
-Native ABI 1.0 uses wire version 1: bounded MessagePack and bulk binary envelope
+Registration also includes supported native query-authoring recipe identities,
+so exported query specifications reconstruct through the same factory registry.
+It does not choose an ordinary-query default. For ordinary builder/API queries,
+explicitly pass `plugin.query_factory()?` to `with_query_factory`, or register
+that selection with `register_query_factory`. Missing or ambiguous selection is
+an error, never a linked-reference fallback. See the
+[query plugin guide](../computation-plugins/transformers/query/README.md).
+
+Native ABI 2.0 uses wire version 2: bounded MessagePack and bulk binary envelope
 buffers. Build native libraries and the host from matching sources; unknown
 wire versions are rejected before plugin entry. Native response buffers remain
 producer-owned while being decoded, then are released through their callback;
@@ -559,9 +652,11 @@ configuration)` helper builds an exact graph recipe with plugin provenance;
 `create_component` is configuration-only. Proxies implement the real native
 source/transformer/sink/service interfaces. `configuration()` reads the actual
 component, not a second mutable registry. The graph publishes configuration at
-construction boundaries rather than invoking getters during in-flight data;
-native ABI 1.0 does not support in-place reconfiguration. The graph retains
-submitted specifications for pending/failed construction.
+construction and successful update boundaries rather than invoking getters
+during in-flight data. Managed changes require explicit factory planning and
+the component's update capability; creation support alone is insufficient.
+Core currently rejects every `Rebootstrap` plan. The graph retains submitted
+specifications and accepted update intent for pending/failed work.
 
 The graph polls all asynchronous operations and owns cancellation. Native control
 operations use separate callbacks rather than waiting behind mutable data calls.
@@ -569,7 +664,7 @@ Step-scoped transaction requests are serviced inside the host's actual borrowed
 `TransactionContext`, through a revocable mailbox with no commit API. No Rust
 future, trait object, task-local, `Arc` or `Bytes` ownership crosses the C ABI.
 See the [native SDK](../computation-plugin-sdk/README.md) for authoring,
-ownership and explicitly unsupported query/recovery/resource capabilities.
+ownership, optional read/recovery/resource capabilities and their limits.
 
 For a directory containing both families, use
 `PluginLoader::load_all_families` and match `LoadedPluginFamily::Legacy` or

@@ -55,7 +55,7 @@ async fn snapshot_then_live(
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("source.db");
     rusqlite::Connection::open(&path)?.execute_batch(seed)?;
-    let core = DrasiLib::builder()
+    let core = lib_integration_tests::query_builder()
         .with_id(format!("sqlite-file-{name}"))
         .build()
         .await?;

@@ -8,6 +8,8 @@ use drasi_lib::{computation::v1::*, observability::*};
 use metrics::RecordingMetrics;
 use std::{sync::Arc, time::Duration};
 
+const PROBE_ID: &str = "00000000-0000-4000-8000-000000000001";
+
 fn graph(recorder: &RecordingMetrics, instance: &str) -> anyhow::Result<ComputationGraph> {
     Ok(ComputationGraph::builder("plugin-graph")
         .with_telemetry(
@@ -30,7 +32,7 @@ fn binding(
 ) -> anyhow::Result<PluginTelemetry> {
     Ok(graph.telemetry().plugin_binding(
         TelemetryScope::graph(instance, "plugin-graph")?.component(
-            ComponentId::try_new("probe")?,
+            ComponentId::try_new(PROBE_ID)?,
             ComponentRole::Service,
             ComponentSemanticKind::Service,
         ),
@@ -121,7 +123,7 @@ async fn native_log_metadata_preserves_original_time_target_fields_and_scope() -
     let logging = ComponentLogRuntime::new(LogPolicy::new("info")?)?;
     let binding = graph.telemetry().plugin_binding(
         TelemetryScope::graph("logs", "plugin-graph")?.component(
-            ComponentId::try_new("probe")?,
+            ComponentId::try_new(PROBE_ID)?,
             ComponentRole::Service,
             ComponentSemanticKind::Service,
         ),
@@ -145,7 +147,7 @@ async fn native_log_metadata_preserves_original_time_target_fields_and_scope() -
         .get_history_by_key(&ComponentLogKey::new(
             "logs",
             ComponentLogType::Service,
-            "probe",
+            PROBE_ID,
         ))
         .await;
     assert_eq!(messages.len(), 1);

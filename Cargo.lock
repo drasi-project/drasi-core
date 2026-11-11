@@ -3066,8 +3066,8 @@ dependencies = [
  "imbl",
  "log",
  "metrics",
- "opentelemetry 0.31.0",
- "opentelemetry_sdk 0.31.0",
+ "opentelemetry 0.33.1",
+ "opentelemetry_sdk 0.33.1",
  "ordered-float 3.9.2",
  "pin-project-lite",
  "rmp-serde",
@@ -3121,8 +3121,8 @@ dependencies = [
  "futures-util",
  "log",
  "metrics",
- "opentelemetry 0.31.0",
- "opentelemetry_sdk 0.31.0",
+ "opentelemetry 0.33.1",
+ "opentelemetry_sdk 0.33.1",
  "rmp-serde",
  "serde",
  "serde_bytes",
@@ -3442,8 +3442,48 @@ dependencies = [
  "drasi-computation-plugin-sdk",
  "drasi-core-types",
  "drasi-middleware",
+ "imbl",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "drasi-computation-transformer-query"
+version = "0.11.3"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "chrono",
+ "drasi-computation-contracts",
+ "drasi-computation-plugin-sdk",
+ "drasi-core",
+ "drasi-middleware",
+ "drasi-query-common",
+ "futures-util",
+ "imbl",
+ "log",
+ "ordered-float 3.9.2",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "drasi-computation-transformer-view"
+version = "0.11.3"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "drasi-computation-contracts",
+ "drasi-computation-plugin-sdk",
+ "drasi-core-types",
+ "drasi-middleware",
+ "imbl",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -3493,10 +3533,12 @@ dependencies = [
 name = "drasi-core-types"
 version = "0.11.3"
 dependencies = [
+ "async-trait",
  "bytes",
  "chrono",
  "chrono-tz 0.10.4",
  "drasi-query-ast",
+ "futures-core",
  "itoa",
  "lazy_static",
  "log",
@@ -3507,6 +3549,7 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "time",
+ "tokio",
 ]
 
 [[package]]
@@ -3583,11 +3626,14 @@ dependencies = [
  "drasi-computation-source-mysql",
  "drasi-computation-source-postgres",
  "drasi-computation-source-sqlite",
+ "drasi-computation-transformer-query",
  "drasi-core",
+ "drasi-core-types",
  "drasi-ffi-primitives",
  "drasi-index-rocksdb",
  "drasi-lib",
  "drasi-plugin-sdk",
+ "drasi-query-common",
  "drasi-reaction-grpc",
  "drasi-reaction-http",
  "drasi-source-grpc",
@@ -3603,8 +3649,9 @@ dependencies = [
  "notify",
  "notify-debouncer-mini",
  "oci-client",
- "opentelemetry 0.31.0",
- "opentelemetry_sdk 0.31.0",
+ "opentelemetry 0.33.1",
+ "opentelemetry_sdk 0.33.1",
+ "ordered-float 3.9.2",
  "p256",
  "p384",
  "pem",
@@ -3627,6 +3674,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "url",
+ "uuid 1.29.0",
  "x509-parser 0.16.0",
 ]
 
@@ -3836,10 +3884,10 @@ dependencies = [
  "drasi-core",
  "drasi-core-types",
  "drasi-functions-cypher",
- "drasi-functions-gql",
  "drasi-index-rocksdb",
  "drasi-middleware",
  "drasi-query-ast",
+ "drasi-query-common",
  "drasi-query-cypher",
  "drasi-query-gql",
  "drasi-reaction-application",
@@ -3849,17 +3897,15 @@ dependencies = [
  "drasi-state-store-redb",
  "drasi-wal-redb",
  "equivalent",
- "fnv",
  "futures",
  "imbl",
  "log",
  "metrics",
  "mockall 0.12.1",
- "opentelemetry 0.31.0",
- "opentelemetry_sdk 0.31.0",
+ "opentelemetry 0.33.1",
+ "opentelemetry_sdk 0.33.1",
  "ordered-float 3.9.2",
  "pretty_assertions",
- "rand 0.8.8",
  "rmp-serde",
  "rstest",
  "serde",
@@ -4060,6 +4106,31 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "drasi-query-common"
+version = "0.11.3"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "drasi-computation-contracts",
+ "drasi-core",
+ "drasi-functions-cypher",
+ "drasi-functions-gql",
+ "drasi-query-ast",
+ "drasi-query-cypher",
+ "drasi-query-gql",
+ "fnv",
+ "imbl",
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -7345,7 +7416,10 @@ dependencies = [
  "chrono",
  "drasi-bootstrap-application",
  "drasi-bootstrap-sqlite",
+ "drasi-computation-plugin-sdk",
+ "drasi-computation-transformer-query",
  "drasi-core",
+ "drasi-host-sdk",
  "drasi-index-garnet",
  "drasi-index-rocksdb",
  "drasi-lib",
@@ -7360,8 +7434,8 @@ dependencies = [
  "drasi-wal-redb",
  "futures",
  "metrics",
- "opentelemetry 0.31.0",
- "opentelemetry_sdk 0.31.0",
+ "opentelemetry 0.33.1",
+ "opentelemetry_sdk 0.33.1",
  "prost-types 0.14.4",
  "rmp-serde",
  "rusqlite",
@@ -8338,9 +8412,9 @@ dependencies = [
 
 [[package]]
 name = "opentelemetry"
-version = "0.31.0"
+version = "0.33.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b84bcd6ae87133e903af7ef497404dda70c60d0ea14895fc8a5e6722754fc2a0"
+checksum = "8c1f1a6ac9c875a4941e4c7c085b61e8f4daa326de03b4701768c3491a6ad9ee"
 dependencies = [
  "futures-core",
  "futures-sink",
@@ -8386,19 +8460,19 @@ dependencies = [
 
 [[package]]
 name = "opentelemetry_sdk"
-version = "0.31.0"
+version = "0.33.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e14ae4f5991976fd48df6d843de219ca6d31b01daaab2dad5af2badeded372bd"
+checksum = "372a912db2974d1990207006fd0e3aa0ef3fd4ad3be43c65cfaadf2206866061"
 dependencies = [
  "futures-channel",
  "futures-executor",
  "futures-util",
- "opentelemetry 0.31.0",
+ "opentelemetry 0.33.1",
  "percent-encoding",
+ "portable-atomic",
  "rand 0.9.5",
  "thiserror 2.0.21",
  "tokio",
- "tokio-stream",
 ]
 
 [[package]]
@@ -10871,8 +10945,10 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chrono",
+ "drasi-computation-transformer-query",
  "drasi-core",
  "drasi-functions-cypher",
+ "drasi-host-sdk",
  "drasi-lib",
  "drasi-middleware",
  "drasi-query-ast",
@@ -11979,12 +12055,12 @@ dependencies = [
 
 [[package]]
 name = "tracing-opentelemetry"
-version = "0.32.1"
+version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ac28f2d093c6c477eaa76b23525478f38de514fa9aeb1285738d4b97a9552fc"
+checksum = "0a904802a1b902f43638b677ff2a650847e3b4404101b6c586d648e8c1e3e8fe"
 dependencies = [
  "js-sys",
- "opentelemetry 0.31.0",
+ "opentelemetry 0.33.1",
  "tracing",
  "tracing-core",
  "tracing-subscriber",

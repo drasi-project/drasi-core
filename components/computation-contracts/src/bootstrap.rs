@@ -8,6 +8,22 @@ use drasi_core_types::interface::StorageDurability;
 use futures_core::Stream;
 use std::pin::Pin;
 pub const MAX_BOOTSTRAP_STATE_BYTES: usize = 65536;
+pub const BOOTSTRAP_STATE_CHECKPOINT: &str = "\0computation:query-bootstrap-state:v1";
+pub const BOOTSTRAP_COMPLETE_CHECKPOINT: &str = "\0computation:processing-bootstrap-complete:v1";
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapStatus {
+    pub configured: bool,
+    pub complete: bool,
+    pub reset_allowed: bool,
+}
+
+#[derive(Default)]
+pub struct BootstrapCompletion {
+    pub watermarks: Vec<BootstrapWatermark>,
+    pub state: Option<Bytes>,
+}
 
 /// Bounded connector handover metadata in the query's own transaction domain.
 /// Writes finish before external initialization effects may begin. State survives
@@ -65,8 +81,7 @@ pub fn validate_bootstrap_watermark(
         );
     }
     anyhow::ensure!(
-        position.map_or(true, |position| position.len()
-            <= crate::MAX_SOURCE_POSITION_BYTES),
+        position.is_none_or(|position| position.len() <= crate::MAX_SOURCE_POSITION_BYTES),
         "bootstrap source position exceeds the supported checkpoint limit"
     );
     Ok(())

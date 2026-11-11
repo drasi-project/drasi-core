@@ -14,14 +14,39 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use drasi_core::interface::{CreatedIndexes, IndexBackendPlugin, IndexError};
+use drasi_core::interface::{
+    CheckpointStore, CreatedIndexes, IndexBackendPlugin, IndexError, SourceCheckpoint,
+};
 use drasi_index_rocksdb::RocksDbIndexProvider;
+use drasi_lib::computation::v1::{PortId, SourceProgressKey};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     io::Write,
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+/// Inspect the actual native checkpoint format, not the retired linked-query keys.
+pub async fn native_source_checkpoints(
+    store: &dyn CheckpointStore,
+) -> Result<BTreeMap<String, SourceCheckpoint>> {
+    let mut sources = BTreeMap::new();
+    for (key, checkpoint) in store.read_all_checkpoints().await? {
+        let Some(encoded) = key.strip_prefix("\0computation:processing-input:v1:") else {
+            continue;
+        };
+        let (_, key): (Option<PortId>, SourceProgressKey) =
+            serde_json::from_str(encoded).context("decode native input checkpoint key")?;
+        if let SourceProgressKey::Source(source) = key {
+            anyhow::ensure!(
+                sources.insert(source, checkpoint).is_none(),
+                "fixture has duplicate source checkpoint owners"
+            );
+        }
+    }
+    Ok(sources)
+}
 
 #[derive(Deserialize, Serialize)]
 struct IndexLocation {
@@ -75,6 +100,10 @@ impl IndexBackendPlugin for ObservedIndexProvider {
 
     fn is_volatile(&self) -> bool {
         self.inner.is_volatile()
+    }
+
+    fn durability(&self) -> drasi_core::interface::StorageDurability {
+        self.inner.durability()
     }
 
     fn supports_atomic_query_output(&self) -> bool {

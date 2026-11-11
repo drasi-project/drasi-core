@@ -249,7 +249,7 @@ impl Fixture {
             .prefix("runtime-")
             .tempdir_in(root)?;
         let wal = Arc::new(RedbWalProvider::new(directory.path().join("wal")));
-        let mut builder = DrasiLib::builder()
+        let mut builder = lib_integration_tests::query_builder()
             .with_id("source-recovery")
             .with_wal_provider(wal.clone())
             .with_index_provider(

@@ -280,10 +280,10 @@ unsafe impl Send for FfiBootstrapResult {}
 unsafe impl Sync for FfiBootstrapResult {}
 
 // ============================================================================
-// Runtime context — host services provided to plugins during initialization
+// Runtime context — host services bound before optional initialization
 // ============================================================================
 
-/// Runtime context passed from host to plugin during initialization.
+/// Runtime context passed from host to plugin during mandatory context binding.
 /// Contains vtable-based callbacks for host services — no trait objects.
 #[repr(C)]
 pub struct FfiRuntimeContext {
@@ -291,9 +291,9 @@ pub struct FfiRuntimeContext {
     pub component_id: FfiStr,
     /// Nullable — not all plugins need state store.
     ///
-    /// **Lifetime: transferred.** ABI 0.17 plugins own the host-allocated vtable
-    /// and release it and its state on the final proxy drop. ABI 0.16 plugins
-    /// retain the original persistent-pointer behavior.
+    /// **Lifetime: transferred.** The plugin owns the host-allocated vtable
+    /// and releases it and its state on the final proxy drop. This preserves
+    /// the ABI 0.17 ownership contract.
     pub state_store: *const StateStoreVtable,
     /// Per-instance log callback (nullable — falls back to global if null).
     pub log_callback: Option<super::callbacks::LogCallbackFn>,
@@ -305,10 +305,10 @@ pub struct FfiRuntimeContext {
     pub lifecycle_ctx: *mut c_void,
     /// Nullable — identity provider for credential injection.
     ///
-    /// **Lifetime: transient.** Valid only for the duration of `initialize_fn`. The plugin
-    /// must copy the vtable fields by value before `initialize_fn` returns (as
+    /// **Lifetime: transient.** Valid only for `bind_runtime_context_fn`. The plugin
+    /// must copy the vtable fields by value before that callback returns (as
     /// `FfiIdentityProviderProxy::new` does); the host frees the vtable struct immediately
-    /// after `initialize_fn` returns. The plugin must not retain this pointer past `initialize_fn`.
+    /// after binding returns. The plugin must not retain this pointer.
     pub identity_provider: *const super::identity::IdentityProviderVtable,
     /// Nullable — snapshot fetcher for on-demand query snapshot access.
     ///
@@ -334,6 +334,10 @@ unsafe impl Sync for FfiRuntimeContext {}
 
 drasi_ffi_primitives::ffi_vtable! {
     /// FFI-safe vtable for a Source instance.
+    ///
+    /// Binding precedes once-per-object initialization. Successful start/stop
+    /// cycles may repeat, but disposal is final and never implies resource
+    /// deletion. `drop_fn` releases memory only; it is not an async cleanup hook.
     pub struct SourceVtable {
         // Identity
         fn id_fn(state: *const) -> FfiStr,
@@ -347,14 +351,23 @@ drasi_ffi_primitives::ffi_vtable! {
         /// Returns the source's best-effort graph schema as JSON, or `null`.
         fn describe_schema_fn(state: *const) -> FfiOwnedStr,
 
-        // Lifecycle
+        // Mandatory wiring and optional instance/activation lifecycle.
+        /// Binds framework services independently of the optional initializer.
+        /// The context is borrowed for this call; its service ownership follows
+        /// `FfiRuntimeContext`. A caught binding panic is returned as an error.
+        fn bind_runtime_context_fn(state: *mut, ctx: *const FfiRuntimeContext) -> FfiResult,
+        /// Once per actual object, after successful context binding.
+        fn initialize_fn(state: *mut) -> FfiResult,
         fn start_fn(state: *mut) -> FfiResult,
         fn stop_fn(state: *mut) -> FfiResult,
+        /// Final retirement, including after failed initialization. Not deletion.
+        fn dispose_fn(state: *mut) -> FfiResult,
+        /// Temporary processing pause; retains the current activation.
+        fn pause_processing_fn(state: *mut) -> FfiResult,
+        fn resume_processing_fn(state: *mut) -> FfiResult,
         fn status_fn(state: *const) -> FfiComponentStatus,
-        fn deprovision_fn(state: *mut) -> FfiResult,
-
-        // Initialization
-        fn initialize_fn(state: *mut, ctx: *const FfiRuntimeContext),
+        /// Explicitly requested destructive cleanup, after stop and before dispose.
+        fn delete_owned_resources_fn(state: *mut) -> FfiResult,
 
         // Subscriptions
         /// Subscribe with query_id, node_labels JSON, relation_labels JSON,
@@ -488,6 +501,10 @@ pub struct FfiBootstrapContext {
 
 drasi_ffi_primitives::ffi_vtable! {
     /// FFI-safe vtable for a Reaction instance.
+    ///
+    /// The host must join result forwarding and complete stop/dispose before
+    /// releasing the object. Cancellation of a synchronous callback's waiter
+    /// is not completion. Creation alone does not advertise live-update support.
     pub struct ReactionVtable {
         // Identity
         fn id_fn(state: *const) -> FfiStr,
@@ -499,17 +516,25 @@ drasi_ffi_primitives::ffi_vtable! {
         /// Returns the reaction's configuration properties as a JSON string.
         fn properties_fn(state: *const) -> FfiOwnedStr,
 
-        // Lifecycle
+        // Mandatory wiring and optional instance/activation lifecycle.
+        /// Binds framework services independently of the optional initializer.
+        /// Service ownership follows `FfiRuntimeContext`.
+        fn bind_runtime_context_fn(state: *mut, ctx: *const FfiRuntimeContext) -> FfiResult,
+        /// Once per actual object, after successful context binding.
+        fn initialize_fn(state: *mut) -> FfiResult,
         fn start_fn(state: *mut) -> FfiResult,
         fn stop_fn(state: *mut) -> FfiResult,
+        /// Final retirement, including after failed initialization. Not deletion.
+        fn dispose_fn(state: *mut) -> FfiResult,
+        fn pause_processing_fn(state: *mut) -> FfiResult,
+        fn resume_processing_fn(state: *mut) -> FfiResult,
         fn status_fn(state: *const) -> FfiComponentStatus,
-        fn deprovision_fn(state: *mut) -> FfiResult,
-
-        // Initialization
-        fn initialize_fn(state: *mut, ctx: *const FfiRuntimeContext),
+        /// Explicitly requested destructive cleanup, after stop and before dispose.
+        fn delete_owned_resources_fn(state: *mut) -> FfiResult,
 
         // Host-managed query subscription forwarding (push-based)
-        /// The host calls this once to start push-based delivery.
+        /// The host calls this once per successful activation to start delivery,
+        /// after joining the previous activation's forwarder.
         /// The plugin spawns a forwarder task that reads from an internal channel
         /// and calls `reaction.enqueue_query_result()` for each item.
         fn start_result_push_fn(state: *mut, callback: FfiResultPushCallbackFn, callback_ctx: *mut c_void),

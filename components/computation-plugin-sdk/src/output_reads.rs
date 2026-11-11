@@ -88,6 +88,134 @@ pub struct WireReplay<'a> {
     pub envelopes: Vec<WireFrame<'a>>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireQuerySnapshot<'a> {
+    #[serde(borrow)]
+    pub snapshot: WireSnapshot<'a>,
+    pub generation: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireQueryReplay<'a> {
+    #[serde(borrow)]
+    pub replay: WireReplay<'a>,
+    pub generation: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireQueryHead {
+    pub cursor: WireCursor,
+    pub generation: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireQueryObservation {
+    pub cursor: WireCursor,
+    pub generation: u64,
+    pub config_hash: u64,
+    pub live_results: u64,
+    pub outbox_size: u64,
+    pub oldest_sequence: Option<u64>,
+}
+
+impl WireQueryObservation {
+    pub fn new(
+        value: &drasi_computation_contracts::QueryOutputObservation,
+    ) -> Result<Self, OutputReadError> {
+        Ok(Self {
+            cursor: WireCursor::new(&value.cursor),
+            generation: value.generation,
+            config_hash: value.config_hash,
+            live_results: u64::try_from(value.live_results)
+                .map_err(|_| OutputReadError::invalid("query cardinality exceeds u64"))?,
+            outbox_size: u64::try_from(value.outbox_size)
+                .map_err(|_| OutputReadError::invalid("query outbox size exceeds u64"))?,
+            oldest_sequence: value.oldest_sequence,
+        })
+    }
+
+    pub fn into_observation(
+        self,
+    ) -> Result<drasi_computation_contracts::QueryOutputObservation, OutputReadError> {
+        Ok(drasi_computation_contracts::QueryOutputObservation {
+            cursor: self.cursor.into_cursor()?,
+            generation: self.generation,
+            config_hash: self.config_hash,
+            live_results: usize::try_from(self.live_results)
+                .map_err(|_| OutputReadError::invalid("query cardinality exceeds this host"))?,
+            outbox_size: usize::try_from(self.outbox_size)
+                .map_err(|_| OutputReadError::invalid("query outbox size exceeds this host"))?,
+            oldest_sequence: self.oldest_sequence,
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireQueryView<'a> {
+    #[serde(borrow)]
+    pub snapshot: WireSnapshot<'a>,
+    #[serde(borrow)]
+    pub retained: WireReplay<'a>,
+    pub generation: u64,
+    pub config_hash: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireSnapshotMetadata {
+    pub cursor: WireCursor,
+    pub dataset: String,
+    pub schema: SchemaDescriptor,
+    pub records: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireReplayMetadata {
+    pub after: WireCursor,
+    pub head: WireCursor,
+    pub envelopes: u64,
+}
+
+/// Metadata for one immutable provider observation, not separately sampled
+/// snapshot/history heads. Counts describe the complete transfer.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum WireReadMetadata {
+    Snapshot(WireSnapshotMetadata),
+    Replay(WireReplayMetadata),
+    QuerySnapshot {
+        snapshot: WireSnapshotMetadata,
+        generation: u64,
+    },
+    QueryReplay {
+        replay: WireReplayMetadata,
+        generation: u64,
+    },
+    QueryView {
+        snapshot: WireSnapshotMetadata,
+        retained: WireReplayMetadata,
+        generation: u64,
+        config_hash: u64,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireReadPage<'a> {
+    pub index: u64,
+    pub done: bool,
+    #[serde(borrow)]
+    pub records: Vec<WireRecord<'a>>,
+    #[serde(borrow)]
+    pub envelopes: Vec<WireFrame<'a>>,
+}
+
 /// Bounds of one non-renewing snapshot/live lease, as nonzero counts and a
 /// positive lifetime. Converted to and validated as `OutputFollowLimits`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,7 +377,7 @@ mod tests {
         GraphProducerIdentity::new(
             "scope".into(),
             "graph".into(),
-            ComponentId::try_new("component").unwrap(),
+            ComponentId::try_new("49a5d640-ec80-4c62-9cdb-1baab036e8be").unwrap(),
             StreamId::try_new("component/out").unwrap(),
             true,
         )
@@ -258,7 +386,7 @@ mod tests {
 
     fn endpoint() -> OutputEndpoint {
         OutputEndpoint::new(
-            ComponentId::try_new("component").unwrap(),
+            ComponentId::try_new("49a5d640-ec80-4c62-9cdb-1baab036e8be").unwrap(),
             PortId::try_new("out").unwrap(),
         )
     }

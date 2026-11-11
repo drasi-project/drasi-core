@@ -12,15 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![deny(missing_docs, clippy::unwrap_used, clippy::expect_used)]
+
+//! Host-owned lifecycle and processing contracts for graph components.
+
 use async_trait::async_trait;
 
-use super::{ChangeEnvelope, ComponentDescriptor, PortId};
+use super::{ComponentDescriptor, PortId};
 
 pub use drasi_computation_contracts::telemetry::ExecutionContext;
 pub use drasi_computation_contracts::{
-    EnvelopeMessage, InputEnvelope, OutputEnvelope, SinkBatching, SinkCompletion, SnapshotConsumer,
-    SourceSchemaReader, WakeupSource,
+    ComponentUpdateData, ComponentUpdateMode, ComponentUpdatePlan, EnvelopeMessage, InputEnvelope,
+    OutputEnvelope, SinkBatching, SinkCompletion, SnapshotConsumer, SourceSchemaReader,
+    WakeupSource,
 };
+
+/// Owner-issued execution intent accompanying a planned reconstruction.
+/// Possessing or serializing this value does not grant configuration authority.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComponentUpdateDirective {
+    /// Stable operation ID from the accepted configuration record.
+    pub operation_id: std::sync::Arc<str>,
+    /// Explicit factory-assessed plan after host capability validation.
+    pub plan: ComponentUpdatePlan,
+}
 
 /// Host-owned component lifecycle, independent of legacy Source/Reaction contexts.
 ///
@@ -32,9 +48,11 @@ pub use drasi_computation_contracts::{
 /// transactional lifecycle; see [`super::ComputationGraph`] for host policy.
 ///
 /// The descriptor must remain unchanged throughout the owned component's life.
-/// No default success methods conceal missing implementation.
+/// Lifecycle defaults do no work. They do not advertise update, reset, deletion,
+/// or externally owned processing guarantees.
 #[async_trait]
 pub trait ComputationComponent: Send + Sync {
+    /// Immutable identity, semantic role and declared ports for this instance.
     fn descriptor(&self) -> &ComponentDescriptor;
     /// Captured at construction, activation and reconfiguration, never per envelope.
     /// Unknown is not a recovery guarantee. Implementations must identify their
@@ -98,7 +116,6 @@ pub trait ComputationComponent: Send + Sync {
     /// do not originate control notifications.
     fn bind_control(&mut self, _control: super::ComponentControl) {}
     /// Bind generation-scoped observation for opt-in query test controls.
-    #[cfg(feature = "test-support")]
     #[doc(hidden)]
     fn bind_query_test_support(
         &mut self,
@@ -115,17 +132,46 @@ pub trait ComputationComponent: Send + Sync {
     fn requires_readiness_confirmation(&self) -> bool {
         false
     }
-    async fn start(&mut self) -> anyhow::Result<()>;
-    async fn stop(&mut self) -> anyhow::Result<()>;
+    /// Initialize this object once after mandatory bindings, before its first start.
+    /// Failed initialization retires the object; it is never retried on that object.
+    async fn initialize(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// Activate owned resources before processing can begin.
+    async fn start(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// Stop and join owned work; an interrupted wait is not completed cleanup.
+    async fn stop(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// Release instance-lifetime resources at final retirement, including after
+    /// failed initialization. Failure retains this object for cleanup retry.
+    /// This does not authorize deletion of persistent state or external artifacts.
+    async fn dispose(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// Pause independently owned processing at a graph-coordinated boundary.
+    async fn pause_processing(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// Resume a temporary processing pause without a new activation or initialization.
+    async fn resume_processing(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
     /// Erase owned state for explicit permanent removal, after stopping work.
     /// Ordinary stop, replacement and instance shutdown do not call this hook.
-    async fn deprovision(&mut self) -> anyhow::Result<()> {
+    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
         anyhow::bail!("this component does not support permanent state removal")
     }
-    /// Called only at a processing boundary when the registered factory explicitly
-    /// supports in-place configuration changes. The descriptor cannot change.
-    async fn reconfigure(&mut self, _context: super::ConstructionContext) -> anyhow::Result<()> {
-        anyhow::bail!("this component does not support in-place reconfiguration")
+    /// Execute a factory-assessed retained-object update after owner acceptance.
+    /// The operation ID is stable across recovery and retry. Implementations must
+    /// safely settle repeated or interrupted execution; the descriptor stays immutable.
+    async fn apply_update(
+        &mut self,
+        _context: super::ComponentUpdateContext,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("this component does not support retained-object updates")
     }
 }
 
@@ -133,14 +179,8 @@ pub trait ComputationComponent: Send + Sync {
 /// Its work runs in an independently scheduled, graph-owned Tokio task.
 #[async_trait]
 pub trait ComputationService: ComputationComponent {
+    /// Drive service work until completion or graph-owned cancellation.
     async fn run(&mut self) -> anyhow::Result<()>;
-
-    /// Called after `run()` is dropped for quiescence. Services with separately
-    /// owned workers must await their pause here and resume them on the next run.
-    /// Services whose work lives entirely in `run()` need no additional action.
-    async fn quiesce(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
 }
 
 /// A producer beside legacy Source. Its descriptor has output ports only.
@@ -216,13 +256,16 @@ pub trait Transformer: ComputationComponent {
     fn has_pending_emissions(&self) -> bool {
         false
     }
+    /// Produce the next bounded emission batch for the current input.
     async fn continue_transform(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
         anyhow::bail!("this transformer has no continuation")
     }
 
+    /// Observe scheduling notifications without requiring another input envelope.
     fn wakeup_source(&self) -> Option<std::sync::Arc<dyn WakeupSource>> {
         None
     }
+    /// Process due work and return its ordered output emissions.
     async fn on_wakeup(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
         anyhow::bail!("this transformer does not implement scheduled processing")
     }
@@ -251,6 +294,7 @@ pub trait EnvelopeSink: ComputationComponent {
     fn batching(&self) -> anyhow::Result<Option<SinkBatching>> {
         Ok(None)
     }
+    /// Handle a host-collected batch at the declared completion boundary.
     async fn handle_batch(&mut self, _inputs: Vec<InputEnvelope>) -> anyhow::Result<()> {
         anyhow::bail!("this sink does not implement host-owned batching")
     }

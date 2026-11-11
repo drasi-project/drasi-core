@@ -8,6 +8,8 @@ description = "DrasiLib example streaming Hyperliquid market data"
 [workspace]
 
 [dependencies]
+drasi-host-sdk = { path = "../../../components/host-sdk" }
+drasi-computation-transformer-query = { path = "../../../components/computation-plugins/transformers/query" }
 drasi-lib = { path = "../../../lib" }
 drasi-source-hyperliquid = { path = "../../../components/sources/hyperliquid" }
 drasi-reaction-log = { path = "../../../components/reactions/log" }

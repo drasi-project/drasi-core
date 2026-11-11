@@ -35,7 +35,7 @@ async fn required_native_metrics_fail_before_a_context_only_constructor() -> any
         .with_plugin_telemetry(Some(bound))
         .in_scope(|| {
             plugin.factories()[0]
-                .create_component(ComponentId::try_new("probe")?, serde_json::json!({}))
+                .create_component(ComponentId::try_new(PROBE_ID)?, serde_json::json!({}))
         });
     let error = result
         .err()

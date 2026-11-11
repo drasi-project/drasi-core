@@ -530,6 +530,7 @@ pub(super) unsafe fn source_lease(
             && owner.request.configuration_version == request.configuration_version
             && owner.request.configuration == request.configuration
             && owner.request.activation_credentials_bound == request.activation_credentials_bound
+            && owner.request.update_directive == request.update_directive
             && owner
                 .request
                 .scope
@@ -576,6 +577,7 @@ unsafe extern "C" fn create_source(
             std::ptr::null(),
             false,
             coordinator,
+            std::ptr::null(),
             out,
         )
     }

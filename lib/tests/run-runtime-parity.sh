@@ -37,7 +37,7 @@ fi
 
 python3 lib/tests/runtime_parity/check_requirements.py || exit 1
 
-for profile in core-types shared-contracts default no-default-features extra-capabilities integration plugin-factories host-sdk native-bridge native-instance-host configuration-store postgres-delivery postgres-transactions postgres-common postgres-native dashboard-lifecycle sse-lifecycle mcp-lifecycle cloudflare-radar-lifecycle open511-lifecycle here-traffic-lifecycle sqlite-lifecycle mysql-lifecycle mysql-common file-lifecycle log-lifecycle profiler-lifecycle http-lifecycle grpc-lifecycle application-lifecycle aws-sqs-lifecycle loki-lifecycle core-transactions rocksdb-backends garnet-backends; do
+for profile in core-types shared-contracts default no-default-features extra-capabilities integration plugin-factories host-sdk native-query native-bridge native-instance-host configuration-store postgres-delivery postgres-transactions postgres-common postgres-native dashboard-lifecycle sse-lifecycle mcp-lifecycle cloudflare-radar-lifecycle open511-lifecycle here-traffic-lifecycle sqlite-lifecycle mysql-lifecycle mysql-common file-lifecycle log-lifecycle profiler-lifecycle http-lifecycle grpc-lifecycle application-lifecycle aws-sqs-lifecycle loki-lifecycle core-transactions rocksdb-backends garnet-backends; do
     package=drasi-lib
     inventory=lib/tests/runtime_parity/original-cases.tsv
     mappings=lib/tests/runtime_parity/case-mappings.tsv
@@ -83,13 +83,22 @@ for profile in core-types shared-contracts default no-default-features extra-cap
             package=drasi-host-sdk
             inventory=/dev/null
             mappings=/dev/null
-            sources=(components/host-sdk/tests/integration_test.rs components/host-sdk/tests/native_computation_pipeline.rs components/host-sdk/tests/native_network_loopback.rs components/host-sdk/tests/native_network_wire.rs components/host-sdk/tests/bootstrap_provider_ffi_test.rs components/host-sdk/tests/lifecycle_observations.rs components/host-sdk/tests/initialization_failure.rs components/host-sdk/tests/native_admission.rs)
-            targets=(--lib --test integration_test --test native_computation_pipeline --test native_network_loopback --test native_network_wire --test bootstrap_provider_ffi_test --test lifecycle_observations --test initialization_failure --test native_admission)
+            sources=(components/host-sdk/tests/integration_test.rs components/host-sdk/tests/native_computation_pipeline.rs components/host-sdk/tests/native_network_loopback.rs components/host-sdk/tests/native_network_wire.rs components/host-sdk/tests/bootstrap_provider_ffi_test.rs components/host-sdk/tests/lifecycle_observations.rs components/host-sdk/tests/initialization_failure.rs components/host-sdk/tests/native_admission.rs components/host-sdk/tests/native_scheduling.rs components/host-sdk/tests/native_view.rs components/host-sdk/tests/reconstruction_recipes.rs)
+            targets=(--lib --test integration_test --test native_computation_pipeline --test native_network_loopback --test native_network_wire --test bootstrap_provider_ffi_test --test lifecycle_observations --test initialization_failure --test native_admission --test native_scheduling --test native_view --test reconstruction_recipes)
             sources+=(components/host-sdk/tests/native_metrics_telemetry.rs components/host-sdk/tests/native_telemetry.rs components/host-sdk/tests/native_execution_context.rs components/host-sdk/tests/logging_policy.rs)
             targets+=(--test native_metrics_telemetry --test native_telemetry --test native_execution_context --test logging_policy)
             sources+=(components/host-sdk/tests/native_handled_branch_latency.rs)
             targets+=(--test native_handled_branch_latency)
             features+=(--features otel-context)
+            test_arguments+=(--test-threads=1)
+            ;;
+        native-query)
+            package=drasi-host-sdk
+            inventory=/dev/null
+            mappings=/dev/null
+            sources=(components/host-sdk/tests/native_query_plugin.rs)
+            targets=(--test native_query_plugin)
+            features+=(--features test-support)
             test_arguments+=(--test-threads=1)
             ;;
         native-bridge)
@@ -406,14 +415,17 @@ for profile in core-types shared-contracts default no-default-features extra-cap
             if (pending != "") finish("unreported");
         }
         { gsub(/\033\[[0-9;]*m/, "") }
-        /Running unittests src\/lib.rs / { abandon(); binary = "lib"; next }
+        /Running unittests src\/lib.rs / { abandon(); failure_report = 0; binary = "lib"; next }
         /Running tests\/[^ ]+\.rs / {
             abandon();
+            failure_report = 0;
             binary = $2;
             sub(/^tests\//, "", binary);
             sub(/\.rs$/, "", binary);
             next;
         }
+        /^failures:$/ { abandon(); failure_report = 1; next }
+        failure_report { next }
         /^test [^ ]+( - should panic)? \.\.\. / {
             abandon();
             split($0, parts, " ");

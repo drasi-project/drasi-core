@@ -14,7 +14,6 @@
 
 use crate::hashing::SpookyHasher;
 use drasi_query_ast::ast::{self, ProjectionClause, QueryPart};
-use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 

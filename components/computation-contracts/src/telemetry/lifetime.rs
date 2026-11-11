@@ -73,29 +73,6 @@ impl TelemetryLifetime {
             return Err(TelemetryError::Retired);
         }
 
-        #[cfg(test)]
-        mod tests {
-            use super::*;
-            #[test]
-            fn parent_revocation_retires_children_without_retaining_replaced_generations() {
-                let parent = TelemetryLifetime::default();
-                let child = parent.child().unwrap();
-                assert!(child.is_active().unwrap());
-                assert!(parent.revoke(|| {}).unwrap());
-                assert!(!child.is_active().unwrap());
-                assert!(matches!(parent.child(), Err(TelemetryError::Retired)));
-                assert!(matches!(
-                    child.with_active(|| Ok(())),
-                    Err(TelemetryError::Retired)
-                ));
-                let parent = TelemetryLifetime::default();
-                for _ in 0..20_000 {
-                    drop(parent.child().unwrap());
-                }
-                assert!(parent.child().unwrap().is_active().unwrap());
-                assert!(parent.0.retirements.lock().unwrap().len() <= 1);
-            }
-        }
         work()
     }
 
@@ -127,6 +104,31 @@ impl TelemetryLifetime {
         }
         listeners.push(listener);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parent_revocation_retires_children_without_retaining_replaced_generations() {
+        let parent = TelemetryLifetime::default();
+        let child = parent.child().unwrap();
+        assert!(child.is_active().unwrap());
+        assert!(parent.revoke(|| {}).unwrap());
+        assert!(!child.is_active().unwrap());
+        assert!(matches!(parent.child(), Err(TelemetryError::Retired)));
+        assert!(matches!(
+            child.with_active(|| Ok(())),
+            Err(TelemetryError::Retired)
+        ));
+        let parent = TelemetryLifetime::default();
+        for _ in 0..20_000 {
+            drop(parent.child().unwrap());
+        }
+        assert!(parent.child().unwrap().is_active().unwrap());
+        assert!(parent.0.retirements.lock().unwrap().len() <= 1);
     }
 }
 

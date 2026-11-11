@@ -4,7 +4,7 @@
 incomplete. No further local or remote database attempts are authorized.**
 
 `drasi-computation-source-mssql` exports `drasi.mssql/changes`, using computation
-ABI **1.0.0**, wire **1**. Static `plugin()` and the `dynamic-plugin` entrypoint
+ABI **2.0.0**, wire **2**. Static `plugin()` and the `dynamic-plugin` entrypoint
 construct the same implementation. Dependencies contain no query runtime,
 parser, legacy SDK or source/reaction adapter.
 

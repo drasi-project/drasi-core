@@ -75,9 +75,13 @@ impl SourceManager {
         self.runtime.source(id).await.ok()
     }
 
-    pub async fn provision_source(&self, source: impl Source + 'static) -> Result<()> {
+    pub async fn provision_source(
+        &self,
+        name: crate::config::ComponentName,
+        source: impl Source + 'static,
+    ) -> Result<()> {
         self.runtime
-            .add_source(Box::new(source), HashMap::new(), false)
+            .add_source(name, Box::new(source), HashMap::new(), false)
             .await?;
         Ok(())
     }
@@ -116,8 +120,14 @@ impl SourceManager {
         self.runtime.remove_component(&id, "source", cleanup).await
     }
 
-    pub async fn update_source(&self, id: String, source: impl Source + 'static) -> Result<()> {
-        self.runtime.update_source(&id, Box::new(source)).await
+    pub async fn update_source(
+        &self,
+        id: String,
+        definition: crate::management::OrdinaryComponentRecord,
+    ) -> Result<()> {
+        self.runtime
+            .update_ordinary_definition(&id, "source", definition)
+            .await
     }
 
     pub async fn start_all(&self) -> Result<()> {

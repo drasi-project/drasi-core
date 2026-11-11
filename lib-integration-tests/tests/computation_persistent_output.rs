@@ -68,7 +68,7 @@ async fn build(
             }),
         },
     )?;
-    let core = DrasiLib::builder()
+    let core = lib_integration_tests::query_builder()
         .with_id(instance)
         .with_source(source)
         .with_query(query)

@@ -1,4 +1,5 @@
 [package]
+rust-version.workspace = true
 name = "lib-integration-tests"
 version = "0.1.0"
 publish = false
@@ -14,8 +15,11 @@ computation-middleware-tests = ["drasi-lib/middleware-unwind"]
 otel-context = ["drasi-lib/otel-context"]
 
 [dependencies]
-# Test dependencies only - this crate has no library code
+# Test dependencies and explicit native query-factory registration.
 drasi-lib = { workspace = true, features = ["test-support"] }
+drasi-host-sdk.workspace = true
+drasi-computation-plugin-sdk.workspace = true
+drasi-computation-transformer-query = { path = "../components/computation-plugins/transformers/query" }
 drasi-core.workspace = true
 drasi-source-postgres.workspace = true
 drasi-source-application.workspace = true
@@ -54,7 +58,7 @@ axum = "0.8"
 tonic = "0.14"
 prost-types = "0.14"
 tokio-stream = { version = "0.1", features = ["net"] }
-opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
-opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace", "testing"] }
-tracing-opentelemetry = { version = "0.32", default-features = false }
+opentelemetry = { version = "=0.33.1", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "=0.33.1", default-features = false, features = ["trace", "testing"] }
+tracing-opentelemetry = { version = "=0.34.0", default-features = false }
 tracing-subscriber = { version = "0.3", features = ["registry"] }

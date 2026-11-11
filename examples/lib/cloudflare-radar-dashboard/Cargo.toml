@@ -22,6 +22,8 @@ description = "DrasiLib example for Cloudflare Radar source"
 [workspace]
 
 [dependencies]
+drasi-host-sdk = { path = "../../../components/host-sdk" }
+drasi-computation-transformer-query = { path = "../../../components/computation-plugins/transformers/query" }
 drasi-lib = { path = "../../../lib" }
 drasi-source-cloudflare-radar = { path = "../../../components/sources/cloudflare-radar" }
 drasi-bootstrap-cloudflare-radar = { path = "../../../components/bootstrappers/cloudflare-radar" }

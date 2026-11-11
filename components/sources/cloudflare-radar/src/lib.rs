@@ -217,8 +217,8 @@ impl Source for CloudflareRadarSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context.clone()).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context.clone()).await;
         if let Some(store) = context.state_store {
             *self.state_store.write().await = Some(store);
             debug!(

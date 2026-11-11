@@ -193,6 +193,7 @@ fn custom_capture_can_disable_logs_without_disabling_traces() {
                         TraceCounter(traces.clone()).with_filter(filter_fn(move |metadata| {
                             metadata.is_span()
                                 && metadata.target() == TELEMETRY_TARGET
+                                && metadata.name() == "query.evaluate"
                                 && policy.allows_span(metadata.name())
                         })),
                     )

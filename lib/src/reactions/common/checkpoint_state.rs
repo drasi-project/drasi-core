@@ -418,7 +418,7 @@ mod tests {
         let (update_tx, _rx) = tokio::sync::mpsc::channel(32);
         let ctx =
             crate::context::ReactionRuntimeContext::new("inst", id, Some(store), update_tx, None);
-        base.initialize(ctx).await;
+        base.bind_runtime_context(ctx).await;
         base
     }
 

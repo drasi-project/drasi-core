@@ -67,16 +67,17 @@ pub struct MsSqlSource {
 }
 
 impl MsSqlSource {
+    pub(crate) fn ports() -> Result<Vec<PortDescriptor>> {
+        Ok(vec![PortDescriptor::new(
+            PortId::try_new("out")?,
+            PortDirection::Output,
+            GraphChangeCodec::schema().descriptor().clone(),
+            PipeRequirements::default(),
+        )])
+    }
+
     pub fn describe(id: ComponentId) -> Result<ComponentDescriptor> {
-        Ok(ComponentDescriptor::try_new(
-            id,
-            vec![PortDescriptor::new(
-                PortId::try_new("out")?,
-                PortDirection::Output,
-                GraphChangeCodec::schema().descriptor().clone(),
-                PipeRequirements::default(),
-            )],
-        )?)
+        Ok(ComponentDescriptor::try_new(id, Self::ports()?)?)
     }
     pub fn new(
         id: ComponentId,

@@ -37,10 +37,16 @@ pub(super) mod consumer_progress_fixture;
 mod consumer_progress_tests;
 #[path = "consumer_tests.rs"]
 pub(super) mod consumer_tests;
+#[path = "deprovision_tests.rs"]
+mod deprovision_tests;
 #[path = "output_read_tests.rs"]
 mod output_read_tests;
 #[path = "port_format_tests.rs"]
 mod port_format_tests;
+#[path = "../../tests/fixtures/native_processing.rs"]
+mod processing_fixture;
+#[path = "processing_tests.rs"]
+mod processing_tests;
 #[path = "snapshot_tests.rs"]
 mod snapshot_tests;
 #[path = "source_schema_tests.rs"]
@@ -104,7 +110,6 @@ impl sdk::Factory for TestFactory {
             }
             ComponentRole::Sink => vec![port(PortDirection::Input)],
             ComponentRole::Service => vec![],
-            ComponentRole::Query => unreachable!(),
         };
         FactoryMetadata {
             implementation: ImplementationIdentity::try_new(self.name, "1").unwrap(),
@@ -576,7 +581,8 @@ async fn real_c_interfaces_preserve_envelopes_configuration_and_service_lifecycl
         .unwrap();
     service.start().await.unwrap();
     service.run().await.unwrap();
-    service.quiesce().await.unwrap();
+    service.pause_processing().await.unwrap();
+    service.resume_processing().await.unwrap();
     assert_eq!(service.configuration().unwrap()["seen"], 1);
     service.stop().await.unwrap();
 }
@@ -748,8 +754,8 @@ async fn host_graph_factories_and_control_progress_while_native_data_is_pending(
     plugin.register_factories(&mut registry).unwrap();
     assert!(plugin.register_factories(&mut registry).is_err());
     let mut graph = ComputationGraph::builder("native-control-test")
-        .component(spec, source)
-        .sink(Box::new(sink))
+        .component(ComponentName::try_new("native").unwrap(), spec, source)
+        .sink(ComponentName::try_new("sink").unwrap(), Box::new(sink))
         .connect(
             EdgeDefinition {
                 from: Endpoint::new(
@@ -783,7 +789,59 @@ async fn host_graph_factories_and_control_progress_while_native_data_is_pending(
 fn strict_metadata_roles_versions_schema_and_required_fields() {
     let plugin = plugin();
     let mut metadata = plugin.metadata().clone();
-    metadata.factories[0].role = ComponentRole::Query;
+    metadata.factories[0].capabilities.semantic_kind = Some(ComponentSemanticKind::Query);
+    assert_ne!(metadata.factories[0].role, ComponentRole::Transformer);
+    assert!(metadata.validate().is_err());
+    let mut json = serde_json::to_value(plugin.metadata()).unwrap();
+    json["factories"][0]["role"] = json!("Query");
+    assert!(serde_json::from_value::<PluginMetadata>(json).is_err());
+    let mut metadata = plugin.metadata().clone();
+    let transformer = metadata
+        .factories
+        .iter_mut()
+        .find(|factory| {
+            factory.role == ComponentRole::Transformer && !factory.capabilities.transactional
+        })
+        .expect("fixture transformer factory");
+    transformer.capabilities.semantic_kind = Some(ComponentSemanticKind::Query);
+    transformer.capabilities.output_progress = Some(OutputProgress::Origin);
+    assert_eq!(
+        transformer.semantic_kind(),
+        ComponentSemanticKind::Query,
+        "a native transformer may declare continuous-query semantics"
+    );
+    let id = ComponentId::try_new("progress-origin").unwrap();
+    let descriptor = transformer.descriptor(id.clone()).unwrap();
+    assert_eq!(descriptor.output_progress(), Some(OutputProgress::Origin));
+    assert!(transformer.validate_instance(&descriptor, &id).is_ok());
+    assert!(transformer
+        .validate_instance(&descriptor.with_output_progress(OutputProgress::Relay), &id)
+        .is_err());
+    metadata.validate().unwrap();
+    let mut json = serde_json::to_value(&metadata).unwrap();
+    let transformer = json["factories"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|factory| factory["role"] == "Transformer")
+        .unwrap();
+    transformer["capabilities"]["output_progress"] = json!("invalid");
+    assert!(serde_json::from_value::<PluginMetadata>(json).is_err());
+    let mut metadata = plugin.metadata().clone();
+    let source = metadata
+        .factories
+        .iter_mut()
+        .find(|factory| factory.role == ComponentRole::Source)
+        .expect("fixture source factory");
+    source.capabilities.output_progress = Some(OutputProgress::Relay);
+    assert!(metadata.validate().is_err());
+    let mut metadata = plugin.metadata().clone();
+    let sink = metadata
+        .factories
+        .iter_mut()
+        .find(|factory| factory.role == ComponentRole::Sink)
+        .expect("fixture sink factory");
+    sink.capabilities.output_progress = Some(OutputProgress::Origin);
     assert!(metadata.validate().is_err());
     let mut metadata = plugin.metadata().clone();
     metadata.factories[0].capabilities.transactional = true;
@@ -805,7 +863,7 @@ fn strict_metadata_roles_versions_schema_and_required_fields() {
         .unwrap();
     spec.configuration_version += 1;
     assert!(ComponentFactory::validate(plugin.factories()[0].as_ref(), &spec).is_err());
-    assert_eq!(drasi_plugin_sdk::ffi::FFI_SDK_VERSION, "0.17.0");
+    assert_eq!(drasi_plugin_sdk::ffi::FFI_SDK_VERSION, "0.18.0");
 }
 
 #[test]
@@ -885,7 +943,7 @@ fn rejects_missing_or_incompatible_native_metadata_before_entry() {
         .unwrap_err_string();
     assert!(error.contains("incompatible native computation ABI header"));
 
-    const UNSUPPORTED_WIRE_MANIFEST: &[u8] = br#"{"abi_version":"1.0.0","wire_version":2,"plugin":{"id":"unsupported-wire-native","version":"1"},"factories":[],"schemas":[]}"#;
+    const UNSUPPORTED_WIRE_MANIFEST: &[u8] = br#"{"abi_version":"2.0.0","wire_version":3,"plugin":{"id":"unsupported-wire-native","version":"1"},"factories":[],"schemas":[]}"#;
     static UNSUPPORTED_WIRE: SharedMetadata = SharedMetadata(abi::Metadata {
         header: abi::Header::new::<abi::Metadata>(),
         target: abi::BorrowedBytes {

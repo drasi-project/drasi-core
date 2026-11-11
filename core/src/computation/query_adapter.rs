@@ -69,6 +69,11 @@ impl QueryInputBatch {
         self
     }
 
+    pub fn with_optional_input_scope(mut self, scope: Option<Arc<str>>) -> Self {
+        self.input_scope = scope;
+        self
+    }
+
     pub fn input_scope(&self) -> Option<&str> {
         self.input_scope.as_deref()
     }
@@ -77,6 +82,74 @@ impl QueryInputBatch {
 impl From<Vec<SourceChange>> for QueryInputBatch {
     fn from(changes: Vec<SourceChange>) -> Self {
         Self::new(changes, ChangeOrdering::EventTime)
+    }
+}
+
+impl QueryEvaluator {
+    /// Evaluate within the caller's actual processing scope. This stages query
+    /// index changes but neither opens nor commits a transaction.
+    pub async fn evaluate_input_batch<const SOURCE_TRANSACTION: bool>(
+        &self,
+        input: QueryInputBatch,
+    ) -> Result<Vec<QueryPartEvaluationContext>> {
+        let results = self
+            .evaluate_changes_with_input_scope(input.changes, input.ordering, input.input_scope)
+            .await?;
+        if SOURCE_TRANSACTION {
+            Ok(crate::query::transaction_results(results).map_err(IndexError::other)?)
+        } else {
+            Ok(results)
+        }
+    }
+
+    async fn evaluate_input_batch_observed<const SOURCE_TRANSACTION: bool>(
+        &self,
+        input: QueryInputBatch,
+        observer: Option<&Arc<dyn super::QueryObserver>>,
+    ) -> Result<Vec<QueryPartEvaluationContext>> {
+        super::observation::observe(
+            observer,
+            super::QueryOperation::Evaluate,
+            Some(input.changes.len()),
+            self.evaluate_input_batch::<SOURCE_TRANSACTION>(input),
+            |results| {
+                Some(
+                    results
+                        .iter()
+                        .filter(|result| !matches!(result, QueryPartEvaluationContext::Noop))
+                        .count(),
+                )
+            },
+        )
+        .await
+    }
+
+    /// Pop and evaluate one future under the caller's processing transaction.
+    pub async fn evaluate_next_future(&self) -> Result<Option<Arc<ComputationFutureResult>>> {
+        self.evaluate_next_future_observed(None).await
+    }
+
+    async fn evaluate_next_future_observed(
+        &self,
+        observer: Option<&Arc<dyn super::QueryObserver>>,
+    ) -> Result<Option<Arc<ComputationFutureResult>>> {
+        let Some(future_ref) = self.future_queue().pop().await? else {
+            return Ok(None);
+        };
+        let source_id = future_ref.element_ref.source_id.clone();
+        Ok(Some(Arc::new(ComputationFutureResult {
+            results: self
+                .evaluate_input_batch_observed::<false>(
+                    vec![SourceChange::Future {
+                        future_ref: future_ref.clone(),
+                    }]
+                    .into(),
+                    observer,
+                )
+                .await?,
+            source_id,
+            future: future_ref,
+        })))
     }
 }
 
@@ -232,34 +305,19 @@ impl ComputationQuery {
         &self,
         input: QueryInputBatch,
     ) -> Result<Vec<QueryPartEvaluationContext>> {
-        Ok(super::observation::observe(
-            self.observer.as_ref(),
-            super::QueryOperation::Evaluate,
-            Some(input.changes.len()),
-            self.inner.evaluate_changes_with_input_scope(
-                input.changes,
-                input.ordering,
-                input.input_scope,
-            ),
-            |results| {
-                Some(
-                    results
-                        .iter()
-                        .filter(|result| !matches!(result, QueryPartEvaluationContext::Noop))
-                        .count(),
-                )
-            },
-        )
-        .await?)
+        self.inner
+            .evaluate_input_batch_observed::<false>(input, self.observer.as_ref())
+            .await
     }
 
     async fn evaluate_source_transaction(
         &self,
         input: QueryInputBatch,
     ) -> Result<Arc<[QueryPartEvaluationContext]>> {
-        let results = self.evaluate_source_changes(input).await?;
-        Ok(super::query_results::transaction_results(results)
-            .map_err(IndexError::other)?
+        Ok(self
+            .inner
+            .evaluate_input_batch_observed::<true>(input, self.observer.as_ref())
+            .await?
             .into())
     }
 
@@ -443,19 +501,9 @@ impl ComputationQuery {
     }
 
     async fn evaluate_due_future(&self) -> Result<Option<Arc<ComputationFutureResult>>> {
-        let Some(future_ref) = self.inner.future_queue().pop().await? else {
-            return Ok(None);
-        };
-        let source_id = future_ref.element_ref.source_id.clone();
-        Ok(Some(Arc::new(ComputationFutureResult {
-            results: self
-                .evaluate_source_change(SourceChange::Future {
-                    future_ref: future_ref.clone(),
-                })
-                .await?,
-            source_id,
-            future: future_ref,
-        })))
+        self.inner
+            .evaluate_next_future_observed(self.observer.as_ref())
+            .await
     }
 
     pub async fn process_due_futures_with_transaction_group<F, Fut>(

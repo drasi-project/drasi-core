@@ -62,7 +62,8 @@ async fn restored_log_waits_for_the_slow_subscriber() -> anyhow::Result<()> {
     let (updates, _observer) = tokio::sync::mpsc::channel(16);
     let mut context = drasi_lib::SourceRuntimeContext::new("fixture", id, None, updates, None);
     context.wal_provider = Some(wal.clone());
-    source.initialize(context).await;
+    source.bind_runtime_context(context).await;
+    source.initialize().await?;
     source.start().await?;
     let settings = |query: &str, sequence| drasi_lib::config::SourceSubscriptionSettings {
         source_id: id.into(),

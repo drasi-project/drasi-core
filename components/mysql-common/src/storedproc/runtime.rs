@@ -66,16 +66,17 @@ impl MySqlStoredProcSink {
             cleanup_required: false,
         })
     }
+    pub fn ports() -> Result<Vec<PortDescriptor>> {
+        Ok(vec![PortDescriptor::new(
+            PortId::try_new("in")?,
+            PortDirection::Input,
+            GraphChangeCodec::schema().descriptor().clone(),
+            PipeRequirements::default(),
+        )])
+    }
+
     pub fn describe(id: ComponentId) -> Result<ComponentDescriptor> {
-        Ok(ComponentDescriptor::try_new(
-            id,
-            vec![PortDescriptor::new(
-                PortId::try_new("in")?,
-                PortDirection::Input,
-                GraphChangeCodec::schema().descriptor().clone(),
-                PipeRequirements::default(),
-            )],
-        )?)
+        Ok(ComponentDescriptor::try_new(id, Self::ports()?)?)
     }
     async fn finish(&mut self) -> Result<()> {
         let result = self

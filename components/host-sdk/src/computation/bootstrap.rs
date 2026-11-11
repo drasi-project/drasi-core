@@ -103,7 +103,8 @@ impl NativeBootstrapFactory {
     ) -> anyhow::Result<Arc<NativeBootstrapProxy>> {
         self.create_bound_provider(id, configuration, scope, progress, None, None)
     }
-    pub(crate) fn create_query_provider(
+    /// Construct a provider bound to the named component's actual host scope.
+    pub fn create_query_provider(
         &self,
         id: ComponentId,
         configuration: serde_json::Value,
@@ -144,6 +145,7 @@ impl NativeBootstrapFactory {
         let request = CreateRequest {
             inputs: Vec::new(),
             activation_credentials_bound: false,
+            update_directive: None,
             id,
             configuration,
             scope,

@@ -733,7 +733,7 @@ async fn build_application(
         query = query.with_result_catalog(catalog)?;
     }
     let mut batch = ComponentBatch::builder()
-        .query(Box::new(query))
+        .transformer(Box::new(query))
         .sink(alerts);
     if let Some((directory, http_port, sse_port)) = plugins {
         #[cfg(feature = "plugins")]
@@ -1131,6 +1131,18 @@ mod tests {
     async fn health_reports_a_failure_even_after_stop_acknowledges_it() -> anyhow::Result<()> {
         let fail = Arc::new(tokio::sync::Notify::new());
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("health-test")
             .with_component_logging(component_logging()?)
             .with_components(
@@ -1193,12 +1205,24 @@ mod tests {
         let (query, results) = low_stock_query().await?;
         let (view, _) = watch::channel(ResultView::default());
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("missing-connection-test")
             .with_component_logging(component_logging()?)
             .with_components(
                 ComponentBatch::builder()
                     .source(Box::new(Inventory::new(&path)?))
-                    .query(Box::new(query))
+                    .transformer(Box::new(query))
                     .sink(Box::new(Alerts {
                         descriptor: descriptor(
                             "alerts",

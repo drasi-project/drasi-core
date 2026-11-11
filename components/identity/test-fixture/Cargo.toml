@@ -13,6 +13,7 @@
 # limitations under the License.
 
 [package]
+rust-version.workspace = true
 name = "drasi-identity-test"
 version.workspace = true
 edition.workspace = true

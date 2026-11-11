@@ -543,17 +543,27 @@ async fn consumer_progress_graph_factory_resolves_the_actual_typed_checkpoint_re
                 binding: "progress".into(),
             })?
             .provide_resource(resource, handle)?
-            .component(specification, factory.clone())
-            .query(Box::new(query(owner).await?))
-            .sink(Box::new(Drain(ComponentDescriptor::try_new(
-                id("drain"),
-                vec![PortDescriptor::new(
-                    PortId::try_new("in")?,
-                    PortDirection::Input,
-                    QueryChangeCodec::schema().descriptor().clone(),
-                    PipeRequirements::default(),
-                )],
-            )?)))
+            .component(
+                ComponentName::try_new("producer")?,
+                specification,
+                factory.clone(),
+            )
+            .transformer(
+                ComponentName::try_new("query")?,
+                Box::new(query(owner).await?),
+            )
+            .sink(
+                ComponentName::try_new("drain")?,
+                Box::new(Drain(ComponentDescriptor::try_new(
+                    id("drain"),
+                    vec![PortDescriptor::new(
+                        PortId::try_new("in")?,
+                        PortDirection::Input,
+                        QueryChangeCodec::schema().descriptor().clone(),
+                        PipeRequirements::default(),
+                    )],
+                )?)),
+            )
             .bind_stream(
                 endpoint("producer", "out"),
                 StreamId::try_new("producer/out")?,
@@ -647,6 +657,7 @@ fn consumer_progress_sdk_rejects_unbound_base_creation_even_without_host_negotia
         let request = sdk::CreateRequest {
             inputs: Vec::new(),
             activation_credentials_bound: false,
+            update_directive: None,
             id: id("producer"),
             implementation: fixture::Factory(ComponentRole::Source, false)
                 .metadata()
@@ -1025,6 +1036,18 @@ mod graph_fanout {
         binding: BindingCase,
     ) -> anyhow::Result<()> {
         let core = drasi_lib::DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id(instance)
             .build()
             .await?;
@@ -1080,15 +1103,18 @@ mod graph_fanout {
             let (send, receive) = mpsc::channel(1);
             sender = Some(send);
             let mut builder = ComputationGraph::builder(graph_id.as_str())
-                .source(Box::new(Input {
-                    descriptor: ComponentDescriptor::try_new(
-                        id("input"),
-                        vec![super::super::port(PortDirection::Output)],
-                    )?,
-                    receiver: receive,
-                    stops: source_stops.clone(),
-                }))
-                .transformer(Box::new(proxy))
+                .source(
+                    ComponentName::try_new("input")?,
+                    Box::new(Input {
+                        descriptor: ComponentDescriptor::try_new(
+                            id("input"),
+                            vec![super::super::port(PortDirection::Output)],
+                        )?,
+                        receiver: receive,
+                        stops: source_stops.clone(),
+                    }),
+                )
+                .transformer(ComponentName::try_new("producer")?, Box::new(proxy))
                 .bind_stream(endpoint("input", "out"), StreamId::try_new("input/out")?)
                 .bind_stream(
                     endpoint("producer", "out"),
@@ -1119,7 +1145,7 @@ mod graph_fanout {
                 .with_source_progress(owner.clone())?;
                 results.push((name.to_owned(), query.results()));
                 builder = builder
-                    .query(Box::new(query))
+                    .transformer(ComponentName::try_new(name)?, Box::new(query))
                     .bind_stream(
                         endpoint(name, "out"),
                         StreamId::try_new(format!("{name}/out"))?,
@@ -1156,10 +1182,12 @@ mod graph_fanout {
                     )?
                 };
                 native_sinks.push((name.to_owned(), sink.inner.clone()));
-                builder = builder.sink(Box::new(sink)).connect(
-                    EdgeDefinition::new(endpoint("producer", "out"), endpoint(name, "in")),
-                    Box::new(BoundedPipeConfig { capacity: 1 }),
-                );
+                builder = builder
+                    .sink(ComponentName::try_new(name)?, Box::new(sink))
+                    .connect(
+                        EdgeDefinition::new(endpoint("producer", "out"), endpoint(name, "in")),
+                        Box::new(BoundedPipeConfig { capacity: 1 }),
+                    );
             }
             for upstream in ["first", "second"] {
                 let schema = QueryChangeCodec::schema();
@@ -1168,19 +1196,22 @@ mod graph_fanout {
                     let (send, receive) = mpsc::channel(4);
                     let stops = Arc::new(AtomicUsize::new(0));
                     builder = builder
-                        .sink(Box::new(Capture {
-                            descriptor: ComponentDescriptor::try_new(
-                                id(&name),
-                                vec![PortDescriptor::new(
-                                    PortId::try_new("in")?,
-                                    PortDirection::Input,
-                                    schema.descriptor().clone(),
-                                    PipeRequirements::default(),
-                                )],
-                            )?,
-                            sender: Some(send),
-                            stops: stops.clone(),
-                        }))
+                        .sink(
+                            ComponentName::try_new(name.as_str())?,
+                            Box::new(Capture {
+                                descriptor: ComponentDescriptor::try_new(
+                                    id(&name),
+                                    vec![PortDescriptor::new(
+                                        PortId::try_new("in")?,
+                                        PortDirection::Input,
+                                        schema.descriptor().clone(),
+                                        PipeRequirements::default(),
+                                    )],
+                                )?,
+                                sender: Some(send),
+                                stops: stops.clone(),
+                            }),
+                        )
                         .connect(
                             EdgeDefinition::new(endpoint(upstream, "out"), endpoint(&name, "in")),
                             Box::new(BoundedPipeConfig { capacity: 1 }),
@@ -1208,7 +1239,10 @@ mod graph_fanout {
                 return Ok::<_, anyhow::Error>(());
             }
             let report = core.add_components(batch?).await?;
-            anyhow::ensure!(report.committed, "{report:?}");
+            anyhow::ensure!(
+                core.desired_configuration()?.revision == report.revision,
+                "{report:?}"
+            );
             anyhow::ensure!(graph_control.desired_snapshot().nodes.len() == initial_nodes + 10);
             core.start().await?;
             for name in ["input", "producer", "first", "second"]
@@ -1451,15 +1485,18 @@ mod graph_fanout {
                         binding: "input-progress".into(),
                     })?
                     .provide_resource(resource, handle)?
-                    .source(Box::new(Input {
-                        descriptor: ComponentDescriptor::try_new(
-                            id("input"),
-                            vec![super::super::port(PortDirection::Output)],
-                        )?,
-                        receiver: receive,
-                        stops: Arc::new(AtomicUsize::new(0)),
-                    }))
-                    .component(specification, factory)
+                    .source(
+                        ComponentName::try_new("input")?,
+                        Box::new(Input {
+                            descriptor: ComponentDescriptor::try_new(
+                                id("input"),
+                                vec![super::super::port(PortDirection::Output)],
+                            )?,
+                            receiver: receive,
+                            stops: Arc::new(AtomicUsize::new(0)),
+                        }),
+                    )
+                    .component(ComponentName::try_new("sink")?, specification, factory)
                     .bind_stream(endpoint("input", "out"), StreamId::try_new("input/out")?)
                     .connect(
                         EdgeDefinition::new(endpoint("input", "out"), endpoint("sink", "in")),

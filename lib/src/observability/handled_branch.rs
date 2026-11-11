@@ -141,8 +141,8 @@ impl GraphTelemetry {
                 required_rows: envelope.changes().operations().len(),
             };
             if let Some(inherited) = context.handled_output() {
-                if self.scope().and_then(super::TelemetryScope::role)
-                    != Some(drasi_computation_contracts::ComponentRole::Query)
+                if self.scope().and_then(super::TelemetryScope::semantic_kind)
+                    != Some(drasi_computation_contracts::ComponentSemanticKind::Query)
                 {
                     anyhow::ensure!(
                         inherited == &output,

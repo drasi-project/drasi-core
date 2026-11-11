@@ -402,6 +402,18 @@ async fn graph_with_options(
     }
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id(INSTANCE)
             .with_components(builder.build()?)
             .build()

@@ -8,6 +8,8 @@ description = "DrasiLib example using Open511 source and bootstrap providers"
 [workspace]
 
 [dependencies]
+drasi-host-sdk = { path = "../../../components/host-sdk" }
+drasi-computation-transformer-query = { path = "../../../components/computation-plugins/transformers/query" }
 anyhow = "1.0"
 drasi-bootstrap-open511 = { path = "../../../components/bootstrappers/open511" }
 drasi-lib = { path = "../../../lib" }

@@ -8,33 +8,40 @@
 //! to the component; a fence ends reads on stop, restart and release.
 
 use super::proxy::{native_operation_cause, RemoteComponent};
+mod recovery;
+mod transfer;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use bytes::Bytes;
 use drasi_computation_plugin_abi::{self as abi, output_reads as ext};
 use drasi_computation_plugin_sdk::{
     metadata::FactoryMetadata,
-    output_reads::{Outcome, WireCursor, WireReplay, WireSnapshot},
+    output_reads::{Outcome, WireCursor, WireQueryHead},
     transport::{checked_table, take_status, Failure, OperationFuture, ReceivedBytes},
 };
 use drasi_lib::computation::v1::*;
 use serde::Deserialize;
 use std::result::Result;
-use std::{
-    collections::HashSet,
-    sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
-    },
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, RwLock,
 };
 use tokio::sync::watch;
+#[cfg(test)]
+use {
+    drasi_computation_plugin_sdk::output_reads::{WireQueryView, WireReplay, WireSnapshot},
+    std::collections::HashSet,
+};
 
 /// Ends reads that straddle a stop/restart (`advance`) or the proxy's release
 /// (`retire`), whatever the native library does.
 pub(super) struct Fence {
     generation: AtomicU64,
     retired: AtomicBool,
+    updating: AtomicBool,
     changed: watch::Sender<()>,
+    recovery_ready: AtomicBool,
+    recovery_changed: watch::Sender<()>,
 }
 
 impl Fence {
@@ -42,18 +49,24 @@ impl Fence {
         Self {
             generation: AtomicU64::new(0),
             retired: AtomicBool::new(false),
+            updating: AtomicBool::new(false),
             changed: watch::channel(()).0,
+            recovery_ready: AtomicBool::new(false),
+            recovery_changed: watch::channel(()).0,
         }
     }
 
     pub(super) fn advance(&self) {
+        self.recovery_ready.store(false, Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.changed.send_modify(|_| ());
+        self.recovery_changed.send_modify(|_| ());
     }
 
     pub(super) fn retire(&self) {
         self.retired.store(true, Ordering::Release);
         self.changed.send_modify(|_| ());
+        self.recovery_changed.send_modify(|_| ());
     }
 
     pub(super) fn enter(&self) -> Result<(u64, watch::Receiver<()>), OutputReadError> {
@@ -61,11 +74,17 @@ impl Fence {
         if self.retired.load(Ordering::Acquire) {
             return Err(OutputReadError::Retired);
         }
+        if self.updating.load(Ordering::Acquire) {
+            return Err(OutputReadError::NotReady(
+                "native output update is not complete".into(),
+            ));
+        }
         Ok((self.generation.load(Ordering::Acquire), changed))
     }
 
     pub(super) fn is_current(&self, generation: u64) -> bool {
         !self.retired.load(Ordering::Acquire)
+            && !self.updating.load(Ordering::Acquire)
             && self.generation.load(Ordering::Acquire) == generation
     }
 }
@@ -101,6 +120,23 @@ impl ReadHandle {
                 &mut operation,
             ))?;
             OperationFuture::new(operation)
+        }
+    }
+
+    fn transfer(&self, code: u32, input: &[u8]) -> Result<Self, Failure> {
+        let table = unsafe { &*self.0.vtable };
+        let begin = table
+            .transfer
+            .ok_or_else(|| Failure::protocol("native output provider omitted bounded transfers"))?;
+        let mut handle = ext::OutputReadHandle::null();
+        unsafe {
+            take_status(begin(
+                self.0.state,
+                code,
+                abi::BorrowedBytes::new(input),
+                &mut handle,
+            ))?;
+            Self::new(handle)
         }
     }
 }
@@ -193,8 +229,14 @@ impl Context {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn snapshot_from(&self, bytes: &[u8]) -> Result<OutputSnapshot, OutputReadError> {
         let wire: WireSnapshot<'_> = self.outcome(bytes)?;
+        self.snapshot_wire(wire)
+    }
+
+    #[cfg(test)]
+    fn snapshot_wire(&self, wire: WireSnapshot<'_>) -> Result<OutputSnapshot, OutputReadError> {
         if &wire.schema != self.schema.descriptor() {
             return Err(invalid(
                 "snapshot schema differs from the declared output schema",
@@ -208,25 +250,11 @@ impl Context {
         let mut seen = HashSet::with_capacity(wire.records.len());
         let mut records = Vec::with_capacity(wire.records.len());
         for record in &wire.records {
-            if record.image != 0 {
-                return Err(invalid(
-                    "snapshot contains a record that is not a full image",
-                ));
-            }
-            let identity =
-                RecordId::try_new(&*record.namespace, Bytes::copy_from_slice(&record.identity))
-                    .map_err(invalid)?;
-            if !seen.insert(identity.clone()) {
+            let value = self.record(record)?;
+            if !seen.insert(value.identity().clone()) {
                 return Err(invalid("snapshot contains a duplicate record identity"));
             }
-            let value = Record::try_new(
-                &self.schema,
-                identity.clone(),
-                RecordImage::Full,
-                Bytes::copy_from_slice(&record.payload),
-            )
-            .map_err(invalid)?;
-            records.push((identity, value));
+            records.push((value.identity().clone(), value));
         }
         OutputSnapshot::try_new(
             cursor,
@@ -236,6 +264,36 @@ impl Context {
         )
     }
 
+    fn record(
+        &self,
+        wire: &drasi_computation_plugin_sdk::output_reads::WireRecord<'_>,
+    ) -> Result<Record, OutputReadError> {
+        if wire.image != 0 {
+            return Err(invalid(
+                "snapshot contains a record that is not a full image",
+            ));
+        }
+        let identity = RecordId::try_new(&*wire.namespace, Bytes::copy_from_slice(&wire.identity))
+            .map_err(invalid)?;
+        Record::try_new(
+            &self.schema,
+            identity,
+            RecordImage::Full,
+            Bytes::copy_from_slice(&wire.payload),
+        )
+        .map_err(invalid)
+    }
+
+    fn envelope(&self, bytes: &[u8]) -> Result<ChangeEnvelope, OutputReadError> {
+        let envelope = self.codec.decode(bytes).map_err(invalid)?;
+        if envelope.changes().schema() != self.schema.descriptor() {
+            return Err(invalid(
+                "replayed envelope has another schema than the output",
+            ));
+        }
+        Ok(envelope)
+    }
+
     fn head_from(&self, bytes: &[u8]) -> Result<OutputCursor, OutputReadError> {
         let wire: WireCursor = self.outcome(bytes)?;
         let head = wire.into_cursor()?;
@@ -243,12 +301,22 @@ impl Context {
         Ok(head)
     }
 
+    #[cfg(test)]
     fn replay_from(
         &self,
         bytes: &[u8],
         after: &OutputCursor,
     ) -> Result<OutputReplay, OutputReadError> {
-        let wire: WireReplay<'_> = self.outcome(bytes).map_err(|error| match error {
+        let wire: WireReplay<'_> = self.replay_outcome(bytes, after)?;
+        self.replay_wire(wire, after)
+    }
+
+    fn replay_outcome<'a, T: Deserialize<'a>>(
+        &self,
+        bytes: &'a [u8],
+        after: &OutputCursor,
+    ) -> Result<T, OutputReadError> {
+        self.outcome(bytes).map_err(|error| match error {
             OutputReadError::Gap { requested, .. } if requested != after.sequence() => {
                 invalid("native replay reported a gap for another cursor")
             }
@@ -260,7 +328,15 @@ impl Context {
                 invalid("native replay reported an inconsistent epoch change")
             }
             error => error,
-        })?;
+        })
+    }
+
+    #[cfg(test)]
+    fn replay_wire(
+        &self,
+        wire: WireReplay<'_>,
+        after: &OutputCursor,
+    ) -> Result<OutputReplay, OutputReadError> {
         if wire.envelopes.len() > ext::MAX_REPLAY_ENVELOPES {
             return Err(invalid("replay exceeds its negotiated envelope bound"));
         }
@@ -272,13 +348,7 @@ impl Context {
         }
         let mut envelopes = Vec::with_capacity(wire.envelopes.len());
         for frame in &wire.envelopes {
-            let envelope = self.codec.decode(&frame.envelope).map_err(invalid)?;
-            if envelope.changes().schema() != self.schema.descriptor() {
-                return Err(invalid(
-                    "replayed envelope has another schema than the output",
-                ));
-            }
-            envelopes.push(envelope);
+            envelopes.push(self.envelope(&frame.envelope)?);
         }
         OutputReplay::try_new(reported_after, head, envelopes)
     }
@@ -289,8 +359,12 @@ struct NativeSnapshotProvider(Reader);
 #[async_trait]
 impl SnapshotProvider for NativeSnapshotProvider {
     async fn snapshot(&self) -> Result<OutputSnapshot, OutputReadError> {
-        let bytes = self.0.read(ext::operation::SNAPSHOT, &[]).await?;
-        self.0.snapshot_from(&bytes)
+        match self.0.transfer(ext::operation::SNAPSHOT, &[], None).await? {
+            transfer::Read::Snapshot(snapshot) => Ok(snapshot),
+            _ => Err(invalid(
+                "native snapshot transfer returned another read kind",
+            )),
+        }
     }
 }
 
@@ -306,8 +380,229 @@ impl ReplayProvider for NativeReplayProvider {
     async fn replay_after(&self, after: &OutputCursor) -> Result<OutputReplay, OutputReadError> {
         let request = encode_bounded_messagepack(&WireCursor::new(after), ext::MAX_REQUEST_BYTES)
             .map_err(invalid)?;
-        let bytes = self.0.read(ext::operation::REPLAY_AFTER, &request).await?;
-        self.0.replay_from(&bytes, after)
+        match self
+            .0
+            .transfer(ext::operation::REPLAY_AFTER, &request, Some(after))
+            .await?
+        {
+            transfer::Read::Replay(replay) => Ok(replay),
+            _ => Err(invalid("native replay transfer returned another read kind")),
+        }
+    }
+}
+
+struct NativeQueryProvider {
+    reader: Reader,
+    description: RwLock<drasi_computation_contracts::QueryDescription>,
+    observations: bool,
+    recovery_views: bool,
+}
+
+impl NativeQueryProvider {
+    fn current_description(
+        &self,
+    ) -> Result<drasi_computation_contracts::QueryDescription, OutputReadError> {
+        self.description
+            .read()
+            .map(|description| description.clone())
+            .map_err(|_| invalid("native query description poisoned"))
+    }
+
+    fn validate_cursor(&self, cursor: &OutputCursor) -> Result<(), OutputReadError> {
+        self.reader.check_cursor(cursor)?;
+        let description = self.current_description()?;
+        if cursor.producer().stream() != &description.output_stream
+            || cursor.producer().graph_id() != description.graph_id
+            || cursor.producer().persistent() == description.volatile
+        {
+            return Err(invalid(
+                "query output disagrees with its construction description",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_replay(
+        &self,
+        replay: &OutputReplay,
+        generation: u64,
+    ) -> Result<(), OutputReadError> {
+        self.validate_cursor(replay.head())?;
+        let producer = replay.head().producer();
+        let description = self.current_description()?;
+        for envelope in replay.envelopes() {
+            let identity = QueryRecoveryIdentity::from_query_output(envelope).map_err(invalid)?;
+            let progress = GraphProducerProgress::from_envelope(envelope)
+                .map_err(invalid)?
+                .ok_or_else(|| invalid("query replay has no producer progress"))?;
+            if identity.configuration_hash() != description.configuration_hash
+                || identity.graph_id() != producer.graph_id()
+                || identity.construction_scope() != producer.construction_scope()
+                || identity.query_id() != producer.component_id().as_str()
+                || identity.incarnation()
+                    != (!producer.persistent()).then_some(producer.incarnation())
+                || QueryChangeCodec::query_generation(envelope).map_err(invalid)? != generation
+                || QueryChangeCodec::query_sequence(envelope).map_err(invalid)?
+                    != progress.sequence()
+                || envelope.system().sequence() != progress.sequence()
+            {
+                return Err(invalid(
+                    "query replay has inconsistent identity, configuration or generation",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn view_from(
+        &self,
+        bytes: &[u8],
+    ) -> Result<(OutputCursor, drasi_computation_contracts::QueryOutputView), OutputReadError> {
+        let wire: WireQueryView<'_> = self.reader.outcome(bytes)?;
+        let snapshot = self.reader.snapshot_wire(wire.snapshot)?;
+        let after = wire.retained.after.clone().into_cursor()?;
+        let replay = self.reader.replay_wire(wire.retained, &after)?;
+        self.view(snapshot, replay, wire.generation, wire.config_hash)
+    }
+
+    fn view(
+        &self,
+        snapshot: OutputSnapshot,
+        replay: OutputReplay,
+        generation: u64,
+        config_hash: u64,
+    ) -> Result<(OutputCursor, drasi_computation_contracts::QueryOutputView), OutputReadError> {
+        self.validate_cursor(snapshot.cursor())?;
+        let producer = snapshot.cursor().producer();
+        let description = self.current_description()?;
+        if config_hash != description.configuration_hash {
+            return Err(invalid("query view has inconsistent configuration"));
+        }
+        if replay.head() != snapshot.cursor() {
+            return Err(invalid(
+                "query view snapshot and history have different heads",
+            ));
+        }
+        self.validate_replay(&replay, generation)?;
+        let view = drasi_computation_contracts::QueryOutputView {
+            snapshot: QueryResultSnapshot {
+                projector: ResultNodeProjector::try_new(
+                    snapshot.dataset(),
+                    description.execution.result.label.as_deref(),
+                )
+                .map_err(invalid)?,
+                as_of_sequence: snapshot.cursor().sequence(),
+                generation,
+                rows: snapshot.records().clone(),
+            },
+            retained: replay.into_envelopes(),
+            config_hash,
+            incarnation: (!producer.persistent()).then_some(producer.incarnation()),
+        };
+        Ok((snapshot.cursor().clone(), view))
+    }
+}
+
+#[async_trait]
+impl drasi_computation_contracts::QueryViewProvider for NativeQueryProvider {
+    fn description(&self) -> drasi_computation_contracts::QueryDescription {
+        self.description
+            .read()
+            .expect("native query description poisoned")
+            .clone()
+    }
+
+    fn supports_observations(&self) -> bool {
+        self.observations
+    }
+
+    fn supports_recovery_views(&self) -> bool {
+        self.recovery_views
+    }
+
+    fn recovery_reader(
+        self: Arc<Self>,
+    ) -> Option<Arc<dyn drasi_computation_contracts::QueryRecoveryReader>> {
+        self.recovery_views
+            .then_some(self)
+            .map(|reader| reader as Arc<dyn drasi_computation_contracts::QueryRecoveryReader>)
+    }
+
+    async fn query_recovery_observation(
+        &self,
+    ) -> Result<drasi_computation_contracts::QueryOutputObservation, OutputReadError> {
+        self.require_recovery()?;
+        self.read_observation(ext::operation::QUERY_RECOVERY_OBSERVATION)
+            .await
+    }
+
+    async fn query_recovery_view(
+        &self,
+    ) -> Result<(OutputCursor, drasi_computation_contracts::QueryOutputView), OutputReadError> {
+        self.require_recovery()?;
+        self.read_view(ext::operation::QUERY_RECOVERY_VIEW).await
+    }
+
+    async fn query_observation(
+        &self,
+    ) -> Result<drasi_computation_contracts::QueryOutputObservation, OutputReadError> {
+        if !self.observations {
+            return Err(invalid("query observations were not negotiated"));
+        }
+        self.read_observation(ext::operation::QUERY_OBSERVATION)
+            .await
+    }
+
+    async fn query_head(&self) -> Result<(OutputCursor, u64), OutputReadError> {
+        let bytes = self.reader.read(ext::operation::QUERY_HEAD, &[]).await?;
+        let wire: WireQueryHead = self.reader.outcome(&bytes)?;
+        let cursor = wire.cursor.into_cursor()?;
+        self.validate_cursor(&cursor)?;
+        Ok((cursor, wire.generation))
+    }
+
+    async fn query_snapshot(&self) -> Result<(OutputSnapshot, u64), OutputReadError> {
+        match self
+            .reader
+            .transfer(ext::operation::QUERY_SNAPSHOT, &[], None)
+            .await?
+        {
+            transfer::Read::QuerySnapshot(snapshot, generation) => {
+                self.validate_cursor(snapshot.cursor())?;
+                Ok((snapshot, generation))
+            }
+            _ => Err(invalid(
+                "native query snapshot transfer returned another read kind",
+            )),
+        }
+    }
+
+    async fn query_view(
+        &self,
+    ) -> Result<(OutputCursor, drasi_computation_contracts::QueryOutputView), OutputReadError> {
+        self.read_view(ext::operation::QUERY_VIEW).await
+    }
+
+    async fn query_replay(
+        &self,
+        after: &OutputCursor,
+    ) -> Result<(OutputReplay, u64), OutputReadError> {
+        let request = encode_bounded_messagepack(&WireCursor::new(after), ext::MAX_REQUEST_BYTES)
+            .map_err(invalid)?;
+        match self
+            .reader
+            .transfer(ext::operation::QUERY_REPLAY, &request, Some(after))
+            .await?
+        {
+            transfer::Read::QueryReplay(replay, generation) => {
+                self.validate_replay(&replay, generation)?;
+                Ok((replay, generation))
+            }
+            _ => Err(invalid(
+                "native query replay transfer returned another read kind",
+            )),
+        }
     }
 }
 
@@ -315,17 +610,20 @@ impl ReplayProvider for NativeReplayProvider {
 pub(super) struct NativeOutputReads {
     fence: Arc<Fence>,
     readers: OutputReaders,
+    queries: std::collections::BTreeMap<PortId, Arc<NativeQueryProvider>>,
 }
 
 impl NativeOutputReads {
     /// Open exactly the providers factory metadata declares. A declared provider
     /// the constructed component does not serve fails construction.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn bind(
-        extension: Option<ext::PluginOutputReadsV1>,
-        follow: Option<abi::output_follow::PluginOutputFollowV1>,
+        extension: Option<ext::PluginOutputReadsV2>,
+        follow: Option<abi::output_follow::PluginOutputFollowV2>,
         component: &Arc<RemoteComponent>,
         descriptor: &ComponentDescriptor,
         metadata: &FactoryMetadata,
+        queries: &std::collections::BTreeMap<PortId, drasi_computation_contracts::QueryDescription>,
         schemas: &[Arc<Schema>],
         codec: &Arc<BinaryEnvelopeCodec>,
     ) -> anyhow::Result<Option<Self>> {
@@ -390,17 +688,96 @@ impl NativeOutputReads {
             )?;
             readers = readers.with_snapshot_follow(port.clone(), Arc::new(provider));
         }
+        let mut query_providers = std::collections::BTreeMap::new();
+        for port in &capabilities.output_queries {
+            let description = queries
+                .get(port)
+                .context("native query output omitted its construction description")?
+                .clone();
+            let reader = open(port, ext::capability::QUERY, OutputCapability::Snapshot)?;
+            let provider = Arc::new(NativeQueryProvider {
+                reader,
+                description: RwLock::new(description),
+                observations: capabilities.query_observations,
+                recovery_views: capabilities.query_recovery_views,
+            });
+            readers = readers.with_query(port.clone(), provider.clone());
+            query_providers.insert(port.clone(), provider);
+        }
         readers.validate(descriptor)?;
-        Ok(Some(Self { fence, readers }))
+        Ok(Some(Self {
+            fence,
+            readers,
+            queries: query_providers,
+        }))
+    }
+
+    pub(super) fn refresh_queries(
+        &self,
+        descriptions: &std::collections::BTreeMap<
+            PortId,
+            drasi_computation_contracts::QueryDescription,
+        >,
+        data: ComponentUpdateData,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.queries.keys().eq(descriptions.keys()),
+            "native update changed its declared query readers"
+        );
+        let mut descriptions = self
+            .queries
+            .values()
+            .zip(descriptions.values())
+            .map(|(provider, proposed)| {
+                let current = provider
+                    .description
+                    .write()
+                    .map_err(|_| anyhow::anyhow!("native query description poisoned"))?;
+                anyhow::ensure!(
+                    current.graph_id == proposed.graph_id
+                        && current.output_stream == proposed.output_stream
+                        && current.volatile == proposed.volatile
+                        && (data != ComponentUpdateData::Preserve
+                            || current.configuration_hash == proposed.configuration_hash),
+                    "native update changed the identity or preservation contract of its query output"
+                );
+                Ok((current, proposed))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        for (current, proposed) in &mut descriptions {
+            **current = (*proposed).clone();
+        }
+        Ok(())
     }
 
     pub(super) fn readers(&self) -> OutputReaders {
         self.readers.clone()
     }
 
+    pub(super) fn begin_update(&self) {
+        self.fence.updating.store(true, Ordering::Release);
+        self.fence.advance();
+    }
+
+    pub(super) fn finish_update(&self) {
+        self.fence.generation.fetch_add(1, Ordering::AcqRel);
+        self.fence.updating.store(false, Ordering::Release);
+        self.fence.changed.send_modify(|_| ());
+        self.published();
+    }
+
     /// Stop/restart: reads begun before this call can no longer succeed.
     pub(super) fn advance(&self) {
         self.fence.advance();
+    }
+
+    pub(super) fn recovery_ready(&self) {
+        self.fence.recovery_ready.store(true, Ordering::Release);
+        self.published();
+    }
+
+    pub(super) fn published(&self) {
+        self.fence.recovery_changed.send_modify(|_| ());
     }
 
     /// Proxy release: every current and future read reports `Retired`.
@@ -418,6 +795,29 @@ mod tests {
         wire,
     };
     use std::{borrow::Cow, collections::BTreeMap, sync::atomic::AtomicUsize};
+
+    #[test]
+    fn native_update_fence_blocks_reads_until_metadata_is_refreshed() -> anyhow::Result<()> {
+        let fence = Arc::new(Fence::new());
+        let readers = NativeOutputReads {
+            fence: fence.clone(),
+            readers: OutputReaders::default(),
+            queries: BTreeMap::new(),
+        };
+        let (before, _) = fence.enter()?;
+        readers.begin_update();
+        assert!(matches!(fence.enter(), Err(OutputReadError::NotReady(_))));
+        assert!(!fence.is_current(before));
+        readers.refresh_queries(&BTreeMap::new(), ComponentUpdateData::Preserve)?;
+        readers.finish_update();
+        let (after, _) = fence.enter()?;
+        assert_ne!(before, after);
+        assert!(fence.is_current(after));
+        readers.retire();
+        readers.finish_update();
+        assert!(matches!(fence.enter(), Err(OutputReadError::Retired)));
+        Ok(())
+    }
 
     struct Scenario {
         reply: Vec<u8>,
@@ -444,9 +844,13 @@ mod tests {
         header: abi::Header::new::<ext::OutputReadVTable>(),
         release: Some(fake_release),
         request: Some(fake_request),
+        transfer: None,
     };
 
-    fn reader(reply: Vec<u8>, capability: OutputCapability) -> (Reader, Arc<AtomicUsize>) {
+    pub(super) fn reader(
+        reply: Vec<u8>,
+        capability: OutputCapability,
+    ) -> (Reader, Arc<AtomicUsize>) {
         let released = Arc::new(AtomicUsize::new(0));
         let state = Box::into_raw(Box::new(Scenario {
             reply,
@@ -479,7 +883,7 @@ mod tests {
         )
     }
 
-    fn producer(component: &str) -> GraphProducerIdentity {
+    pub(super) fn producer(component: &str) -> GraphProducerIdentity {
         GraphProducerIdentity::new(
             "scope".into(),
             "graph".into(),
@@ -488,6 +892,134 @@ mod tests {
             true,
         )
         .unwrap()
+    }
+
+    fn query_provider() -> NativeQueryProvider {
+        let (reader, _) = reader(Vec::new(), OutputCapability::Snapshot);
+        NativeQueryProvider {
+            reader,
+            observations: false,
+            recovery_views: false,
+            description: RwLock::new(drasi_computation_contracts::QueryDescription {
+                graph_id: "graph".into(),
+                query: "MATCH (n) RETURN n".into(),
+                language: ComputationQueryLanguage::Cypher,
+                execution: QueryExecutionSettings::default(),
+                output_stream: StreamId::try_new("component/out").unwrap(),
+                outbox_capacity: std::num::NonZeroUsize::new(8).unwrap(),
+                bootstrap: false,
+                auto_reset: false,
+                volatile: false,
+                configuration_hash: 17,
+            }),
+        }
+    }
+
+    fn query_envelope(
+        producer: &GraphProducerIdentity,
+        scope: &str,
+        hash: u64,
+        generation: u64,
+    ) -> ChangeEnvelope {
+        let component = producer.component_id();
+        let mut envelope = QueryChangeCodec::encode_evaluation(
+            None,
+            component,
+            SystemMetadata::new(producer.stream().clone(), 1),
+            &ResultNodeProjector::try_new("dataset", None).unwrap(),
+            &[
+                drasi_core::evaluation::context::QueryPartEvaluationContext::Adding {
+                    after: BTreeMap::from([("value".into(), serde_json::json!(1).into())]),
+                    row_signature: 1,
+                },
+            ],
+            QueryOutputMetadata {
+                query_id: component.to_string(),
+                source_id: None,
+                timestamp: "2026-01-01T00:00:00Z".parse().unwrap(),
+                metadata: Default::default(),
+                profiling: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        QueryRecoveryIdentity::try_new(producer.graph_id(), component.clone(), hash, None)
+            .unwrap()
+            .with_construction_scope(scope)
+            .unwrap()
+            .annotate(&mut envelope, component)
+            .unwrap();
+        QueryChangeCodec::set_generation(&mut envelope, component, generation).unwrap();
+        GraphProducerProgress::annotate(&mut envelope, producer, 1).unwrap();
+        envelope
+    }
+
+    #[test]
+    fn query_replay_rejects_mismatched_metadata_and_transport_sequences() {
+        let provider = query_provider();
+        let owner = producer("component");
+        let after = OutputCursor::try_new(owner.clone(), 0).unwrap();
+        let replay = |envelope| {
+            OutputReplay::try_new(after.clone(), after.at_sequence(1), vec![envelope]).unwrap()
+        };
+        let valid = query_envelope(&owner, "scope", 17, 3);
+        assert!(provider.validate_replay(&replay(valid.clone()), 3).is_ok());
+        for (name, envelope) in [
+            ("configuration", query_envelope(&owner, "scope", 18, 3)),
+            ("scope", query_envelope(&owner, "another-scope", 17, 3)),
+            ("generation", query_envelope(&owner, "scope", 17, 4)),
+            ("transport sequence", valid.reemit(77).unwrap()),
+        ] {
+            assert!(
+                matches!(
+                    provider.validate_replay(&replay(envelope), 3),
+                    Err(OutputReadError::Invalid(_))
+                ),
+                "{name} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn query_view_rejects_incoherent_heads_and_configuration() {
+        let provider = query_provider();
+        let head = OutputCursor::try_new(producer("component"), 0).unwrap();
+        let reply = |snapshot_head: &OutputCursor, replay_head: &OutputCursor, hash| {
+            wire::encode(&Outcome::Ok(WireQueryView {
+                snapshot: WireSnapshot {
+                    cursor: WireCursor::new(snapshot_head),
+                    dataset: "dataset".into(),
+                    schema: GraphChangeCodec::schema().descriptor().clone(),
+                    records: Vec::new(),
+                },
+                retained: WireReplay {
+                    after: WireCursor::new(replay_head),
+                    head: WireCursor::new(replay_head),
+                    envelopes: Vec::new(),
+                },
+                generation: 3,
+                config_hash: hash,
+            }))
+            .unwrap()
+        };
+        let (_, view) = provider.view_from(&reply(&head, &head, 17)).unwrap();
+        assert_eq!(view.snapshot.generation, 3);
+        assert_eq!(view.config_hash, 17);
+        assert_eq!(view.incarnation, None);
+        for bytes in [
+            reply(&head, &head.at_sequence(1), 17),
+            reply(&head, &head, 18),
+            reply(
+                &head,
+                &OutputCursor::try_new(producer("component"), 0).unwrap(),
+                17,
+            ),
+        ] {
+            assert!(matches!(
+                provider.view_from(&bytes),
+                Err(OutputReadError::Invalid(_))
+            ));
+        }
     }
 
     fn envelope(identity: &GraphProducerIdentity, logical: u64) -> ChangeEnvelope {

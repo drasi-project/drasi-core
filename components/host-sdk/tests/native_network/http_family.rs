@@ -499,6 +499,18 @@ async fn native_http_bootstrap_oauth_pagination_retry_and_live_update_share_one_
         let native = family_plugin(drasi_computation_bootstrap_http::HTTP_BOOTSTRAP, linked)?;
         assert!(native.factories().is_empty());
         let core = drasi_lib::DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("http-family")
             .build()
             .await?;

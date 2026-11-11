@@ -3,12 +3,13 @@
 
 use super::*;
 use crate::computation::v1::{
-    ChangeSet, ComponentDescriptor, ComputationComponent, ComputationGraph, EdgeDefinition,
-    Endpoint, EnvelopeSink, EnvelopeSource, FailurePhase, GraphChangeCodec, GraphError,
-    GraphProducerIdentity, GraphProducerProgress, GraphState, LegacyIndexProviderAdapter,
-    OutputEnvelope, PipeRequirements, PortDescriptor, PortDirection, QosChannel,
-    QosChannelDefinition, QueryChangeCodec, ResourceCleanup, ResourceId, ResourceOwnership,
-    ResourceRole, ResourceSpecification, RetentionPolicy, SinkCompletion, SubscriptionStart,
+    ChangeEnvelope, ChangeOperation, ChangeSet, ComponentDescriptor, ComponentId,
+    ComputationComponent, ComputationGraph, EdgeDefinition, Endpoint, EnvelopeSink, EnvelopeSource,
+    FailurePhase, GraphChangeCodec, GraphError, GraphProducerIdentity, GraphProducerProgress,
+    GraphState, LegacyIndexProviderAdapter, OutputEnvelope, PipeRequirements, PortDescriptor,
+    PortDirection, QosChannel, QosChannelDefinition, ResourceCleanup, ResourceId,
+    ResourceOwnership, ResourceRole, ResourceSpecification, RetentionPolicy, SinkCompletion,
+    SubscriptionStart,
 };
 use drasi_core::{
     computation::{ComputationIndexProvider, ComputationResource, TransactionDomain},
@@ -694,11 +695,14 @@ async fn graph(
             binding: "pipe".into(),
         })?
         .provide_resource(resource.clone(), channel.resource())?
-        .source(Box::new(Source {
-            descriptor: descriptor("producer", "out", PortDirection::Output)?,
-            batch,
-        }))
-        .sink(sink)
+        .source(
+            super::super::ComponentName::try_new("producer")?,
+            Box::new(Source {
+                descriptor: descriptor("producer", "out", PortDirection::Output)?,
+                batch,
+            }),
+        )
+        .sink(super::super::ComponentName::try_new("sink")?, sink)
         .bind_stream(source.clone(), definition.stream.clone())
         .connect(
             EdgeDefinition::new(

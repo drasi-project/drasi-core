@@ -20,14 +20,6 @@
 //! configuration object. These are the existing Source/Reaction-family
 //! interfaces. Native dynamic bootstrap providers use `NativeBootstrapProvider`
 //! from `drasi-computation-plugin-sdk`.
-//!
-//! # Included Providers
-//!
-//! - [`ComponentGraphBootstrapProvider`]: Bootstraps from a [`ComponentGraphView`](crate::ComponentGraphView) snapshot
-//!   for the built-in component graph source.
-
-pub mod component_graph;
-pub use component_graph::ComponentGraphBootstrapProvider;
 
 use anyhow::Result;
 use async_trait::async_trait;

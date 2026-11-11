@@ -45,6 +45,18 @@ async fn separately_assembled_pipelines_share_one_root_without_helper_collisions
                 .build()
         };
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("shared-root-pipelines")
             .with_source(source)
             .with_query(query("ordinary"))
@@ -187,6 +199,18 @@ async fn scenario() {
         .await
         .expect("legacy receiver");
     let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("parallel-instance")
         .with_source(orders)
         .with_source(customers)
@@ -204,6 +228,18 @@ async fn scenario() {
             .expect("ordinary component creation");
     }
     let native_core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("native-instance")
         .build()
         .await
@@ -275,7 +311,9 @@ async fn scenario() {
     native_core
         .add_components(graph)
         .await
-        .expect("register graph");
+        .expect("register graph")
+        .ensure_committed()
+        .expect("desired topology committed");
     drasi
         .start()
         .await

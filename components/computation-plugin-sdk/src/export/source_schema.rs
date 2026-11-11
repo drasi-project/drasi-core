@@ -4,7 +4,10 @@
 use super::*;
 use drasi_computation_contracts::{encode_bounded_messagepack, SourceSchemaReader};
 use std::{
-    sync::{atomic::AtomicU64, Mutex},
+    sync::{
+        atomic::{AtomicU64, AtomicUsize},
+        Mutex,
+    },
     time::Duration,
 };
 
@@ -21,7 +24,9 @@ pub(super) struct SchemaState {
     reader: Arc<dyn SourceSchemaReader>,
     lifecycle: Mutex<(u64, bool)>,
     busy: AtomicU64,
+    inflight: AtomicUsize,
     changed: tokio::sync::watch::Sender<()>,
+    quiescence: tokio::sync::watch::Sender<()>,
 }
 
 impl SchemaState {
@@ -30,7 +35,9 @@ impl SchemaState {
             reader,
             lifecycle: Mutex::new((0, false)),
             busy: AtomicU64::new(0),
+            inflight: AtomicUsize::new(0),
             changed: tokio::sync::watch::channel(()).0,
+            quiescence: tokio::sync::watch::channel(()).0,
         })
     }
 
@@ -58,6 +65,14 @@ impl SchemaState {
         self.changed.send_modify(|_| ());
     }
 
+    pub(super) async fn wait_quiescent(&self) -> anyhow::Result<()> {
+        let mut changed = self.quiescence.subscribe();
+        while self.inflight.load(Ordering::Acquire) != 0 {
+            changed.changed().await?;
+        }
+        Ok(())
+    }
+
     fn claim(self: &Arc<Self>) -> Result<(ReadGuard, tokio::sync::watch::Receiver<()>), Failure> {
         let lifecycle = self
             .lifecycle
@@ -77,6 +92,7 @@ impl SchemaState {
                     "native source schema read is already active",
                 )
             })?;
+        self.inflight.fetch_add(1, Ordering::AcqRel);
         Ok((
             ReadGuard {
                 state: self.clone(),
@@ -117,6 +133,8 @@ impl Drop for ReadGuard {
             Ordering::AcqRel,
             Ordering::Acquire,
         );
+        self.state.inflight.fetch_sub(1, Ordering::AcqRel);
+        self.state.quiescence.send_modify(|_| ());
     }
 }
 
@@ -137,6 +155,7 @@ unsafe extern "C" fn begin(raw: *mut c_void, out: *mut abi::OperationHandle) -> 
         if instance.damaged.is_damaged() {
             return Err(Failure::panicked());
         }
+        instance.administration.check_processing()?;
         let state = instance.source_schema.as_ref().ok_or_else(|| {
             Failure::new(
                 abi::status::UNSUPPORTED,

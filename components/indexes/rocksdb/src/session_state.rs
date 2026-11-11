@@ -17,7 +17,37 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::IndexDb;
 use async_trait::async_trait;
 use drasi_core::interface::{IndexError, SessionControl};
-use rocksdb::{IteratorMode, Transaction, WriteBatchWithTransaction};
+use rocksdb::{AsColumnFamilyRef, Direction, IteratorMode, Transaction, WriteBatchWithTransaction};
+
+pub(crate) fn delete_transaction_prefix(
+    transaction: &Transaction<'_, IndexDb>,
+    column: &impl AsColumnFamilyRef,
+    prefix: &[u8],
+) -> Result<(), IndexError> {
+    loop {
+        let mut keys = Vec::new();
+        {
+            let entries =
+                transaction.iterator_cf(column, IteratorMode::From(prefix, Direction::Forward));
+            for entry in entries.take(256) {
+                let (key, _) = entry.map_err(IndexError::other)?;
+                if !key.starts_with(prefix) {
+                    break;
+                }
+                keys.push(key);
+            }
+        }
+        if keys.is_empty() {
+            return Ok(());
+        }
+        // A transaction mutation invalidates its iterator, including borrowed keys.
+        for key in keys {
+            transaction
+                .delete_cf(column, key)
+                .map_err(IndexError::other)?;
+        }
+    }
+}
 
 /// Groups the active transaction and nesting depth under a single mutex.
 ///
@@ -199,10 +229,7 @@ impl RocksDbSessionState {
         for name in names {
             let cf = self.db.cf_handle(name).ok_or(IndexError::CorruptedData)?;
             if let Some(txn) = &guard.txn {
-                for entry in txn.iterator_cf(&cf, IteratorMode::Start) {
-                    let (key, _) = entry.map_err(IndexError::other)?;
-                    txn.delete_cf(&cf, key).map_err(IndexError::other)?;
-                }
+                delete_transaction_prefix(txn, &cf, b"")?;
             } else {
                 for entry in self.db.iterator_cf(&cf, IteratorMode::Start) {
                     let (key, _) = entry.map_err(IndexError::other)?;

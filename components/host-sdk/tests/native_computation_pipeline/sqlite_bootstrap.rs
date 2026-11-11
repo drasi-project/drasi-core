@@ -217,6 +217,18 @@ async fn hosted_file_snapshot() -> Result<()> {
          INSERT INTO items VALUES(1,X'61','before'),(2,'YQ==','other');",
     )?;
     let core = drasi_lib::DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id(INSTANCE)
         .build()
         .await?;

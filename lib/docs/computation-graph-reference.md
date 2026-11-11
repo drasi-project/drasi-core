@@ -59,7 +59,8 @@ qualification; see the work inventory for remaining runtime/callback boundaries.
 
 | Identity | What it distinguishes |
 |---|---|
-| `ComponentId` | A component name within one graph |
+| `ComponentId` | An immutable UUID, also the exact component-node ID |
+| `ComponentName` | Editable, case-sensitive graph metadata unique across all component kinds |
 | `GraphRevision` | A version of the graph's declarations and reported inventory |
 | `ComponentGeneration` | One constructed instance of a component |
 | `OperationEpoch` | One operation on that instance |
@@ -75,6 +76,28 @@ Component IDs, resource IDs and plugin IDs have separate meanings. When combinin
 several graphs, retain their scope information rather than using local names as
 globally unique keys. Inventory across different DrasiLib instances also needs the
 instance ID.
+
+Names belong to `DesiredComponent` and `NodeSnapshot`, not the immutable
+`ComponentDescriptor` or plugin construction specification. Graph and batch
+builders require a `ComponentName` before the component argument;
+`ComponentAddition::{new,from_specification,declaration}` also require the name
+first. Names must be supplied explicitly, never inferred from UUIDs.
+
+Use `GraphSnapshot::component_by_name` or
+`GraphControl::component_handle_by_name` for name lookup. A returned handle binds
+to the UUID and construction generation, not to subsequent owners of that name.
+`GraphControl::rename_component(&id, name)`, `ComponentHandle::rename(name)` and
+`DesiredMutation::RenameComponent` change graph metadata only. They do not invoke
+plugin callbacks, replace the instance, change its generation, or rebind its
+connections. Managed configuration protections still apply.
+
+`GraphError::DuplicateComponentId` and `DuplicateComponentName` carry safe
+existing-component metadata (UUID, name, semantic kind, available implementation/
+plugin identity and observed lifecycle/realization), never configuration or
+failure causes. Pending, failed and stopped declarations reserve their names
+until completed removal. Component graph-as-data keys are the canonical UUID,
+with the current name emitted as a separate property; resource, plugin and pipe
+keys retain their own namespaces.
 
 ## Component and connection declarations
 
@@ -300,7 +323,7 @@ result sequence.
 | `BroadcastPipeConfig` | Bounded history with an explicit lag policy; no backpressure guarantee |
 | `RetainedPipeConfig` + `MemoryEnvelopeStore` | Retained history inside the process |
 | `RetainedPipeConfig` + `IndexedEnvelopeStore` | Durable acceptance/replay using a complete persistent index bundle |
-| `RankedInputPipeConfig` | Branches of a shared query queue ordered by event time, source rank and source sequence; not producer FIFO |
+| `RankedInputPipeConfig` | Preserves each producer's admitted order; selects among available heads by event time, source rank and sequence |
 
 `EnvelopeCodec` requires registered schema validators on decode and preserves
 event metadata and annotations. Internal canonical identity bytes are not a
@@ -371,11 +394,13 @@ Call `GraphControl::preview(revision, mutations)`, then
 revision and affected instances before changing them.
 
 Supported changes include add/replace/update/remove, connect/disconnect, resource
-replacement, subscription changes, restart and retry. In-place reconfiguration
-requires factory support and cannot silently change an interface or implementation.
-Otherwise replacement constructs a new component instance.
+replacement, subscription changes, restart and retry. A registered factory's
+`plan_update` assesses live configuration changes. Retained-object updates cannot
+silently change an interface, resource binding or implementation. Construction
+support alone does not authorize reconstruction; unsupported changes are rejected.
+See [object lifecycle and assessed updates](computation-graph-configuration.md#object-lifecycle-and-assessed-updates).
 
-Preflight, pipe creation, reconfiguration and retired resource/object destruction
+Preflight, pipe creation, accepted updates and retired resource/object disposal
 run in graph-owned tasks with retained joins and typed panic boundaries.
 Reconciliation continues servicing disjoint lifecycle commands while those
 tasks are pending. Conflicting mutations reject rather than entering an
@@ -622,21 +647,23 @@ Disk replay can therefore lack completion times.
 
 | Integration type | Role and limits |
 |---|---|
-| `SourcePluginHost` | Owns, recreates or borrows an existing Source; full subscriptions preserve filtering, bootstrap and source metadata |
+| `SourcePluginHost` | Owns or borrows one Source object; full subscriptions preserve filtering, bootstrap and source metadata |
 | `ReactionPluginHost` | Supplies snapshot/history recovery to an existing Reaction; enqueue completion remains Accepted |
 | `LegacySourceFactory` / `LegacyReactionFactory` | Lower-level adapters for supplied existing interfaces, not automatic injection of every service |
 | `LegacyIndexProviderAdapter` | Uses existing index providers in graph-specific storage namespaces |
 | `drasi-plugin-sdk/computation` factories | Descriptor-backed construction with retained unresolved configuration recipes |
 
 A plugin has one lifecycle owner. Borrowing it does not permit another graph to
-initialize, start, stop, deprovision or reconfigure it. Use a constructor when the
-plugin needs reconstruction for restart. In `SourceSubscriptionOptions`,
+initialize, start, stop, dispose, delete its resources or apply an update.
+`from_constructor` constructs once; normal restart retains that initialized object.
+Managed reconstruction requires a registered factory's explicit update plan.
+In `SourceSubscriptionOptions`,
 `borrowed_recovery` and `allow_broadcast_loss` both default to false; enabling
 either gives permission to use that behaviour, not a capability the source lacks.
 
 Descriptor factories validate kind/configuration version and available schema.
 The host must first safely load and version-check dynamic plugins. The existing
-Source/Reaction ABI remains at 0.15; the earlier recovery update distinguished
+Source/Reaction ABI is 0.18; older layouts are rejected. Recovery distinguishes
 an absent resume sequence from an explicit sequence zero. Native graph plugins
 use a different ABI family. Task-scoped secret resolution
 for in-process creation does not replace a dynamic plugin's injected resolver.
@@ -651,7 +678,7 @@ dynamic loading by itself neither supplies nor rules out replay support.
 
 The [native ABI](../../components/computation-plugin-abi/src/lib.rs) and
 [native SDK](../../components/computation-plugin-sdk/README.md) are separate from
-the existing Source/Reaction plugin interface. ABI 1.0 loads sources,
+the existing Source/Reaction plugin interface. ABI 2.0 loads sources,
 transformers, sinks and services directly into graph-native proxies; it does not
 translate them back into the older component model.
 
@@ -672,7 +699,7 @@ operations cross the boundary as poll/wake/cancel handles and owned serialized
 buffers. Control notifications do not wait behind mutable data processing.
 Libraries remain loaded for the process lifetime.
 
-Native wire version 1 uses `BinaryEnvelopeCodec` and bulk MessagePack byte buffers.
+Native wire version 2 uses `BinaryEnvelopeCodec` and bulk MessagePack byte buffers.
 The binary transport preserves the complete envelope and runs the same registered
 record validators; it does not strip context, lineage or recovery metadata.
 Producer-owned reply buffers remain alive during decoding and are released
@@ -688,11 +715,12 @@ rejects failed, cancelled or unfinished state requests before a step succeeds.
 Participants cannot commit, retain a usable transaction after the call, or
 schedule independent transaction work.
 
-ABI 1.0 deliberately does not claim native query snapshot/outbox interfaces,
-source recovery-progress handles, arbitrary provider injection, in-place
-reconfiguration, or safe library unloading. Unsupported capabilities are
-rejected. Existing query implementations and durable source adapters remain
-available in mixed graphs; this does not confer durability on a volatile native
+Optional native interfaces expose query snapshot/outbox readers, source recovery
+progress and explicit factory-managed updates. Factories must advertise and
+implement each capability; ABI compatibility does not grant it. Core currently
+rejects every `Rebootstrap` update plan. Arbitrary Rust provider objects do not
+cross the ABI, and safe library unloading remains unsupported. Ordinary adapters
+can coexist with native components; this does not confer durability on a volatile
 source.
 
 The [native network components](../../components/computation-plugins/NETWORK.md)

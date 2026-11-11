@@ -1,0 +1,177 @@
+// Copyright 2024 The Drasi Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Checkpoint Store Trait
+//!
+//! Atomic checkpoint persistence for source sequence tracking, opaque source
+//! position bytes (for native stream resumption), and config hashing.
+//!
+//! Implementations are paired with an index backend and share the same session
+//! state. [`CheckpointStore::stage_checkpoint`] and
+//! [`CheckpointStore::stage_clear_checkpoints`] write
+//! into the currently-active session transaction (opened by
+//! [`SessionControl::begin`](super::SessionControl)) and is committed by the
+//! session's outer commit alongside the index updates. All other methods operate
+//! outside a session transaction and commit independently.
+//!
+//! Index plugins implement this contract without depending on the evaluator.
+
+use std::collections::HashMap;
+
+use async_trait::async_trait;
+use bytes::Bytes;
+
+use super::{IndexError, SourceCheckpoint};
+
+/// Atomic checkpoint persistence for source sequence tracking and config hashing.
+///
+/// # Method semantics
+///
+/// - [`stage_checkpoint`](Self::stage_checkpoint) SHOULD be called between
+///   `SessionControl::begin` and `SessionControl::commit` for persistent backends.
+///   The write is staged into the active session transaction and persisted by the
+///   outer commit. For volatile (in-memory) backends, it applies immediately.
+/// - `stage_clear_checkpoints` also participates in the active transaction.
+/// - Other non-staging mutations operate independently of the session transaction and
+///   commit on their own.
+///
+/// # Source positions
+///
+/// Each source feeding a query has its own checkpoint entry. The opaque
+/// `source_position` bytes allow native stream resumption — on restart, the
+/// query reads each source's position and passes it via `resume_from`.
+#[async_trait]
+pub trait CheckpointStore: Send + Sync {
+    /// Whether this store persists checkpoints across process restarts.
+    ///
+    /// The orchestration layer uses this to decide whether to propagate
+    /// `resume_from` to sources on restart. Volatile
+    /// (in-memory) stores return `false`; persistent stores (RocksDB, Garnet)
+    /// return `true`.
+    fn is_persistent(&self) -> bool;
+
+    /// Stage a source checkpoint into the active session transaction.
+    ///
+    /// For persistent backends, must be called inside an open session (between
+    /// `SessionControl::begin` and `SessionControl::commit`). Returns an error
+    /// if no session is active.
+    ///
+    /// For volatile backends (in-memory), applies immediately.
+    async fn stage_checkpoint(
+        &self,
+        source_id: &str,
+        sequence: u64,
+        source_position: Option<&Bytes>,
+    ) -> Result<(), IndexError>;
+
+    /// Read the committed checkpoint for a single source.
+    ///
+    /// Returns `None` if no checkpoint has been written for `source_id`.
+    /// Reads committed state directly; does not require an active session.
+    async fn read_checkpoint(
+        &self,
+        source_id: &str,
+    ) -> Result<Option<SourceCheckpoint>, IndexError>;
+
+    /// Read all committed source checkpoints, keyed by source id.
+    ///
+    /// Returns an empty map if no checkpoints have been written.
+    /// Reads committed state directly; does not require an active session.
+    async fn read_all_checkpoints(&self) -> Result<HashMap<String, SourceCheckpoint>, IndexError>;
+
+    /// Delete all source checkpoints and the config hash.
+    ///
+    /// Used during auto-reset recovery and `delete_query(cleanup: true)`.
+    /// Standalone commit; not part of any outer session transaction.
+    async fn clear_checkpoints(&self) -> Result<(), IndexError>;
+
+    /// Delete checkpoints/configuration inside the active session transaction.
+    /// Unlike `clear_checkpoints`, rollback must restore every removed entry.
+    async fn stage_clear_checkpoints(&self) -> Result<(), IndexError> {
+        Err(IndexError::NotSupported)
+    }
+
+    /// Write the query config hash.
+    ///
+    /// Used at startup to detect query configuration changes that require a
+    /// full re-bootstrap. Standalone commit.
+    async fn write_config_hash(&self, hash: u64) -> Result<(), IndexError>;
+
+    /// Read the stored config hash.
+    ///
+    /// Returns `None` if no hash has been written. Called at startup before
+    /// any session transaction begins.
+    async fn read_config_hash(&self) -> Result<Option<u64>, IndexError>;
+
+    /// Stage the last persisted result sequence into the active session transaction.
+    ///
+    /// For persistent backends, must be called inside an open session (between
+    /// `SessionControl::begin` and `SessionControl::commit`) together with outbox
+    /// and live-results writes. The write is persisted by the outer commit.
+    ///
+    /// For volatile backends, applies immediately (same as
+    /// [`write_result_sequence`](Self::write_result_sequence)).
+    ///
+    /// There is no default: every backend must choose staged-in-session vs
+    /// immediate apply. A default that called
+    /// [`write_result_sequence`](Self::write_result_sequence) would silently
+    /// commit outside the outer transaction.
+    async fn stage_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError>;
+
+    /// Write the last persisted result sequence for a query.
+    ///
+    /// Standalone commit — does not require an active session. Used by wipe/reset
+    /// paths. Event processing should call
+    /// [`stage_result_sequence`](Self::stage_result_sequence) inside the outer
+    /// session instead so the sequence commits atomically with outbox and live
+    /// results.
+    ///
+    /// Default: no-op (volatile backends that don't track result sequences).
+    async fn write_result_sequence(
+        &self,
+        _query_id: &str,
+        _sequence: u64,
+    ) -> Result<(), IndexError> {
+        Ok(())
+    }
+
+    /// Read the last committed result sequence for a query.
+    ///
+    /// Returns `None` if no result sequence has been written.
+    /// Used during crash recovery to determine the outbox replay point.
+    ///
+    /// Default: returns `None` (volatile backends).
+    async fn read_result_sequence(&self, _query_id: &str) -> Result<Option<u64>, IndexError> {
+        Ok(None)
+    }
+
+    /// Persist the query output generation.
+    ///
+    /// Bumped when output is wiped/rebuilt so reactions can distinguish a new
+    /// sequence 1 from a previous generation. Default: no-op.
+    async fn write_output_generation(
+        &self,
+        _query_id: &str,
+        _generation: u64,
+    ) -> Result<(), IndexError> {
+        Ok(())
+    }
+
+    /// Read the persisted output generation.
+    ///
+    /// Returns `None` if none has been written (treated as generation 0).
+    async fn read_output_generation(&self, _query_id: &str) -> Result<Option<u64>, IndexError> {
+        Ok(None)
+    }
+}

@@ -13,17 +13,16 @@ use serde_json::json;
 use crate::{
     evaluation::{context::QueryPartEvaluationContext, functions::FunctionRegistry},
     in_memory_index::in_memory_element_index::InMemoryElementIndex,
-    interface::{ElementIndex, ElementStream, IndexError},
-    models::{
-        Element, ElementMetadata, ElementPropertyMap, ElementReference, QueryJoin, SourceChange,
-    },
-    path_solver::match_path::MatchPath,
+    index_cache::cached_element_index::CachedElementIndex,
+    interface::{ElementIndex, ElementStream, IndexError, IndexJoin, QueryBuilderError},
+    models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
     query::QueryBuilder,
 };
 
 struct CountingIndex {
     inner: InMemoryElementIndex,
     scans: AtomicUsize,
+    fail_joins: bool,
 }
 
 #[async_trait]
@@ -65,8 +64,57 @@ impl ElementIndex for CountingIndex {
     async fn clear(&self) -> Result<(), IndexError> {
         ElementIndex::clear(&self.inner).await
     }
-    async fn set_joins(&self, path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
-        self.inner.set_joins(path, joins).await;
+    async fn set_joins(&self, joins: &[IndexJoin]) -> Result<(), IndexError> {
+        if self.fail_joins {
+            return Err(IndexError::other(std::io::Error::other(
+                "injected join setup failure",
+            )));
+        }
+        self.inner.set_joins(joins).await
+    }
+}
+
+#[tokio::test]
+async fn join_setup_failure_preserves_the_provider_error() {
+    let failing: Arc<dyn ElementIndex> = Arc::new(CountingIndex {
+        inner: InMemoryElementIndex::new(),
+        scans: AtomicUsize::new(0),
+        fail_joins: true,
+    });
+    let indexes: Vec<Arc<dyn ElementIndex>> = vec![
+        failing.clone(),
+        Arc::new(CachedElementIndex::new(failing.clone(), 32)),
+        #[cfg(feature = "computation")]
+        Arc::new(crate::computation::ScopedIndex::from_arc(
+            failing,
+            Arc::new(crate::computation::ComputationIoScope::default()),
+        )),
+    ];
+
+    for index in indexes {
+        for evaluator_only in [false, true] {
+            let builder = QueryBuilder::new(
+                "MATCH (n:Item) RETURN n",
+                Arc::new(CypherParser::new(Arc::new(FunctionRegistry::new()))),
+            )
+            .with_element_index(index.clone());
+            let error = if evaluator_only {
+                builder.try_build_evaluator().await.err()
+            } else {
+                builder.try_build().await.err()
+            }
+            .expect("join setup failure must prevent construction");
+
+            assert!(matches!(
+                &error,
+                QueryBuilderError::IndexSetup(IndexError::Other(source))
+                    if source.downcast_ref::<std::io::Error>()
+                        .is_some_and(|cause| cause.to_string() == "injected join setup failure")
+            ));
+            assert!(std::error::Error::source(&error)
+                .and_then(|source| source.downcast_ref::<IndexError>())
+                .is_some());
+        }
     }
 }
 
@@ -87,6 +135,7 @@ async fn isolated_context_updates_do_not_rescan_every_required_anchor() {
     let index = Arc::new(CountingIndex {
         inner: InMemoryElementIndex::new(),
         scans: AtomicUsize::new(0),
+        fail_joins: false,
     });
     let query = QueryBuilder::new(
         "MATCH (w:Workload) OPTIONAL MATCH (p:Plan) OPTIONAL MATCH (r:Readiness) RETURN w.id AS workload, p.version AS version, r.ready AS ready",

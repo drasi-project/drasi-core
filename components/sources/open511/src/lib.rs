@@ -241,12 +241,12 @@ impl Source for Open511Source {
         self
     }
 
-    async fn deprovision(&self) -> Result<()> {
-        self.base.deprovision_common().await
+    async fn delete_owned_resources(&self) -> Result<()> {
+        self.base.delete_owned_resources_common().await
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context.clone()).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context.clone()).await;
 
         if let Some(state_store) = context.state_store {
             *self.state_store.write().await = Some(state_store);

@@ -182,7 +182,7 @@ async fn init_source_with_wal(
 ) {
     let (update_tx, _update_rx) = tokio::sync::mpsc::channel(16);
     source
-        .initialize(SourceRuntimeContext {
+        .bind_runtime_context(SourceRuntimeContext {
             instance_id: "test-instance".to_string(),
             source_id: source_id.to_string(),
             update_tx: update_tx.into(),
@@ -408,7 +408,7 @@ async fn test_deprovision_removes_wal() {
     assert!(count > 0);
 
     source.stop().await.unwrap();
-    source.deprovision().await.unwrap();
+    source.delete_owned_resources().await.unwrap();
 
     let count = wal.event_count("deprov-src").await;
     assert!(count.is_err(), "WAL should be deleted after deprovision");

@@ -1,4 +1,5 @@
 [package]
+rust-version.workspace = true
 name = "drasi-bootstrap-kafka"
 version = "0.1.9"
 edition = "2021"

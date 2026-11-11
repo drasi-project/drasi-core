@@ -256,8 +256,8 @@ impl Source for RisLiveSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context.clone()).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context.clone()).await;
         if self.state_store.read().await.is_none() {
             if let Some(store) = context.state_store.as_ref() {
                 *self.state_store.write().await = Some(store.clone());

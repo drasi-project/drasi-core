@@ -130,6 +130,12 @@ async fn main() -> Result<()> {
     // -- DrasiLib --
     let drasi = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_host_sdk::computation::NativePlugin::from_definition(
+                    drasi_computation_transformer_query::plugin()?,
+                )?
+                .query_factory()?,
+            )
             .with_id("ris-live-dashboard")
             .with_source(source)
             .with_query(query)
@@ -253,14 +259,14 @@ async fn sse_handler(
 
 fn diff_to_json(diff: &ResultDiff) -> Option<serde_json::Value> {
     match diff {
-        ResultDiff::Add { data } => Some(serde_json::json!({"ADD": {"data": data}})),
+        ResultDiff::Add { data, .. } => Some(serde_json::json!({"ADD": {"data": data}})),
         ResultDiff::Update {
             before,
             after,
             data,
             ..
         } => Some(serde_json::json!({"UPDATE": {"before": before, "after": after, "data": data}})),
-        ResultDiff::Delete { data } => Some(serde_json::json!({"DELETE": {"data": data}})),
+        ResultDiff::Delete { data, .. } => Some(serde_json::json!({"DELETE": {"data": data}})),
         _ => None,
     }
 }

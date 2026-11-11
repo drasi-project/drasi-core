@@ -528,6 +528,7 @@ mod tests {
     use drasi_core::models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
     };
+    use drasi_query_common::QueryExecutionSettingsExt;
     use futures::{stream::FuturesUnordered, StreamExt};
     use std::time::Duration;
 
@@ -954,7 +955,9 @@ mod tests {
         let config = crate::Query::cypher("query")
             .query("MATCH (n) RETURN n")
             .from_input(future)
-            .build();
+            .build()
+            .unwrap()
+            .with_assigned_id(ComponentId::generate());
         let settings = QueryExecutionSettings::from_legacy_config(&config);
         settings.validate(None).unwrap();
 

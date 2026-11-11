@@ -19,13 +19,13 @@
 //! the plugin streams rows one-at-a-time via `next_fn` callbacks, and verifies
 //! data integrity.
 //!
-//! **Prerequisites**: Build the snapshot-test reaction before running:
+//! **Prerequisites**: Build and copy the snapshot-test reaction before running.
+//! The fixtures honor `CARGO_TARGET_DIR` and `DRASI_HOST_TEST_PLUGINS_DIR`.
 //!
 //! ```sh
-//! cargo build --lib -p drasi-reaction-snapshot-test
+//! make build-test-plugins
 //! ```
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -41,15 +41,9 @@ use drasi_lib::reactions::SnapshotFetcher;
 use drasi_plugin_sdk::descriptor::ReactionPluginDescriptor;
 use tokio::sync::Mutex;
 
-/// Locate the workspace target/debug directory.
-fn target_debug_dir() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("Cannot find workspace root");
-    workspace_root.join("target").join("debug")
-}
+#[path = "fixtures/plugin_directory.rs"]
+mod plugin_directory;
+use plugin_directory::plugin_dir;
 
 /// Get the platform-specific .so/.dylib filename.
 fn plugin_filename(crate_name: &str) -> String {
@@ -110,7 +104,7 @@ impl BootstrapBackend for MockBootstrapBackend {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_ffi_streaming_bootstrap() {
     // --- Load the snapshot-test cdylib ---
-    let plugin_path = target_debug_dir().join(plugin_filename("drasi-reaction-snapshot-test"));
+    let plugin_path = plugin_dir().join(plugin_filename("drasi-reaction-snapshot-test"));
     if !plugin_path.exists() {
         eprintln!(
             "SKIP: snapshot-test plugin not found at {}. Build with: \
@@ -189,7 +183,7 @@ async fn test_ffi_streaming_bootstrap() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_ffi_streaming_bootstrap_with_outbox() {
     // --- Load the snapshot-test cdylib ---
-    let plugin_path = target_debug_dir().join(plugin_filename("drasi-reaction-snapshot-test"));
+    let plugin_path = plugin_dir().join(plugin_filename("drasi-reaction-snapshot-test"));
     if !plugin_path.exists() {
         eprintln!(
             "SKIP: snapshot-test plugin not found at {}",
@@ -309,7 +303,7 @@ impl SnapshotFetcher for MockSnapshotFetcher {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_ffi_snapshot_fetcher_vtable() {
     // --- Load the snapshot-test cdylib ---
-    let plugin_path = target_debug_dir().join(plugin_filename("drasi-reaction-snapshot-test"));
+    let plugin_path = plugin_dir().join(plugin_filename("drasi-reaction-snapshot-test"));
     if !plugin_path.exists() {
         eprintln!(
             "SKIP: snapshot-test plugin not found at {}",

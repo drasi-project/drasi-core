@@ -16,7 +16,7 @@ Crates publish to crates.io and are consumed by downstream repos (e.g. drasi-pla
 ## Done means (the main CI gates)
 - `cargo fmt -- --check` passes
 - `make clippy` passes - do NOT use `cargo clippy --all-features` (the bundled-jq feature has a flaky source build); warnings are errors
-- `make check-native-dependencies` passes - independently built native plugins and their SDK must not pull in the query runtime/evaluator, query parsers or legacy SDK
+- `make check-native-dependencies` passes - only the query transformer may depend on the evaluator and query parsers; native plugins and their SDK must not pull in drasi-lib or the legacy SDK
 - Build the required shared libraries with `make build-native-network-plugins build-test-plugins`.
 - Run the remaining workspace tests with `cargo test --workspace --exclude drasi-host-sdk --exclude drasi-lib --exclude lib-integration-tests -- --test-threads=1`.
 - Run `bash lib/tests/run-runtime-parity.sh` for library, no-default, recovery/middleware, integration, Host SDK and selected backend profiles. CI runs both this command and the workspace command above.
@@ -33,6 +33,7 @@ Crates publish to crates.io and are consumed by downstream repos (e.g. drasi-pla
 - In .github/workflows, *.lock.yml files are COMPILED OUTPUT of the sibling .md gh-aw workflow sources - never edit a .lock.yml; edit the .md and run `gh aw compile` (procedure: .github/workflows/readme.md)
 
 ## Build prerequisites
+- Rust 1.95.0 is the supported compiler floor and the pinned development toolchain. Workspace members inherit `rust-version.workspace = true`; Clippy uses that manifest policy rather than a separate MSRV.
 - Plain `cargo build`/`cargo test` need no libjq (the jq middleware feature is opt-in), but `make clippy` enables it - install system libjq with `JQ_LIB_DIR` set (setup: docs/contributing/); some plugin builds need protobuf-compiler and cmake; optional fmt pre-commit hook: `git config core.hooksPath .githooks`
 
 ## Query stack (crates at repo root, no directory of their own)

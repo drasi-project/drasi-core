@@ -31,7 +31,6 @@ use drasi_lib::identity::{CredentialContext, IdentityProvider};
 use drasi_lib::reactions::bootstrap_context::BootstrapContext;
 use drasi_lib::reactions::{Reaction, SnapshotFetcher};
 use drasi_lib::{ComponentStatus, ReactionRuntimeContext};
-use drasi_plugin_sdk::descriptor::ReactionPluginDescriptor;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
@@ -115,7 +114,7 @@ impl Reaction for SnapshotTestReaction {
         )])
     }
 
-    async fn initialize(&self, context: ReactionRuntimeContext) {
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
         if self.panic_on_initialize {
             *self.failed_initialization_store.lock().await = context.state_store;
             tokio::task::yield_now().await;

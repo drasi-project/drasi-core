@@ -61,11 +61,11 @@ async fn instance_activation_deadline_is_configurable_and_round_trips() {
             .await
             .is_err());
     }
-    let (source, control) = ControlledSource::new("source");
+    let (source, control) = ControlledSource::fixture("source");
     control.auto_start.store(true, Ordering::Release);
     control.pending_start.store(true, Ordering::Release);
     let core = builder()
-        .with_source(source)
+        .with_source_fixture(source)
         .with_activation_timeout_secs(2)
         .build()
         .await
@@ -102,11 +102,11 @@ fn assert_lifecycle_timeout(error: &crate::error::DrasiError, accepted: bool) {
 
 #[tokio::test(start_paused = true)]
 async fn startup_total_deadline_preserves_accepted_work_and_configuration() {
-    let (source, control) = ControlledSource::new("source");
+    let (source, control) = ControlledSource::fixture("source");
     control.auto_start.store(true, Ordering::Release);
     control.waiting_start.store(true, Ordering::Release);
     let core = builder()
-        .with_source(source)
+        .with_source_fixture(source)
         .with_startup_timeout_secs(2)
         .with_shutdown_timeout_secs(3)
         .with_construction_timeout_secs(4)
@@ -156,11 +156,11 @@ async fn non_startup_lifecycle_lock_wait_has_its_own_unaccepted_outcome() {
 }
 
 async fn stop_interrupts_startup(drop_caller: bool) {
-    let (source, control) = ControlledSource::new("source");
+    let (source, control) = ControlledSource::fixture("source");
     control.auto_start.store(true, Ordering::Release);
     control.waiting_start.store(true, Ordering::Release);
     let core = builder()
-        .with_source(source)
+        .with_source_fixture(source)
         .with_startup_timeout_secs(60)
         .with_activation_timeout_secs(60)
         .with_shutdown_timeout_secs(2)
@@ -222,12 +222,12 @@ async fn stop_interrupts_unpolled_or_dropped_startup_multi_thread() {
 
 #[tokio::test]
 async fn owned_startup_reports_a_panicking_hook_and_remains_stoppable() {
-    let (source, control) = ControlledSource::new("source");
+    let (source, control) = ControlledSource::fixture("source");
     control.auto_start.store(true, Ordering::Release);
     control
         .panic_subscription_fence
         .store(true, Ordering::Release);
-    let core = builder().with_source(source).build().await.unwrap();
+    let core = builder().with_source_fixture(source).build().await.unwrap();
     let error = core.start().await.unwrap_err();
     assert!(error
         .downcast_ref::<crate::error::PartialStartError>()
@@ -242,10 +242,10 @@ async fn owned_startup_reports_a_panicking_hook_and_remains_stoppable() {
 
 #[tokio::test(start_paused = true)]
 async fn stop_total_deadline_retains_cleanup_and_blocks_restart_until_retry() {
-    let (source, control) = ControlledSource::new("source");
+    let (source, control) = ControlledSource::fixture("source");
     control.auto_start.store(true, Ordering::Release);
     let core = builder()
-        .with_source(source)
+        .with_source_fixture(source)
         .with_shutdown_timeout_secs(1)
         .with_cleanup_timeout_secs(30)
         .build()
@@ -272,10 +272,10 @@ async fn stop_total_deadline_retains_cleanup_and_blocks_restart_until_retry() {
 
 #[tokio::test(start_paused = true)]
 async fn shutdown_total_deadline_retains_the_driver_for_a_later_join() {
-    let (source, control) = ControlledSource::new("source");
+    let (source, control) = ControlledSource::fixture("source");
     control.auto_start.store(true, Ordering::Release);
     let core = builder()
-        .with_source(source)
+        .with_source_fixture(source)
         .with_shutdown_timeout_secs(1)
         .with_cleanup_timeout_secs(30)
         .build()
@@ -295,10 +295,10 @@ async fn shutdown_total_deadline_retains_the_driver_for_a_later_join() {
 }
 #[tokio::test(start_paused = true)]
 async fn component_handle_stop_deadline_retains_its_active_operation() {
-    let (source, control) = ControlledSource::new("source");
+    let (source, control) = ControlledSource::fixture("source");
     control.auto_start.store(true, Ordering::Release);
     let core = builder()
-        .with_source(source)
+        .with_source_fixture(source)
         .with_shutdown_timeout_secs(1)
         .with_cleanup_timeout_secs(30)
         .build()
@@ -325,7 +325,7 @@ async fn component_handle_stop_deadline_retains_its_active_operation() {
 #[tokio::test]
 async fn partial_start_reports_source_and_query_failures_and_remains_stoppable() {
     for failing in ["source", "query", "path-bounds"] {
-        let (source, control) = ControlledSource::new("source");
+        let (source, control) = ControlledSource::fixture("source");
         control.auto_start.store(true, Ordering::Release);
         if failing == "source" {
             control.fail_starts.store(1, Ordering::Release);
@@ -338,7 +338,7 @@ async fn partial_start_reports_source_and_query_failures_and_remains_stoppable()
             query.query = "MATCH (a)-[:LINK*1..3]->(b) RETURN b".into();
         }
         let core = builder()
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(query)
             .build()
             .await
@@ -368,10 +368,10 @@ async fn partial_start_reports_source_and_query_failures_and_remains_stoppable()
 
 #[tokio::test]
 async fn adding_an_auto_start_query_during_instance_start_waits_for_the_lifecycle_boundary() {
-    let (source, control) = ControlledSource::new("source");
+    let (source, control) = ControlledSource::fixture("source");
     control.auto_start.store(true, Ordering::Release);
     control.waiting_start.store(true, Ordering::Release);
-    let core = builder().with_source(source).build().await.unwrap();
+    let core = builder().with_source_fixture(source).build().await.unwrap();
     let starting = core.start();
     tokio::pin!(starting);
     tokio::select! {
@@ -401,8 +401,8 @@ async fn adding_an_auto_start_query_during_instance_start_waits_for_the_lifecycl
 #[tokio::test]
 async fn quiesced_public_status_is_reconfiguring_not_running() {
     let core = builder().build().await.unwrap();
-    let (source, _) = ControlledSource::new("source");
-    let handle = core.add_source_with_handle(source).await.unwrap();
+    let (source, _) = ControlledSource::fixture("source");
+    let handle = core.add_source_fixture_with_handle(source).await.unwrap();
     handle.wait_created().await.unwrap();
     let mut observed = handle.observed().unwrap();
     observed.lifecycle_requested = true;
@@ -419,9 +419,9 @@ async fn quiesced_public_status_is_reconfiguring_not_running() {
 
 #[tokio::test]
 async fn quiesced_queries_keep_generation_fenced_snapshot_and_history_reads() {
-    let (source, _) = ControlledSource::new("source");
+    let (source, _) = ControlledSource::fixture("source");
     let core = builder()
-        .with_source(source)
+        .with_source_fixture(source)
         .with_query(config("query", Some("source")))
         .build()
         .await
@@ -471,7 +471,7 @@ async fn quiesced_queries_keep_generation_fenced_snapshot_and_history_reads() {
 
 async fn source_core(id: &str, auto_start: bool) -> DrasiLib {
     builder()
-        .with_source(TestMockSource::with_auto_start(id.into(), auto_start).unwrap())
+        .with_source_fixture(TestMockSource::fixture(id, auto_start))
         .build()
         .await
         .unwrap()
@@ -485,7 +485,7 @@ async fn empty_native_instance_accepts_node_first_additions_without_placeholder(
     assert!(control.observed().components.is_empty());
 
     let source = core
-        .add_source_with_handle(TestMockSource::new("first-source".into()).unwrap())
+        .add_source_fixture_with_handle(TestMockSource::fixture("first-source", true))
         .await
         .unwrap();
     source.wait_created().await.unwrap();
@@ -499,40 +499,43 @@ async fn empty_native_instance_accepts_node_first_additions_without_placeholder(
 
 #[tokio::test]
 async fn default_builder_supports_empty_add_remove_readd_without_placeholder() {
-    let core = DrasiLib::builder().build().await.unwrap();
+    let core = DrasiLib::builder()
+        .with_query_factory(
+            crate::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &crate::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
+        .build()
+        .await
+        .unwrap();
     let control = core.computation_control().unwrap();
     let desired = control.desired_snapshot();
-    assert_eq!(desired.nodes.len(), 1);
-    assert_eq!(
-        desired.nodes[0].descriptor.id().as_str(),
-        crate::sources::COMPONENT_GRAPH_SOURCE_ID
-    );
+    assert!(desired.nodes.is_empty());
+    assert!(core.list_sources().await.unwrap().is_empty());
     assert!(core.list_queries().await.unwrap().is_empty());
     assert!(core.list_reactions().await.unwrap().is_empty());
     core.start().await.unwrap();
-    core.computation_component(crate::sources::COMPONENT_GRAPH_SOURCE_ID)
-        .unwrap()
-        .wait_started()
-        .await
-        .unwrap();
-
-    // Remove the real inspection source too, so controller liveness cannot
-    // accidentally depend on any remaining component task.
-    core.remove_source(crate::sources::COMPONENT_GRAPH_SOURCE_ID, false)
-        .await
-        .unwrap();
     assert!(control.desired_snapshot().nodes.is_empty());
     assert!(control.observed().components.is_empty());
 
     let first = core
-        .add_source_with_handle(TestMockSource::new("user-source".into()).unwrap())
+        .create_source("user-source", true, |id| {
+            TestMockSource::new(id.to_string())
+        })
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(3), first.wait_started())
         .await
         .expect("empty controller must accept and activate its first addition")
         .unwrap();
-    core.remove_source("user-source", false).await.unwrap();
+    core.remove_source_by_id(first.id(), false).await.unwrap();
     assert!(control.desired_snapshot().nodes.is_empty());
     assert!(control.observed().components.is_empty());
     assert!(first.observed().is_err());
@@ -540,7 +543,9 @@ async fn default_builder_supports_empty_add_remove_readd_without_placeholder() {
     core.stop().await.unwrap();
     core.start().await.unwrap();
     let replacement = core
-        .add_source_with_handle(TestMockSource::new("user-source".into()).unwrap())
+        .create_source("user-source", true, |id| {
+            TestMockSource::new(id.to_string())
+        })
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(3), replacement.wait_started())
@@ -548,14 +553,19 @@ async fn default_builder_supports_empty_add_remove_readd_without_placeholder() {
         .expect("controller must stay available after its last component is removed")
         .unwrap();
     assert_eq!(
-        core.get_source_status("user-source").await.unwrap(),
+        core.get_source_status_by_id(replacement.id())
+            .await
+            .unwrap(),
         ComponentStatus::Running
     );
+    assert_ne!(first.id(), replacement.id());
     assert!(
         first.observed().is_err(),
         "retired generation must not revive"
     );
-    core.remove_source("user-source", false).await.unwrap();
+    core.remove_source_by_id(replacement.id(), false)
+        .await
+        .unwrap();
     assert!(control.desired_snapshot().nodes.is_empty());
     core.shutdown().await.unwrap();
 }
@@ -564,22 +574,32 @@ async fn default_builder_supports_empty_add_remove_readd_without_placeholder() {
 async fn clean_restart_preserves_query_generation_and_strict_reaction_checkpoint() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let store = Arc::new(crate::MemoryStateStoreProvider::new());
-        let (mut reaction, _, mut output) = ControlledReaction::new("reaction", &["query"]);
-        reaction.base = ReactionBase::new(
-            ReactionBaseParams::new("reaction", vec!["query".into()]).with_auto_start(true),
-        );
-        let (source, source_control) = ControlledSource::new("source");
+        let (reaction, _, mut output) = ControlledReaction::fixture("reaction", &["query"]);
+        let (source, source_control) = ControlledSource::fixture("source");
         source_control.auto_start.store(true, Ordering::Release);
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_state_store_provider(store.clone())
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(
                 crate::Query::cypher("query")
                     .query("MATCH (n:Person) RETURN n.name AS name")
                     .from_input("source")
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
-            .with_reaction(reaction)
+            .with_reaction_fixture(reaction.with_auto_start(true))
             .build()
             .await
             .unwrap();
@@ -660,32 +680,27 @@ async fn clean_restart_preserves_query_generation_and_strict_reaction_checkpoint
 }
 
 async fn query_component_ownership() {
-    let (source, source_calls) = ControlledSource::new("source");
+    let (source, source_calls) = ControlledSource::fixture("source");
     source_calls.auto_start.store(true, Ordering::Release);
-    let (mut left_reaction, left_calls, mut left_output) =
-        ControlledReaction::new("left-output", &["left"]);
-    left_reaction.base = ReactionBase::new(
-        ReactionBaseParams::new("left-output", vec!["left".into()]).with_auto_start(true),
-    );
-    let (mut right_reaction, right_calls, mut right_output) =
-        ControlledReaction::new("right-output", &["right"]);
-    right_reaction.base = ReactionBase::new(
-        ReactionBaseParams::new("right-output", vec!["right".into()]).with_auto_start(true),
-    );
+    let (left_reaction, left_calls, mut left_output) =
+        ControlledReaction::fixture("left-output", &["left"]);
+    let (right_reaction, right_calls, mut right_output) =
+        ControlledReaction::fixture("right-output", &["right"]);
     let query = |id| {
         crate::Query::cypher(id)
             .query("MATCH (n:Person) RETURN n.name AS name")
             .from_input("source")
             .enable_bootstrap(false)
             .build()
+            .unwrap()
     };
     let core = builder()
         .with_id("query-ownership")
-        .with_source(source)
+        .with_source_fixture(source)
         .with_query(query("left"))
         .with_query(query("right"))
-        .with_reaction(left_reaction)
-        .with_reaction(right_reaction)
+        .with_reaction_fixture(left_reaction.with_auto_start(true))
+        .with_reaction_fixture(right_reaction.with_auto_start(true))
         .build()
         .await
         .unwrap();
@@ -735,7 +750,7 @@ async fn query_component_ownership() {
         assert_eq!(scope.topology.graph_id, root_id);
         assert_eq!(
             root.desired_snapshot().specifications[&node].role,
-            ComponentRole::Query
+            ComponentRole::Transformer
         );
     }
 
@@ -795,13 +810,11 @@ async fn query_component_ownership() {
     replacement.wait_started().await.unwrap();
     assert_ne!(replacement.generation(), left.generation());
     assert!(left.observed().is_err());
-    let (mut reaction, _, mut replaced_output) =
-        ControlledReaction::new("left-replacement-output", &["left"]);
-    reaction.base = ReactionBase::new(
-        ReactionBaseParams::new("left-replacement-output", vec!["left".into()])
-            .with_auto_start(true),
-    );
-    core.add_reaction(reaction).await.unwrap();
+    let (reaction, _, mut replaced_output) =
+        ControlledReaction::fixture("left-replacement-output", &["left"]);
+    core.add_reaction_fixture(reaction.with_auto_start(true))
+        .await
+        .unwrap();
     core.computation_component("left-replacement-output")
         .unwrap()
         .wait_started()
@@ -863,9 +876,9 @@ async fn query_component_ownership_and_sibling_progress_on_multiple_threads() {
 async fn many_queries_share_one_graph() {
     for count in [1, 8, 32] {
         tokio::time::timeout(Duration::from_secs(15), async {
-            let (source, control) = ControlledSource::new("shared-input");
+            let (source, control) = ControlledSource::fixture("shared-input");
             control.auto_start.store(true, Ordering::Release);
-            let mut builder = builder().with_source(source);
+            let mut builder = builder().with_source_fixture(source);
             for index in 0..count {
                 let mut query = config(&format!("query-{index}"), Some("shared-input"));
                 query.auto_start = true;
@@ -979,13 +992,17 @@ async fn direct_and_factory_additions_preserve_one_root_and_existing_query_compo
             let descriptor =
                 ComponentDescriptor::try_new(ComponentId::try_new(name).unwrap(), vec![]).unwrap();
             let addition = if name == "before-start" {
-                ComponentAddition::new(ConstructedComponent::service(Box::new(NativeService {
-                    descriptor,
-                    starts: starts.clone(),
-                    stops: stops.clone(),
-                })))
+                ComponentAddition::new(
+                    ComponentName::try_new(name).unwrap(),
+                    ConstructedComponent::service(Box::new(NativeService {
+                        descriptor,
+                        starts: starts.clone(),
+                        stops: stops.clone(),
+                    })),
+                )
             } else {
                 ComponentAddition::from_specification(
+                    ComponentName::try_new(name).unwrap(),
                     ComponentSpecification {
                         descriptor,
                         role: ComponentRole::Service,
@@ -1107,14 +1124,14 @@ async fn stop_all_components_stops_running() {
 
 #[tokio::test]
 async fn stop_sweep_continues_past_a_record_superseded_after_it_was_listed() {
-    let (source, source_control) = ControlledSource::new("source");
-    let (first, first_control, _) = ControlledReaction::new("a-reaction", &["query"]);
-    let (second, second_control, _) = ControlledReaction::new("b-reaction", &["query"]);
+    let (source, source_control) = ControlledSource::fixture("source");
+    let (first, first_control, _) = ControlledReaction::fixture("a-reaction", &["query"]);
+    let (second, second_control, _) = ControlledReaction::fixture("b-reaction", &["query"]);
     let core = builder()
-        .with_source(source)
+        .with_source_fixture(source)
         .with_query(config("query", Some("source")))
-        .with_reaction(first)
-        .with_reaction(second)
+        .with_reaction_fixture(first)
+        .with_reaction_fixture(second)
         .build()
         .await
         .unwrap();
@@ -1163,8 +1180,8 @@ async fn stop_sweep_continues_past_a_record_superseded_after_it_was_listed() {
 
 #[tokio::test]
 async fn incomplete_instance_stop_is_retried_until_every_component_stops() {
-    let (source, control) = ControlledSource::new("source");
-    let core = builder().with_source(source).build().await.unwrap();
+    let (source, control) = ControlledSource::fixture("source");
+    let core = builder().with_source_fixture(source).build().await.unwrap();
     let view = core.component_graph();
     core.start().await.unwrap();
     core.start_source("source").await.unwrap();
@@ -1220,7 +1237,7 @@ async fn stop_all_components_handles_already_stopped() {
 #[tokio::test]
 async fn load_configuration_creates_queries_from_config() {
     let core = builder()
-        .with_source(TestMockSource::with_auto_start("cfg-src".into(), true).unwrap())
+        .with_source_fixture(TestMockSource::fixture("cfg-src", true))
         .with_query(config("cfg-query", Some("cfg-src")))
         .build()
         .await
@@ -1263,9 +1280,9 @@ async fn test_start_component_success() {
 
 #[tokio::test]
 async fn test_start_component_failure_reverts_to_error() {
-    let (source, control) = ControlledSource::new("source");
+    let (source, control) = ControlledSource::fixture("source");
     control.fail_starts.store(1, Ordering::Release);
-    let core = builder().with_source(source).build().await.unwrap();
+    let core = builder().with_source_fixture(source).build().await.unwrap();
     assert!(core.start_source("source").await.is_err());
     assert_eq!(
         core.get_source_status("source").await.unwrap(),
@@ -1301,8 +1318,8 @@ async fn test_stop_component_success() {
 
 #[tokio::test]
 async fn test_stop_component_failure_reverts_to_error() {
-    let (source, control) = ControlledSource::new("source");
-    let core = builder().with_source(source).build().await.unwrap();
+    let (source, control) = ControlledSource::fixture("source");
+    let core = builder().with_source_fixture(source).build().await.unwrap();
     core.start_source("source").await.unwrap();
     core.computation_component("source")
         .unwrap()
@@ -1321,8 +1338,8 @@ async fn test_stop_component_failure_reverts_to_error() {
 
 #[tokio::test]
 async fn successful_source_stop_must_reach_stopped_before_cleanup_is_accepted() {
-    let (source, control) = ControlledSource::new("noop-stop");
-    let core = builder().with_source(source).build().await.unwrap();
+    let (source, control) = ControlledSource::fixture("noop-stop");
+    let core = builder().with_source_fixture(source).build().await.unwrap();
     core.start_source("noop-stop").await.unwrap();
     core.computation_component("noop-stop")
         .unwrap()
@@ -1369,18 +1386,12 @@ async fn test_get_component_status_not_found() {
 #[tokio::test]
 async fn test_list_components() {
     let core = builder()
-        .with_source(TestMockSource::new("s1".into()).unwrap())
-        .with_source(TestMockSource::new("s2".into()).unwrap())
+        .with_source_fixture(TestMockSource::fixture("s1", true))
+        .with_source_fixture(TestMockSource::fixture("s2", true))
         .build()
         .await
         .unwrap();
     let sources = core.list_sources().await.unwrap();
-    assert_eq!(
-        sources
-            .iter()
-            .filter(|(id, _)| id != crate::sources::COMPONENT_GRAPH_SOURCE_ID)
-            .count(),
-        2
-    );
+    assert_eq!(sources.len(), 2);
     core.shutdown().await.unwrap();
 }

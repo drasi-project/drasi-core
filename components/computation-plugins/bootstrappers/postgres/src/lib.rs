@@ -146,8 +146,8 @@ impl BootstrapFactory for StandalonePostgresBootstrapFactory {
             .scope
             .clone()
             .context("PostgreSQL snapshot requires query scope")?;
-        ComponentId::try_new(scope.instance_id.as_str())?;
-        ComponentId::try_new(scope.graph_id.as_str())?;
+        drasi_computation_contracts::validate_identifier("instance", &scope.instance_id)?;
+        drasi_computation_contracts::validate_identifier("graph", &scope.graph_id)?;
         let mut provider = PostgresBootstrapProvider::new(
             ComponentId::try_new(config.source)?,
             StreamId::try_new(config.stream)?,
@@ -245,8 +245,8 @@ fn scoped_configuration(
         .scope
         .clone()
         .context("PostgreSQL bootstrap requires query scope")?;
-    ComponentId::try_new(scope.instance_id.as_str())?;
-    ComponentId::try_new(scope.graph_id.as_str())?;
+    drasi_computation_contracts::validate_identifier("instance", &scope.instance_id)?;
+    drasi_computation_contracts::validate_identifier("graph", &scope.graph_id)?;
     let reader = progress
         .context("PostgreSQL bootstrap requires its actual query progress owner")?
         .reader();
@@ -278,6 +278,7 @@ mod tests {
         let request = CreateRequest {
             inputs: Vec::new(),
             activation_credentials_bound: false,
+            update_directive: None,
             id: ComponentId::try_new("query")?,
             implementation: StandalonePostgresBootstrapFactory.metadata().implementation,
             configuration_version: 1,

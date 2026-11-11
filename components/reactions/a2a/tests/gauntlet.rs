@@ -832,7 +832,7 @@ fn rpc_error(code: i64, message: &str) -> Value {
 async fn initialize_with_store(reaction: &A2AReaction, store: Arc<MemoryStateStoreProvider>) {
     let (update_tx, _rx) = tokio::sync::mpsc::channel(16);
     let context = ReactionRuntimeContext::new("a2a-g", reaction.id(), Some(store), update_tx, None);
-    reaction.initialize(context).await;
+    reaction.bind_runtime_context(context).await;
 }
 
 fn memory_store() -> Arc<MemoryStateStoreProvider> {

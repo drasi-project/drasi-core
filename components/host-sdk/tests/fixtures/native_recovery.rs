@@ -7,6 +7,9 @@
 mod native_bootstrap;
 mod native_consumer;
 mod native_consumer_progress;
+mod native_deprovision;
+mod native_input_bindings;
+mod native_processing;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -186,6 +189,11 @@ sdk::export_computation_plugin!(sdk::PluginDefinition::new(
         Arc::new(SqliteFactory) as Arc<dyn Factory>,
         Arc::new(native_consumer::Factory(sdk::ConsumerMode::External)),
         Arc::new(native_consumer::Factory(sdk::ConsumerMode::Transactional)),
+        Arc::new(native_deprovision::Factory),
+        Arc::new(native_input_bindings::Factory),
+        Arc::new(native_input_bindings::ConsumerFactory),
+        Arc::new(native_input_bindings::TransactionalFactory),
+        Arc::new(native_processing::Factory),
     ]
     .into_iter()
     .chain(native_consumer_progress::factories())

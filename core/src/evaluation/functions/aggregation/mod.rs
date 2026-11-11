@@ -33,7 +33,7 @@ pub use sum::Sum;
 
 use std::sync::Arc;
 
-use crate::models::{ElementPropertyMap, ElementValue};
+pub use drasi_core_types::interface::ValueAccumulator;
 
 use self::lazy_sorted_set::LazySortedSet;
 
@@ -60,33 +60,6 @@ impl RegisterAggregationFunctions for FunctionRegistry {
             Function::Aggregating(Arc::new(AggregatingLast {})),
         );
     }
-}
-
-#[derive(Debug, Clone)]
-pub enum ValueAccumulator {
-    Sum {
-        value: f64,
-    },
-    Avg {
-        sum: f64,
-        count: i64,
-    },
-    Count {
-        value: i64,
-    },
-    TimeMarker {
-        timestamp: u64,
-    },
-    Signature(u64),
-    LinearGradient {
-        count: i64,
-        mean_x: f64,
-        mean_y: f64,
-        m2: f64,
-        cov: f64,
-    },
-    Value(ElementValue),
-    Map(ElementPropertyMap),
 }
 
 #[derive(Clone)]

@@ -112,7 +112,7 @@ async fn test_application_source_relationship_direction_e2e() -> Result<()> {
     // Step 4: Build DrasiLib with all components
     // =========================================================================
     let drasi = Arc::new(
-        DrasiLib::builder()
+        lib_integration_tests::query_builder()
             .with_id("application-source-e2e-test")
             .with_source(app_source)
             .with_query(relationship_query)
@@ -353,7 +353,7 @@ async fn test_application_source_multiple_relationships() -> Result<()> {
 
     // Build DrasiLib
     let drasi = Arc::new(
-        DrasiLib::builder()
+        lib_integration_tests::query_builder()
             .with_id("multi-relationship-test")
             .with_source(app_source)
             .with_query(count_query)

@@ -3,7 +3,6 @@
 
 #![cfg(test)]
 
-#[allow(dead_code)]
 mod computation_support;
 
 use async_trait::async_trait;
@@ -144,6 +143,18 @@ async fn scenario(invalid_emission: bool) {
         senders.push(sender);
     }
     let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_components(builder.build().unwrap())
         .build()
         .await

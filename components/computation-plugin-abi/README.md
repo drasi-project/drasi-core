@@ -1,13 +1,16 @@
 # Native ComputationGraph ABI
 
 This dependency-free crate freezes the C layouts for native computation plugins.
-The ABI version is **1.0.0**, independent of crate releases and the
+The ABI version is **2.0.0**, independent of crate releases and the
 Source/Reaction/Bootstrap SDK **0.17.0** (which also accepts 0.16 fast-mode plugins).
 Its two symbols are
 `drasi_computation_plugin_metadata` and `drasi_computation_plugin_entry`.
 Do not call a legacy registration function to interpret native metadata.
-The native payload contract is **wire version 1**: bounded MessagePack with bulk
-binary buffers and binary computation envelopes. The C table layouts are unchanged.
+The native payload contract is **wire version 2**: UUID component identities,
+bounded MessagePack with bulk binary buffers and binary computation envelopes.
+Wire version 1 is rejected; rebuild the host and plugins together. ABI 2 changes
+the family magic to `DRASICG2`, the header major to 2 and the factory table layout.
+It does not change BinaryEnvelopeCodec/EnvelopeCodec serialization version 2.
 
 Headers must match the family magic, version and exact structure size before
 reading any subsequent field. Missing metadata, unsupported capabilities and
@@ -28,12 +31,58 @@ for I/O. Every exported function and callback must contain Rust panics.
 Native libraries are pinned for process lifetime. Hot unloading is unsupported.
 Native code is trusted in-process code, not a memory or security sandbox.
 
+## ABI 2 lifecycle and update planning
+
+`FactoryVTable::plan_update` is an additional
+`unsafe extern "C" fn(*mut c_void, BorrowedBytes) -> Reply` callback. Its input is
+JSON `UpdateRequest { current: CreateRequest, proposed: CreateRequest }`; success
+returns JSON `ComponentUpdatePlan { mode, data }`. Both are bounded by
+`MAX_METADATA_BYTES` (1 MiB). Planning inspects configuration only, without
+construction, I/O or activation. Unsupported changes fail explicitly.
+
+Mutable operations still use `ComponentVTable::begin` and producer-owned,
+caller-polled operation handles. Lifecycle hooks take empty payloads (except the
+existing credential-bound START). Added/renamed opcodes are:
+
+| Opcode | Value | Meaning |
+|---|---:|---|
+| `PAUSE_PROCESSING` | 7 | Temporary processing pause, retaining activation |
+| `DELETE_OWNED_RESOURCES` | 17 | Explicit permanent owned-resource deletion |
+| `INITIALIZE` | 24 | Once per object, before its first START |
+| `DISPOSE` | 25 | Awaited final instance cleanup after positive STOP cleanup |
+| `RESUME_PROCESSING` | 26 | Resume a completed temporary pause |
+| `APPLY_UPDATE` | 27 | Execute an approved retained-instance update |
+
+`APPLY_UPDATE` uses bounded named MessagePack
+`ApplyUpdateRequest { operation_id, request: UpdateRequest, plan }`. Recreate
+cannot be applied to an instance. Factory metadata declares unique
+`capabilities.update_modes`; empty means no update support. These declarations
+are not permission to discard state: the graph owns data-boundary, storage and
+downstream safety checks.
+
+Owner-approved reconstruction intent uses a separate named MessagePack creation
+envelope: `update_creation_version: 1`, `request: CreateRequest`,
+`directive: UpdateDirective { operation_id, plan }`, and optional
+`activation_credentials_version: 1` for the negotiated credentials path.
+Only declared Recreate plans and nonempty operation IDs are valid. This directive
+does not authorize state loss or replace the graph's data-safety checks.
+Ordinary construction and pure planning descriptions have no directive.
+
+Successful duplicate transitions acknowledge completion without repeating hooks.
+Incomplete initialization must be disposed, not retried on the same object;
+partial start needs stop. Stop/disposal/update cancellation does not roll back or
+complete cleanup, and cannot authorize restart. Retained cleanup can be retried.
+Disposal fences and settles independent calls/readers; synchronous release is not
+its replacement. Permanent deletion is separate and explicit, after positive
+activation cleanup and before disposal. The old destructive and service-quiesce
+operation names have no compatibility aliases in ABI 2.
+
 ## Optional services, version 1
 
 `drasi_computation_plugin_services_v1` is an optional, independently versioned
 extension. The two base entry points, base vtables, ABI version, wire version and
-strict base metadata remain unchanged. Genuine ABI 1.0 binaries without this
-symbol retain their existing behavior; loading does not grant recovery support.
+strict base metadata remain unchanged. Matching wire-version-2 libraries may omit
+this symbol; loading does not grant recovery support.
 An extension without the base entry points is malformed, not a legacy plugin.
 
 `PluginServicesV1` has a checked header, version/reserved fields, per-factory
@@ -78,7 +127,7 @@ complete consumer set. `PluginConsumerProgressV1` supplies per-factory discovery
 construction with `ConsumerProgressV1`, and immutable upstream-retention inspection.
 An advertising factory requires the binding and must reject unbound creation.
 Only source and transformer producers support it; single-owner recovery cannot
-be combined with this capability. Base ABI 1.0, wire 1 and recovery-v1 are unchanged.
+be combined with this capability. Base ABI 2.0, wire 2 and recovery-v1 are unchanged.
 
 The identity fixes the graph, producer and 1-256 distinct consumer IDs. Each
 snapshot carries every member's existing recovery-v1 snapshot as a binary frame,
@@ -123,30 +172,33 @@ subsequent generation/index/key request is limited to 4096 bytes. Batch release
 rejects stale generations or active calls. Explicit retryable handler failures use
 the extension's `RETRYABLE` status, not an empty success response.
 
-Both extensions leave base tables, strict metadata, ABI 1.0 and wire 1 unchanged.
+Both extensions leave base tables, strict metadata, ABI 2.0 and wire 2 unchanged.
 Only negotiated, bound factories may use them; missing services never imply
 recovery guarantees. See the SDK's authoring and lifecycle contracts.
 
-## Optional output reads and follow, version 1
+## Optional output reads and follow, version 2
 
-`drasi_computation_plugin_output_reads_v1` and
-`drasi_computation_plugin_output_follow_v1` are independent extensions; base ABI
-1.0, wire 1 and every other table are unchanged. A factory declares the output
+`drasi_computation_plugin_output_reads_v2` and
+`drasi_computation_plugin_output_follow_v2` are independent extensions; base ABI
+2.0, wire 2 and every other table are unchanged. A factory declares the output
 ports it serves in manifest `capabilities.output_snapshots`, `output_replays` and
 `output_follows` (empty lists are omitted); the Host requires the matching
 extension exactly then.
 
-`PluginOutputReadsV1::open` returns one producer-owned `OutputReadHandle` per
+`PluginOutputReadsV2::open` returns one producer-owned `OutputReadHandle` per
 declared (port, capability), with `request(op, input)` returning an ordinary
-operation (`SNAPSHOT`, `COMMITTED_HEAD`, `REPLAY_AFTER`). `PluginOutputFollowV1::open`
+operation (`SNAPSHOT`, `COMMITTED_HEAD`, `REPLAY_AFTER`). The handle's `transfer`
+callback opens an independently owned, activation-fenced paged transfer for a
+large immutable snapshot/replay observation. `PluginOutputFollowV2::open`
 returns a provider handle whose `begin(limits)` writes a **lease handle** and the
 operation that opens it; the lease has its own `next(ack)` operations and a
 synchronous `release`. Replies are bounded MessagePack: 16 MiB, 16,384 snapshot
 records, 1,024 replay envelopes, 16 reads and 16 leases per component. Provider
 results, including typed errors, are an `Outcome` inside a successful reply;
 lifecycle and transport failures use ABI statuses (`NOT_ACTIVE` 0x2001 while not
-started, `CLOSED` once retired). Nothing is truncated: a larger answer is an
-explicit limit outcome. Handles and leases are released once by their holder; a
-component's stop, restart or release fences them and ends leases at once.
+started, `CLOSED` once retired). Nothing is truncated: a larger single-message
+answer is an explicit limit outcome; paged transfers bound each page rather than
+the whole observation. Handles and leases are released once by their holder; a
+component's stop, update, disposal or release fences them and ends leases at once.
 `next` carries the last observed item index so an unacknowledged item is resent
 rather than lost when a cancellation races completion.

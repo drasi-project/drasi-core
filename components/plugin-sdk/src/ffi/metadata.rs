@@ -17,8 +17,8 @@
 use super::types::FfiStr;
 
 /// The FFI ABI contract version of this SDK. Used for compatibility checks at
-/// plugin load time. Hosts explicitly support this contract and the compatible
-/// ABI 0.16 fast-mode prefix; other major/minor versions are rejected.
+/// plugin load time. Hosts accept the current major/minor contract only;
+/// older component layouts, including ABI 0.16 and 0.17, are rejected.
 ///
 /// This is intentionally **decoupled from the crate release version**
 /// (`CARGO_PKG_VERSION`): it identifies the layout/ABI of the `#[repr(C)]`
@@ -60,7 +60,11 @@ use super::types::FfiStr;
 /// - `0.17.0`: state-store vtables append versioned durability lookup. New proxies
 ///   release their transferred vtable/state. New hosts retain ABI 0.16 plugins'
 ///   existing fast behavior, without granting newer recovery capabilities.
-pub const FFI_SDK_VERSION: &str = "0.17.0";
+/// - `0.18.0`: source/reaction tables separate mandatory runtime-context binding
+///   from fallible, once-per-object initialization; add disposal and temporary
+///   processing-pause hooks, and rename destructive cleanup to
+///   `delete_owned_resources`. The state-store layout and ownership are unchanged.
+pub const FFI_SDK_VERSION: &str = "0.18.0";
 
 /// The target triple this crate was compiled for.
 pub const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");

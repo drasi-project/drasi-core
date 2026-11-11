@@ -349,7 +349,9 @@ async fn verify_unresolved_reconstruction() {
         control
             .reconcile(preview, bindings)
             .await
-            .expect("bind resource");
+            .expect("bind resource")
+            .ensure_committed()
+            .expect("desired topology committed");
         let observed = control
             .component_handle(waiting.id())
             .expect("node")
@@ -374,7 +376,9 @@ async fn verify_unresolved_reconstruction() {
         control
             .reconcile(preview, bindings)
             .await
-            .expect("register implementation");
+            .expect("register implementation")
+            .ensure_committed()
+            .expect("desired topology committed");
         let current = control.component_handle(waiting.id()).expect("node");
         tokio::time::timeout(Duration::from_secs(3), current.wait_created())
             .await

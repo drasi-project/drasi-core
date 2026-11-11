@@ -25,7 +25,11 @@ const INSTANCE: &str = "parallel-example";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let drasi = DrasiLib::builder().with_id(INSTANCE).build().await?;
+    let drasi = DrasiLib::builder()
+        .with_query_factory(std::sync::Arc::new(ContinuousQueryFactory::default()))
+        .with_id(INSTANCE)
+        .build()
+        .await?;
     let result = run(&drasi).await;
     let cleanup = drasi.shutdown().await;
     let failures: Vec<_> = result

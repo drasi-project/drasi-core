@@ -1,7 +1,7 @@
 # Native PostgreSQL sources
 
 `drasi-computation-source-postgres` provides four explicit factories through native
-ComputationGraph ABI `1.0.0`, each at implementation/configuration version `1`.
+ComputationGraph ABI `2.0.0`, each at implementation/configuration version `1`.
 
 | Factory | Output | Query requirements |
 |---|---|---|

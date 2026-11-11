@@ -1,4 +1,5 @@
 [package]
+rust-version.workspace = true
 name = "drasi-computation-plugin-sdk"
 version.workspace = true
 edition.workspace = true
@@ -35,9 +36,9 @@ uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1", features = ["macros"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["registry"] }
-tracing-opentelemetry = { version = "0.32", default-features = false }
-opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
-opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace", "testing"] }
+tracing-opentelemetry = { version = "=0.34.0", default-features = false }
+opentelemetry = { version = "=0.33.1", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "=0.33.1", default-features = false, features = ["trace", "testing"] }
 
 [[example]]
 name = "telemetry_fixture"

@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use super::output_state::{FetchError, OutboxResponse, SnapshotResponse};
 use crate::{
     channels::{ComponentStatus, QuerySubscriptionResponse},
-    config::QueryConfig,
+    config::AssignedQueryConfig as QueryConfig,
     metrics::QueryOutputMetrics,
 };
 
@@ -122,8 +122,13 @@ mod tests {
 
     #[test]
     fn query_is_volatile_defaults_to_true_when_not_overridden() {
-        assert!(
-            ContractQuery(crate::Query::cypher("contract").query("RETURN 1").build()).is_volatile()
-        );
+        assert!(ContractQuery(
+            crate::Query::cypher("contract")
+                .query("RETURN 1")
+                .build()
+                .unwrap()
+                .with_assigned_id(crate::config::ComponentId::generate())
+        )
+        .is_volatile());
     }
 }

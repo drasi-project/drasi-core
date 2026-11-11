@@ -1,7 +1,7 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-use crate::{ComponentId, SourceProgressKey, MAX_SOURCE_POSITION_BYTES};
+use crate::{validate_identifier, SourceProgressKey, MAX_SOURCE_POSITION_BYTES};
 use std::sync::Arc;
 
 /// Source-defined ordering for an event and a consumer's handled position.
@@ -37,7 +37,7 @@ impl InputPositionPolicy {
         comparator: Arc<dyn InputPositionComparator>,
     ) -> anyhow::Result<Self> {
         if let SourceProgressKey::Source(source) = &key {
-            ComponentId::try_new(source.as_str())?;
+            validate_identifier("source progress key", source)?;
         }
         Ok(Self { key, comparator })
     }

@@ -1082,7 +1082,9 @@ async fn connecting_deferred_components_does_not_start_them_before_explicit_acti
                 RelationshipPolicy::default(),
             )
             .await
-            .unwrap();
+            .unwrap()
+            .ensure_committed()
+            .expect("desired topology committed");
         assert!(!source.observed().unwrap().started);
         assert!(!sink.observed().unwrap().started);
         assert_eq!(
@@ -1183,8 +1185,8 @@ impl drasi_lib::Source for SlowReadySource {
     fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
         std::collections::HashMap::new()
     }
-    async fn initialize(&self, context: drasi_lib::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
         if self.fail_initialize {
             self.base
                 .set_status(
@@ -1222,7 +1224,22 @@ impl drasi_lib::Source for SlowReadySource {
 
 #[tokio::test]
 async fn ordinary_source_handle_waits_for_running_not_only_successful_start_hook() {
-    let core = drasi_lib::DrasiLib::builder().build().await.unwrap();
+    let core = drasi_lib::DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
+        .build()
+        .await
+        .unwrap();
     core.start().await.unwrap();
     let base = Arc::new(
         drasi_lib::sources::SourceBase::new(drasi_lib::sources::SourceBaseParams::new(
@@ -1258,7 +1275,22 @@ async fn ordinary_source_handle_waits_for_running_not_only_successful_start_hook
 
 #[tokio::test]
 async fn ordinary_component_subscriptions_are_pipe_nodes_and_control_neighbors() {
-    let core = drasi_lib::DrasiLib::builder().build().await.unwrap();
+    let core = drasi_lib::DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
+        .build()
+        .await
+        .unwrap();
     let base = Arc::new(
         drasi_lib::sources::SourceBase::new(drasi_lib::sources::SourceBaseParams::new("source"))
             .unwrap(),
@@ -1341,7 +1373,22 @@ async fn ordinary_component_subscriptions_are_pipe_nodes_and_control_neighbors()
 
 #[tokio::test]
 async fn a_void_initializer_error_is_not_lost_when_the_initializer_returns() {
-    let core = drasi_lib::DrasiLib::builder().build().await.unwrap();
+    let core = drasi_lib::DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
+        .build()
+        .await
+        .unwrap();
     core.start().await.unwrap();
     let base = Arc::new(
         drasi_lib::sources::SourceBase::new(drasi_lib::sources::SourceBaseParams::new(

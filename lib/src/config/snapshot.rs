@@ -16,11 +16,17 @@
 //!
 //! A [`ConfigurationSnapshot`] captures the full topology, status, and configuration
 //! properties of all components in a drasi-lib instance. Hosts can serialize this
-//! snapshot to store it, and later use it to reconstruct an equivalent instance.
+//! snapshot for inspection and use known plugin configuration contracts when
+//! reconstructing an instance.
 //!
 //! **Important:** Sources and reactions are trait objects — their properties are
 //! captured but they cannot be automatically deserialized back into instances.
-//! The host must supply the appropriate plugin factories to reconstruct them.
+//! The host must supply compatible plugin factories and complete construction
+//! settings to reconstruct them. Properties alone do not prove an arbitrary
+//! application object is reconstructible. Factory-backed native definitions
+//! retain their explicit recipes in
+//! [`crate::computation::v1::GraphConfigurationSnapshot`]; its
+//! `reconstructible_topology` method never invents settings for opaque objects.
 
 use std::collections::HashMap;
 
@@ -28,7 +34,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::channels::ComponentStatus;
 use crate::component_graph::GraphEdge;
-use crate::config::schema::QueryConfig;
+use crate::config::schema::AssignedQueryConfig as QueryConfig;
+
+/// An opaque ordinary constructor has not supplied real configuration yet.
+/// Hosts must retain their supplied definition or wait; never persist placeholder
+/// plugin kinds and empty properties as if construction had succeeded.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "configuration for component {component} is unavailable: its constructor has not succeeded"
+)]
+pub struct ComponentConfigurationUnavailable {
+    /// UUID of the declaration whose configuration is unavailable.
+    pub component: crate::config::ComponentId,
+}
 
 /// A point-in-time snapshot of the full drasi-lib instance configuration.
 ///
@@ -72,6 +90,8 @@ pub struct ConfigurationSnapshot {
 pub struct SourceSnapshot {
     /// Source component identifier
     pub id: String,
+    /// Current graph-owned name, independent of the UUID.
+    pub name: String,
     /// Plugin type identifier (e.g., "postgres", "http", "grpc")
     pub source_type: String,
     /// Lifecycle status at the time of snapshot
@@ -80,7 +100,9 @@ pub struct SourceSnapshot {
     pub auto_start: bool,
     /// Configuration properties from [`crate::Source::properties()`], including secrets.
     ///
-    /// This is the authoritative config used to persist and recreate the source.
+    /// For an ordinary plugin with a known construction contract, this is its
+    /// authoritative persisted configuration. An arbitrary application's
+    /// properties do not by themselves identify a reconstruction factory.
     /// It intentionally contains sensitive values — see the persistence contract
     /// on [`crate::Source::properties()`] for details.
     pub properties: HashMap<String, serde_json::Value>,
@@ -105,6 +127,8 @@ pub struct BootstrapSnapshot {
 pub struct QueryConfigurationSnapshot {
     /// Query component identifier
     pub id: String,
+    /// Current graph-owned name.
+    pub name: String,
     /// Full query configuration (query string, source subscriptions, joins, etc.)
     pub config: QueryConfig,
     /// Lifecycle status at the time of snapshot
@@ -116,6 +140,8 @@ pub struct QueryConfigurationSnapshot {
 pub struct ReactionSnapshot {
     /// Reaction component identifier
     pub id: String,
+    /// Current graph-owned name.
+    pub name: String,
     /// Plugin type identifier (e.g., "log", "http", "grpc")
     pub reaction_type: String,
     /// Lifecycle status at the time of snapshot
@@ -123,10 +149,12 @@ pub struct ReactionSnapshot {
     /// Whether the reaction was configured to auto-start
     pub auto_start: bool,
     /// Query IDs this reaction subscribes to
-    pub queries: Vec<String>,
+    pub queries: Vec<super::ComponentReference>,
     /// Configuration properties from [`crate::Reaction::properties()`], including secrets.
     ///
-    /// This is the authoritative config used to persist and recreate the reaction.
+    /// For an ordinary plugin with a known construction contract, this is its
+    /// authoritative persisted configuration. An arbitrary application's
+    /// properties do not by themselves identify a reconstruction factory.
     /// It intentionally contains sensitive values — see the persistence contract
     /// on [`crate::Reaction::properties()`] for details.
     pub properties: HashMap<String, serde_json::Value>,
@@ -140,7 +168,8 @@ mod tests {
         let config = crate::Query::cypher("query")
             .query("MATCH (n:Item) RETURN n.name AS name")
             .from_input("source")
-            .build();
+            .build()
+            .unwrap();
         let expected = serde_json::json!({
             "id": "query",
             "config": config,

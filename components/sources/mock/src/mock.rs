@@ -578,7 +578,7 @@ impl Source for MockSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
         // Test-only: exercise the FFI identity-provider clone/drop path across the plugin
         // boundary. Gated entirely behind the `DRASI_MOCK_IDENTITY_CLONE_STRESS` environment
         // variable (read only here) so no test-only knob leaks into the public config schema.
@@ -599,7 +599,7 @@ impl Source for MockSource {
                 }
             }
         }
-        self.base.initialize(context).await;
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn set_bootstrap_provider(

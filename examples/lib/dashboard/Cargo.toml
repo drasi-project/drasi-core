@@ -9,6 +9,8 @@ description = "DrasiLib example demonstrating a real-time IoT sensor dashboard w
 [workspace]
 
 [dependencies]
+drasi-host-sdk = { path = "../../../components/host-sdk" }
+drasi-computation-transformer-query = { path = "../../../components/computation-plugins/transformers/query" }
 drasi-lib = { path = "../../../lib" }
 drasi-source-mock = { path = "../../../components/sources/mock" }
 drasi-reaction-dashboard = { path = "../../../components/reactions/dashboard" }

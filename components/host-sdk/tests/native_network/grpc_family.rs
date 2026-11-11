@@ -462,6 +462,18 @@ async fn native_grpc_source_query_and_batched_sink_execute_in_one_drasi_instance
     for linked in [true, false] {
         let receiver = server().await?;
         let core = drasi_lib::DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("grpc-family")
             .build()
             .await?;

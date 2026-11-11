@@ -1,4 +1,5 @@
 [package]
+rust-version.workspace = true
 name = "drasi-bootstrap-noop"
 version = "0.2.15"
 edition = "2021"

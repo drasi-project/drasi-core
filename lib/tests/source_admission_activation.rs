@@ -16,9 +16,12 @@ use tokio::sync::{mpsc, Semaphore};
 const GRAPH: &str = "__drasi_lib_runtime__";
 const INSTANCE: &str = "admission-activation";
 const DEADLINE: Duration = Duration::from_secs(10);
+const SOURCE_ID: &str = "e23229df-4678-47d7-ad6f-6cb140ab0c50";
+const SINK_ID: &str = "873b5ad5-677b-4c93-b4dc-5058e72e9b55";
+const CALLER_ID: &str = "974ddbbe-a288-4c61-a3cd-388d9cf74c2e";
 
-fn id(name: &str) -> ComponentId {
-    ComponentId::try_new(name).expect("component id")
+fn id(uuid: &str) -> ComponentId {
+    ComponentId::try_new(uuid).expect("component UUID")
 }
 
 fn port(name: &str) -> PortId {
@@ -29,9 +32,9 @@ fn size(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).expect("nonzero capacity")
 }
 
-fn descriptor(name: &str, direction: PortDirection) -> ComponentDescriptor {
+fn descriptor(uuid: &str, direction: PortDirection) -> ComponentDescriptor {
     ComponentDescriptor::try_new(
-        id(name),
+        id(uuid),
         vec![PortDescriptor::new(
             port(if direction == PortDirection::Output {
                 "out"
@@ -123,6 +126,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new(fail_start: bool) -> Self {
+        Self::with_capacity(fail_start, 128).await
+    }
+
+    async fn with_capacity(fail_start: bool, capacity: usize) -> Self {
         let directory = tempfile::tempdir().expect("store directory");
         let provider = LegacyIndexProviderAdapter::scoped(
             Arc::new(
@@ -141,13 +148,13 @@ impl Fixture {
         let channel = QosChannel::persistent_with_recovery(
             QosChannelDefinition {
                 stream: stream.clone(),
-                capacity: size(128),
+                capacity: size(capacity),
                 durable: true,
                 retention: RetentionPolicy::Backpressure,
                 subscribers: BTreeMap::from([("sink".into(), SubscriptionStart::Earliest)]),
             },
             provider
-                .create_indexes(GRAPH, "ingress")
+                .create_indexes(GRAPH, SOURCE_ID)
                 .await
                 .expect("indexes"),
             codec,
@@ -155,7 +162,7 @@ impl Fixture {
             QosRecoveryOptions::Admission(AdmissionOptions {
                 construction_scope: INSTANCE.into(),
                 graph_id: GRAPH.into(),
-                component_id: id("source"),
+                component_id: id(SOURCE_ID),
                 failure_scope: FailureMode::ProcessRestart,
                 max_producers: size(1),
                 receipts_per_producer: size(128),
@@ -170,16 +177,22 @@ impl Fixture {
         let (received, receive) = mpsc::unbounded_channel();
         let handled = Arc::new(Semaphore::new(0));
         let batch = ComponentBatch::builder()
-            .source(Box::new(Source {
-                descriptor: descriptor("source", PortDirection::Output),
-                admission: admission.clone(),
-                fail_start,
-            }))
-            .sink(Box::new(Sink {
-                descriptor: descriptor("sink", PortDirection::Input),
-                received,
-                handled: handled.clone(),
-            }))
+            .source(
+                ComponentName::try_new("source").expect("source name"),
+                Box::new(Source {
+                    descriptor: descriptor(SOURCE_ID, PortDirection::Output),
+                    admission: admission.clone(),
+                    fail_start,
+                }),
+            )
+            .sink(
+                ComponentName::try_new("sink").expect("sink name"),
+                Box::new(Sink {
+                    descriptor: descriptor(SINK_ID, PortDirection::Input),
+                    received,
+                    handled: handled.clone(),
+                }),
+            )
             .declare_resource(ResourceSpecification {
                 id: resource.clone(),
                 role: ResourceRole::StateStore,
@@ -189,17 +202,30 @@ impl Fixture {
             .expect("declare journal")
             .provide_resource(resource.clone(), channel.resource())
             .expect("provide actual journal")
-            .bind_stream(Endpoint::new(id("source"), port("out")), stream)
+            .bind_stream(Endpoint::new(id(SOURCE_ID), port("out")), stream)
             .connect(
                 EdgeDefinition {
-                    from: Endpoint::new(id("source"), port("out")),
-                    to: Endpoint::new(id("sink"), port("in")),
+                    from: Endpoint::new(id(SOURCE_ID), port("out")),
+                    to: Endpoint::new(id(SINK_ID), port("in")),
                 },
                 Box::new(channel.definition().pipe(resource, "sink")),
             )
             .build()
             .expect("native graph");
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id(INSTANCE)
             .with_components(batch)
             .build()
@@ -254,7 +280,7 @@ async fn real_mailbox_after_start() {
     assert!(fixture.admission.is_active().expect("active"));
     let session = fixture
         .admission
-        .register_producer(id("caller"))
+        .register_producer(id(CALLER_ID))
         .await
         .expect("immediate registration");
     let input = input();
@@ -306,7 +332,7 @@ async fn real_mailbox_after_start() {
     );
     fixture
         .core
-        .stop_source("source")
+        .stop_source_by_id(&id(SOURCE_ID))
         .await
         .expect("stop native source");
     assert!(!fixture.admission.is_active().expect("revoked"));
@@ -315,12 +341,12 @@ async fn real_mailbox_after_start() {
         Err(PipeError::Closed)
     ));
     assert!(matches!(
-        fixture.admission.register_producer(id("caller")).await,
+        fixture.admission.register_producer(id(CALLER_ID)).await,
         Err(PipeError::Closed)
     ));
     fixture
         .core
-        .start_source("source")
+        .start_source_by_id(&id(SOURCE_ID))
         .await
         .expect("restart native source");
     fixture
@@ -331,7 +357,7 @@ async fn real_mailbox_after_start() {
     assert_eq!(
         fixture
             .admission
-            .register_producer(id("caller"))
+            .register_producer(id(CALLER_ID))
             .await
             .expect("same durable session"),
         session
@@ -369,6 +395,88 @@ async fn fence_and_actual_admission_work_on_multithread_runtime() {
     tokio::time::timeout(DEADLINE, real_mailbox_after_start())
         .await
         .expect("activation deadline");
+}
+
+async fn awaitable_admission_after_start() {
+    use drasi_lib::observability::{ExecutionContext, ExecutionScope, TraceContextV1};
+
+    let mut fixture = Fixture::with_capacity(false, 1).await;
+    fixture.core.start().await.expect("host start");
+    fixture.admission.wait_active().await.expect("mailbox");
+    let session = fixture
+        .admission
+        .register_producer(id(CALLER_ID))
+        .await
+        .expect("session");
+    let input = input();
+    let trace = TraceContextV1::new([1; 16], [2; 8], 1, None).expect("trace context");
+    assert_eq!(
+        ExecutionScope::new(ExecutionContext::new(trace.clone()))
+            .scope(fixture.admission.admit_wait(&session, 1, &input))
+            .await
+            .expect("first input")
+            .position,
+        1
+    );
+    let first = fixture
+        .received
+        .recv()
+        .await
+        .expect("first downstream input");
+    assert_eq!(first.execution_context.trace(), Some(&trace));
+    {
+        let waiting = fixture.admission.admit_wait(&session, 2, &input);
+        tokio::pin!(waiting);
+        assert!(futures::poll!(&mut waiting).is_pending());
+        // This later mailbox request proves the graph has processed the full
+        // journal rejection and is not blocked waiting for subscriber capacity.
+        assert_eq!(
+            fixture
+                .admission
+                .producer_status(&session)
+                .await
+                .expect("status during backpressure")
+                .next_sequence,
+            Some(2)
+        );
+        assert!(futures::poll!(&mut waiting).is_pending());
+        fixture.handled.add_permits(1);
+        assert_eq!(
+            waiting.await.expect("admit after acknowledgement").position,
+            2
+        );
+    }
+    let second = fixture
+        .received
+        .recv()
+        .await
+        .expect("second downstream input");
+    assert!(second.execution_context.trace().is_none());
+    assert_eq!(
+        fixture
+            .admission
+            .admit_wait(&session, 2, &input)
+            .await
+            .expect("idempotent retry")
+            .position,
+        2
+    );
+    fixture.handled.add_permits(1);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn awaitable_admission_backpressures_through_the_actual_graph() {
+    tokio::time::timeout(DEADLINE, awaitable_admission_after_start())
+        .await
+        .expect("admission deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn awaitable_admission_backpressures_on_multithread_runtime() {
+    tokio::time::timeout(DEADLINE, awaitable_admission_after_start())
+        .await
+        .expect("admission deadline");
 }
 
 #[tokio::test]

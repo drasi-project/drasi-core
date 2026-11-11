@@ -246,7 +246,7 @@ async fn static_rocksdb_descriptor_drives_query() -> Result<()> {
     let (source, handle) = test_source("people-src")?;
 
     let core = Arc::new(
-        DrasiLib::builder()
+        lib_integration_tests::query_builder()
             .with_id("static-rocksdb")
             .with_index_provider("rocks-1", provider)
             .with_source(source)
@@ -295,7 +295,7 @@ async fn static_rocksdb_index_persists_across_restart() -> Result<()> {
     let provider = build_provider_from_config(&backend_config).await;
     let (source, handle) = test_source("people-src")?;
     let core = Arc::new(
-        DrasiLib::builder()
+        lib_integration_tests::query_builder()
             .with_id("static-rocksdb")
             .with_index_provider("rocks-1", provider)
             .with_source(source)
@@ -377,7 +377,7 @@ async fn static_rocksdb_shutdown_releases_lock_for_same_process_reopen() -> Resu
     let provider1 = build_provider_from_config(&backend_config).await;
     let (source1, handle1) = test_source("people-src")?;
     let core1 = Arc::new(
-        DrasiLib::builder()
+        lib_integration_tests::query_builder()
             .with_id("static-rocksdb-reopen")
             .with_index_provider("rocks-1", provider1)
             .with_source(source1)
@@ -415,7 +415,7 @@ async fn static_rocksdb_shutdown_releases_lock_for_same_process_reopen() -> Resu
     let provider2 = build_provider_from_config(&backend_config).await;
     let (source2, _handle2) = test_source("people-src")?;
     let core2 = Arc::new(
-        DrasiLib::builder()
+        lib_integration_tests::query_builder()
             .with_id("static-rocksdb-reopen")
             .with_index_provider("rocks-1", provider2)
             .with_source(source2)
@@ -476,7 +476,7 @@ async fn static_rocksdb_default_provider_backs_unspecified_query() -> Result<()>
     let provider = build_provider_from_config(&backend_config).await;
     let (source, handle) = test_source("people-src")?;
     let core = Arc::new(
-        DrasiLib::builder()
+        lib_integration_tests::query_builder()
             .with_id("static-rocksdb")
             // As drasi-server does when persist_index is enabled: register the
             // provider as the default for any query without an explicit backend.

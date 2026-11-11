@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use crate::{IndexDb, RocksDbSessionState};
 use async_trait::async_trait;
-use drasi_core::interface::{IndexError, LiveResultsWriter, RowMutation};
+use drasi_core::interface::{IndexError, LiveResultsWriter, OutboxPageLimits, RowMutation};
 use rocksdb::{ColumnFamilyDescriptor, IteratorMode, WriteBatchWithTransaction};
 use tokio::task;
 
@@ -170,6 +170,21 @@ impl LiveResultsWriter for RocksDbLiveResultsWriter {
         .map_err(IndexError::other)?
     }
 
+    async fn read_page(
+        &self,
+        query_id: &str,
+        after_signature: Option<u64>,
+        limits: OutboxPageLimits,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        let db = self.db.clone();
+        let query = query_id.to_owned();
+        task::spawn_blocking(move || {
+            crate::outbox::read_keyed_page(&db, LIVE_RESULTS_CF, &query, after_signature, limits)
+        })
+        .await
+        .map_err(IndexError::other)?
+    }
+
     async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
         let db = self.db.clone();
         let session_state = self.session_state.clone();
@@ -182,17 +197,7 @@ impl LiveResultsWriter for RocksDbLiveResultsWriter {
                 .expect("live_results cf not found");
             if require_session {
                 return session_state.with_txn(|txn| {
-                    for item in txn.iterator_cf(
-                        &cf,
-                        IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-                    ) {
-                        let (key, _) = item.map_err(IndexError::other)?;
-                        if !key.starts_with(&prefix) {
-                            break;
-                        }
-                        txn.delete_cf(&cf, key).map_err(IndexError::other)?;
-                    }
-                    Ok(())
+                    crate::session_state::delete_transaction_prefix(txn, &cf, &prefix)
                 });
             }
             let iter = db.iterator_cf(

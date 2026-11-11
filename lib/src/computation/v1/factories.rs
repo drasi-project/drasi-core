@@ -18,7 +18,7 @@ use super::{
     ComponentFactory, ComputationTopologyFactory, ContinuousQueryFactory, FactoryRegistry,
     LegacyReactionFactory, LegacySourceFactory, MiddlewareTransformerFactory, QueryReplayFactory,
     QueryResultsOutletFactory, ReactionPluginAdapterFactory, SourcePluginAdapterFactory,
-    TransactionTransformerFactory, WalReplaySourceFactory,
+    SourceTimeMergeFactory, TransactionTransformerFactory, WalReplaySourceFactory,
 };
 
 impl FactoryRegistry {
@@ -31,6 +31,7 @@ impl FactoryRegistry {
                     Arc::new(ContinuousQueryFactory::default()),
                     Arc::new(MiddlewareTransformerFactory::default()),
                     Arc::new(TransactionTransformerFactory::default()),
+                    Arc::new(SourceTimeMergeFactory::default()),
                     Arc::new(LegacySourceFactory::default()),
                     Arc::new(SourcePluginAdapterFactory::default()),
                     Arc::new(LegacyReactionFactory::default()),

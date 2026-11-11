@@ -22,9 +22,8 @@ use tokio_stream::StreamExt;
 use super::lru::SafeLru;
 
 use crate::{
-    interface::{ElementIndex, ElementStream, IndexError},
-    models::{Element, ElementReference, QueryJoin},
-    path_solver::match_path::MatchPath,
+    interface::{ElementIndex, ElementStream, IndexError, IndexJoin},
+    models::{Element, ElementReference},
 };
 
 pub struct CachedElementIndex {
@@ -270,8 +269,8 @@ impl ElementIndex for CachedElementIndex {
         Ok(())
     }
 
-    async fn set_joins(&self, match_path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
-        self.element_index.set_joins(match_path, joins).await;
+    async fn set_joins(&self, joins: &[IndexJoin]) -> Result<(), IndexError> {
+        self.element_index.set_joins(joins).await
     }
 }
 

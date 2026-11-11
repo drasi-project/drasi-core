@@ -69,7 +69,7 @@ fn durability_config(
 async fn init_source_with_wal(source: &dyn Source, wal: Arc<dyn WalProvider>, source_id: &str) {
     let (update_tx, _update_rx) = tokio::sync::mpsc::channel(16);
     source
-        .initialize(SourceRuntimeContext {
+        .bind_runtime_context(SourceRuntimeContext {
             instance_id: "test-instance".to_string(),
             source_id: source_id.to_string(),
             update_tx: update_tx.into(),
@@ -80,6 +80,7 @@ async fn init_source_with_wal(source: &dyn Source, wal: Arc<dyn WalProvider>, so
             log_binding: None,
         })
         .await;
+    source.initialize().await.expect("source initialization");
 }
 
 /// Helper: create subscription settings (no resume)
@@ -562,7 +563,7 @@ async fn test_http_deprovision_removes_wal() {
     assert!(wal.event_count("http-deprov").await.unwrap() > 0);
 
     source.stop().await.unwrap();
-    source.deprovision().await.unwrap();
+    source.delete_owned_resources().await.unwrap();
 
     let count = wal.event_count("http-deprov").await;
     assert!(count.is_err(), "WAL should be deleted after deprovision");

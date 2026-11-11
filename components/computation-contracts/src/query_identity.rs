@@ -65,6 +65,20 @@ struct IdentityRecord {
 }
 
 impl QueryRecoveryIdentity {
+    /// Use the actual producer's lifetime for native query recovery identity.
+    pub fn for_producer(
+        producer: &super::GraphProducerIdentity,
+        configuration_hash: u64,
+    ) -> Result<Self, QueryIdentityError> {
+        Self::try_new(
+            producer.graph_id(),
+            producer.component_id().clone(),
+            configuration_hash,
+            (!producer.persistent()).then_some(producer.incarnation()),
+        )?
+        .with_construction_scope(producer.construction_scope())
+    }
+
     pub fn try_new(
         graph_id: impl Into<String>,
         query_id: ComponentId,
@@ -218,7 +232,7 @@ mod output_epoch_tests {
     fn identity(incarnation: Option<uuid::Uuid>) -> QueryRecoveryIdentity {
         QueryRecoveryIdentity::try_new(
             "graph",
-            ComponentId::try_new("query").unwrap(),
+            ComponentId::try_new("00112233-4455-4677-8899-aabbccddeeff").unwrap(),
             42,
             incarnation,
         )

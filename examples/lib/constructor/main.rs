@@ -19,7 +19,7 @@
 //!
 //! - Creating components using config structs and constructors
 //! - Dynamically adding sources, queries, and reactions to DrasiLib
-//! - Using the DrasiLib API (`add_source`, `create_query`, `add_reaction`)
+//! - Using the DrasiLib API (`add_source`, `add_query`, `add_reaction`)
 //!
 //! This approach is useful when you want to:
 //! - Add sources and reactions dynamically at runtime
@@ -59,13 +59,15 @@ use drasi_lib::{
     DrasiLib,
     QueryConfig,
     QueryLanguage,
-    // Import SourceTrait to access set_bootstrap_provider method
-    SourceTrait,
+    // Import Source to access set_bootstrap_provider.
+    Source,
 };
 
 // Component types and configs - using constructors instead of builders
 use drasi_bootstrap_scriptfile::{ScriptFileBootstrapConfig, ScriptFileBootstrapProvider};
-use drasi_reaction_log::{LogReaction, LogReactionConfig};
+use drasi_reaction_log::{
+    LogReaction, LogReactionConfig, QueryConfig as LogQueryConfig, TemplateSpec,
+};
 use drasi_source_http::{HttpSource, HttpSourceConfig};
 
 #[tokio::main]
@@ -86,6 +88,12 @@ async fn main() -> Result<()> {
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_host_sdk::computation::NativePlugin::from_definition(
+                    drasi_computation_transformer_query::plugin()?,
+                )?
+                .query_factory()?,
+            )
             .with_id("http-source-api-example")
             .build()
             .await?,
@@ -130,6 +138,8 @@ async fn main() -> Result<()> {
         adaptive_max_wait_ms: Some(50),
         adaptive_min_wait_ms: Some(10),
         adaptive_window_secs: None,
+        webhooks: None,
+        durability: None,
     };
 
     // Create source using constructor
@@ -171,6 +181,8 @@ async fn main() -> Result<()> {
             component: "stock-prices".to_string(),
             pipeline: vec![],
             port: None,
+            nodes: vec![],
+            relations: vec![],
         }],
         auto_start: true,
         joins: None,
@@ -180,6 +192,8 @@ async fn main() -> Result<()> {
         dispatch_mode: None,
         storage_backend: None,
         recovery_policy: None,
+        outbox_capacity: 1000,
+        bootstrap_timeout_secs: 300,
         result: Default::default(),
     };
 
@@ -199,9 +213,12 @@ async fn main() -> Result<()> {
 
     // Create reaction config struct
     let log_config = LogReactionConfig {
-        added_template: Some("[+] {{after.symbol}}: ${{after.price}} (prev: ${{after.previous_close}}, vol: {{after.volume}})".to_string()),
-        updated_template: Some("[~] {{after.symbol}}: ${{before.price}} -> ${{after.price}} (vol: {{after.volume}})".to_string()),
-        deleted_template: Some("[-] {{before.symbol}} removed".to_string()),
+        routes: Default::default(),
+        default_template: Some(LogQueryConfig {
+            added: Some(TemplateSpec::new("[+] {{after.symbol}}: ${{after.price}} (prev: ${{after.previous_close}}, vol: {{after.volume}})")),
+            updated: Some(TemplateSpec::new("[~] {{after.symbol}}: ${{before.price}} -> ${{after.price}} (vol: {{after.volume}})")),
+            deleted: Some(TemplateSpec::new("[-] {{before.symbol}} removed")),
+        }),
     };
 
     // Create reaction using constructor with:
@@ -209,7 +226,7 @@ async fn main() -> Result<()> {
     // - queries: list of query IDs to subscribe to
     // - config: reaction-specific configuration
     let log_reaction =
-        LogReaction::new("console-logger", vec!["all-prices".to_string()], log_config);
+        LogReaction::new("console-logger", vec!["all-prices".to_string()], log_config)?;
 
     // =========================================================================
     // Step 8: Add Reaction to DrasiLib Dynamically

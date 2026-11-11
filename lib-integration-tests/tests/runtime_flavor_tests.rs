@@ -24,7 +24,7 @@ use tokio::time::timeout;
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_drasi_lib_builds_on_current_thread_runtime() {
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_id("current-thread-runtime")
         .build()
         .await
@@ -35,7 +35,7 @@ async fn test_drasi_lib_builds_on_current_thread_runtime() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_drasi_lib_builds_on_multi_thread_runtime() {
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_id("multi-thread-runtime")
         .build()
         .await
@@ -120,7 +120,7 @@ async fn run_source_query_diff_cycle(instance_id: &str) {
         .build();
 
     let drasi = Arc::new(
-        DrasiLib::builder()
+        lib_integration_tests::query_builder()
             .with_id(instance_id)
             .with_source(app_source)
             .with_query(query)
@@ -203,7 +203,7 @@ async fn stop_query_helpers_after_native_stop(flavor: &str) -> anyhow::Result<()
                 .enable_bootstrap(false)
                 .build()
         };
-        let drasi = DrasiLib::builder()
+        let drasi = lib_integration_tests::query_builder()
             .with_id(format!("query-stop-{flavor}-{operation}"))
             .with_source(source)
             .with_query(query("query"))

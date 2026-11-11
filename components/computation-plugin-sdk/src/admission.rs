@@ -372,7 +372,7 @@ mod tests {
     unsafe extern "C" fn describe(_: *mut c_void) -> abi::Reply {
         transport::reply_boundary(|| {
             let identity: GraphProducerIdentity = serde_json::from_value(serde_json::json!({
-                "construction_scope":"scope","graph_id":"graph","component_id":"source","stream":"in",
+                "construction_scope":"scope","graph_id":"graph","component_id":"aab547f7-dbc6-4e8f-9556-95b4a195c15c","stream":"in",
                 "incarnation":"00000000-0000-0000-0000-000000000001","persistent":true
             })).unwrap();
             wire::encode(&identity).map_err(Failure::from)
@@ -432,7 +432,7 @@ mod tests {
         let service = unsafe { NativeAdmission::from_borrowed(&table, codec) }.unwrap();
         let copy = service.clone();
         assert_eq!(state.retains.load(Ordering::SeqCst), 1);
-        let producer = ComponentId::try_new("client").unwrap();
+        let producer = ComponentId::try_new("01012a9b-4379-42f3-81e6-9add5d35126d").unwrap();
         let session = ProducerSession {
             incarnation: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
             producer: producer.clone(),

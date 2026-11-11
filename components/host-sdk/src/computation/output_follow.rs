@@ -95,6 +95,18 @@ impl LeaseHandle {
             OperationFuture::new(operation)
         }
     }
+
+    fn snapshot_page(&self) -> Result<OperationFuture, Failure> {
+        let table = unsafe { &*self.0.vtable };
+        let next = table
+            .snapshot_page
+            .ok_or_else(|| Failure::protocol("native follow lease omitted snapshot pages"))?;
+        let mut operation = abi::OperationHandle::null();
+        unsafe {
+            take_status(next(self.0.state, &mut operation))?;
+            OperationFuture::new(operation)
+        }
+    }
 }
 
 impl Drop for LeaseHandle {
@@ -111,7 +123,7 @@ pub(super) struct NativeFollowProvider {
 
 impl NativeFollowProvider {
     pub(super) fn open(
-        extension: ext::PluginOutputFollowV1,
+        extension: ext::PluginOutputFollowV2,
         component: &Arc<RemoteComponent>,
         port: &PortId,
         context: Context,
@@ -149,18 +161,11 @@ impl SnapshotFollowProvider for NativeFollowProvider {
         let (generation, mut changed) = context.fence.enter()?;
         // The lease handle is owned from here: every early return releases it.
         let (lease, operation) = self.handle.begin(&request).map_err(failure_error)?;
-        let bytes = tokio::select! {
-            biased;
-            _ = changed.changed() => return Err(OutputReadError::Retired),
-            result = operation => result.map_err(failure_error)?,
-        };
-        if !context.fence.is_current(generation) {
-            return Err(OutputReadError::Retired);
-        }
-        if bytes.len() > abi::output_reads::MAX_READ_BYTES {
-            return Err(invalid("native output follow open reply exceeds its bound"));
-        }
-        let snapshot = context.snapshot_from(&bytes)?;
+        let snapshot = context
+            .snapshot_transfer(operation, generation, &mut changed, || {
+                lease.snapshot_page()
+            })
+            .await?;
         let follow = NativeFollow {
             lease,
             context: context.clone(),
@@ -299,6 +304,7 @@ mod tests {
         header: abi::Header::new::<ext::OutputFollowLeaseVTable>(),
         release: Some(fake_release),
         next: Some(fake_next),
+        snapshot_page: None,
     };
 
     struct Fixture {

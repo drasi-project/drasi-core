@@ -389,7 +389,7 @@ async fn test_source_remove_with_cleanup_calls_deprovision() {
     let source = TestSource::new("deprov-src-1").unwrap();
     let deprov_flag = source.deprovision_called();
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .build()
         .await
@@ -421,7 +421,7 @@ async fn test_source_remove_without_cleanup_skips_deprovision() {
     let source = TestSource::new("deprov-src-2").unwrap();
     let deprov_flag = source.deprovision_called();
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .build()
         .await
@@ -446,7 +446,7 @@ async fn test_source_remove_stopped_with_cleanup() {
     let source = TestSource::new("deprov-src-3").unwrap();
     let deprov_flag = source.deprovision_called();
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .build()
         .await
@@ -484,7 +484,7 @@ async fn test_reaction_remove_with_cleanup_calls_deprovision() {
     let reaction = TestReaction::new("deprov-rxn-1", vec!["deprov-rxn-q-1".to_string()]);
     let deprov_flag = reaction.deprovision_called();
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .with_query(query)
         .with_reaction(reaction)
@@ -516,7 +516,7 @@ async fn test_reaction_remove_without_cleanup_skips_deprovision() {
     let reaction = TestReaction::new("deprov-rxn-2", vec!["deprov-rxn-q-2".to_string()]);
     let deprov_flag = reaction.deprovision_called();
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .with_query(query)
         .with_reaction(reaction)
@@ -548,7 +548,7 @@ async fn test_source_update_running_stops_and_restarts() {
     let start_count = source.start_count();
     let stop_count = source.stop_count();
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .build()
         .await
@@ -598,7 +598,7 @@ async fn test_source_update_running_stops_and_restarts() {
 async fn test_source_update_stopped_replaces_without_restart() {
     let source = TestSource::new("reconfig-src-2").unwrap();
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .build()
         .await
@@ -644,7 +644,7 @@ async fn test_reaction_update_running_stops_and_restarts() {
     let reaction = TestReaction::new("reconfig-rxn-1", vec!["reconfig-rxn-q-1".to_string()]);
     let stop_count = reaction.stop_count();
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .with_query(query)
         .with_reaction(reaction)
@@ -688,7 +688,7 @@ async fn test_reaction_update_running_stops_and_restarts() {
 async fn test_source_update_emits_reconfiguring_event() {
     let source = TestSource::new("reconfig-evt-src").unwrap();
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .build()
         .await
@@ -744,7 +744,7 @@ async fn test_reaction_update_emits_reconfiguring_event() {
         .build();
     let reaction = TestReaction::new("reconfig-evt-rxn", vec!["reconfig-evt-rxn-q".to_string()]);
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .with_query(query)
         .with_reaction(reaction)
@@ -796,7 +796,7 @@ async fn test_reaction_update_emits_reconfiguring_event() {
 async fn test_source_update_preserves_log_history() {
     let source = TestSource::new("reconfig-log-src").unwrap();
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .build()
         .await
@@ -852,7 +852,7 @@ async fn test_source_update_preserves_log_history() {
 async fn test_source_update_active_log_stream_continues() {
     let source = TestSource::new("reconfig-stream-src").unwrap();
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .build()
         .await
@@ -913,7 +913,10 @@ async fn test_source_update_active_log_stream_continues() {
 /// Removing a non-existent source returns an error.
 #[tokio::test]
 async fn test_remove_nonexistent_source_fails() {
-    let drasi = DrasiLib::builder().build().await.unwrap();
+    let drasi = lib_integration_tests::query_builder()
+        .build()
+        .await
+        .unwrap();
     drasi.start().await.unwrap();
 
     let result = drasi.remove_source("does-not-exist", true).await;
@@ -925,7 +928,10 @@ async fn test_remove_nonexistent_source_fails() {
 /// Updating a non-existent source returns an error.
 #[tokio::test]
 async fn test_update_nonexistent_source_fails() {
-    let drasi = DrasiLib::builder().build().await.unwrap();
+    let drasi = lib_integration_tests::query_builder()
+        .build()
+        .await
+        .unwrap();
     drasi.start().await.unwrap();
 
     let result = drasi
@@ -939,7 +945,10 @@ async fn test_update_nonexistent_source_fails() {
 /// Removing a non-existent reaction returns an error.
 #[tokio::test]
 async fn test_remove_nonexistent_reaction_fails() {
-    let drasi = DrasiLib::builder().build().await.unwrap();
+    let drasi = lib_integration_tests::query_builder()
+        .build()
+        .await
+        .unwrap();
     drasi.start().await.unwrap();
 
     let result = drasi.remove_reaction("does-not-exist", true).await;
@@ -951,7 +960,10 @@ async fn test_remove_nonexistent_reaction_fails() {
 /// Updating a non-existent reaction returns an error.
 #[tokio::test]
 async fn test_update_nonexistent_reaction_fails() {
-    let drasi = DrasiLib::builder().build().await.unwrap();
+    let drasi = lib_integration_tests::query_builder()
+        .build()
+        .await
+        .unwrap();
     drasi.start().await.unwrap();
 
     let result = drasi
@@ -993,7 +1005,7 @@ async fn test_source_remove_with_cleanup_clears_state_store() {
 
     let source = TestSource::new("cleanup-src").unwrap();
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .with_state_store_provider(state_store.clone() as Arc<dyn StateStoreProvider>)
         .build()
@@ -1032,7 +1044,7 @@ async fn test_source_remove_without_cleanup_preserves_state_store() {
 
     let source = TestSource::new("no-cleanup-src").unwrap();
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .with_state_store_provider(state_store.clone() as Arc<dyn StateStoreProvider>)
         .build()

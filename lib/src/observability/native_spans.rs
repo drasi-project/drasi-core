@@ -412,7 +412,7 @@ mod tests {
         encode_telemetry, PluginRootSampling, TelemetryAttribute, TelemetryScope,
         TelemetrySpanStatus, TraceContextV1,
     };
-    use drasi_computation_contracts::{ComponentId, ComponentRole, ComponentSemanticKind};
+    use drasi_computation_contracts::{ComponentRole, ComponentSemanticKind};
 
     #[derive(Debug)]
     struct Processor {
@@ -477,7 +477,7 @@ mod tests {
             scope: TelemetryScope::graph("instance", "graph")
                 .unwrap()
                 .component(
-                    ComponentId::try_new("component").unwrap(),
+                    crate::test_helpers::component_id("component"),
                     ComponentRole::Service,
                     ComponentSemanticKind::Service,
                 ),

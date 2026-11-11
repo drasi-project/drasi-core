@@ -10,26 +10,31 @@
 
 use crate::*;
 
-pub const VERSION: u32 = 1;
-pub const SYMBOL: &[u8] = b"drasi_computation_plugin_output_reads_v1\0";
-pub type OutputReadsFn = unsafe extern "C" fn() -> *const PluginOutputReadsV1;
+pub const VERSION: u32 = 2;
+pub const SYMBOL: &[u8] = b"drasi_computation_plugin_output_reads_v2\0";
+pub type OutputReadsFn = unsafe extern "C" fn() -> *const PluginOutputReadsV2;
 
-/// Complete encoded snapshot or replay reply. A larger answer is an explicit limit
-/// outcome, never a truncated one.
+/// One encoded reply or transfer page. Transfers do not impose this limit on
+/// the complete snapshot/history, but every individual record/envelope must fit.
 pub const MAX_READ_BYTES: usize = 16 * 1024 * 1024;
 /// Encoded replay cursor request.
 pub const MAX_REQUEST_BYTES: usize = 16 * 1024;
-/// Records in one snapshot.
+/// Records in a single-message snapshot, not the complete paged transfer.
 pub const MAX_SNAPSHOT_RECORDS: usize = 16 * 1024;
-/// Envelopes in one replay.
+/// Envelopes in a single-message replay, not the complete paged transfer.
 pub const MAX_REPLAY_ENVELOPES: usize = 1024;
 /// Reads in flight across one component's providers; excess reads report BUSY.
 pub const MAX_CONCURRENT_READS: usize = 16;
+/// Open transfers across one component's providers.
+pub const MAX_TRANSFERS: usize = 16;
+/// Preferred page size. A larger individual item may occupy its own page.
+pub const TARGET_PAGE_BYTES: usize = 1024 * 1024;
+pub const MAX_PAGE_ITEMS: usize = 1024;
 const _: () = assert!(MAX_READ_BYTES < MAX_MESSAGE_BYTES);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct PluginOutputReadsV1 {
+pub struct PluginOutputReadsV2 {
     pub header: Header,
     pub version: u32,
     pub reserved: u32,
@@ -71,11 +76,28 @@ pub struct OutputReadVTable {
     pub request: Option<
         unsafe extern "C" fn(*mut c_void, u32, BorrowedBytes, *mut OperationHandle) -> Status,
     >,
+    /// Open an independently owned, activation-fenced transfer for SNAPSHOT,
+    /// REPLAY_AFTER, QUERY_SNAPSHOT, QUERY_REPLAY or QUERY_VIEW. Opening performs
+    /// no provider I/O. Its handle accepts transfer_operation requests and must
+    /// be released, including when initialization fails or is cancelled.
+    /// Only transfer handles omit this function.
+    pub transfer: Option<
+        unsafe extern "C" fn(*mut c_void, u32, BorrowedBytes, *mut OutputReadHandle) -> Status,
+    >,
+}
+
+pub mod transfer_operation {
+    /// Capture one coherent provider result and return its metadata; empty input.
+    pub const START: u32 = 1;
+    /// Return the next bounded page; empty input. Pages are numbered from one.
+    /// A transfer accepts one request at a time and cannot be restarted.
+    pub const NEXT: u32 = 2;
 }
 
 pub mod capability {
     pub const SNAPSHOT: u32 = 1;
     pub const REPLAY: u32 = 2;
+    pub const QUERY: u32 = 3;
 }
 
 pub mod operation {
@@ -85,6 +107,17 @@ pub mod operation {
     pub const COMMITTED_HEAD: u32 = 2;
     /// Replay handle; input is an encoded cursor.
     pub const REPLAY_AFTER: u32 = 3;
+    pub const QUERY_SNAPSHOT: u32 = 4;
+    pub const QUERY_HEAD: u32 = 5;
+    pub const QUERY_REPLAY: u32 = 6;
+    /// Query handle; one coherent snapshot and retained-history suffix; empty input.
+    pub const QUERY_VIEW: u32 = 7;
+    /// Metadata-only canonical output gauges; requires query_observations.
+    pub const QUERY_OBSERVATION: u32 = 8;
+    /// Metadata-only recovery observation; active or positively retained state.
+    pub const QUERY_RECOVERY_OBSERVATION: u32 = 9;
+    /// Coherent recovery rows/history, transferred through the query-view pages.
+    pub const QUERY_RECOVERY_VIEW: u32 = 10;
 }
 
 pub mod status {
@@ -100,12 +133,12 @@ mod tests {
     #[test]
     fn output_read_extension_preserves_base_layouts() {
         let pointer = size_of::<usize>();
-        assert_eq!(size_of::<PluginOutputReadsV1>(), 24 + pointer);
+        assert_eq!(size_of::<PluginOutputReadsV2>(), 24 + pointer);
         assert_eq!(size_of::<OutputReadHandle>(), 2 * pointer);
-        assert_eq!(size_of::<OutputReadVTable>(), 16 + 2 * pointer);
+        assert_eq!(size_of::<OutputReadVTable>(), 16 + 3 * pointer);
         assert_eq!(size_of::<ComponentVTable>(), 16 + 5 * pointer);
         assert_eq!(size_of::<OperationVTable>(), 16 + 3 * pointer);
-        assert_eq!(ABI_VERSION, "1.0.0");
-        assert_eq!(WIRE_VERSION, 1);
+        assert_eq!(ABI_VERSION, "2.0.0");
+        assert_eq!(WIRE_VERSION, 2);
     }
 }

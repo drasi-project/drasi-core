@@ -21,36 +21,35 @@ use std::{
 use tokio::sync::watch;
 
 #[derive(Clone)]
-pub(super) struct CatalogQuery {
-    pub generation: u64,
+pub(super) struct LocalQueryOutput {
     pub config_hash: u64,
     pub results: QueryResults,
     pub reader: Arc<super::query_output::QueryOutputProvider>,
     pub progress: Option<Arc<QuerySourceProgress>>,
     pub incarnation: Arc<std::sync::RwLock<Option<uuid::Uuid>>>,
-    pub checkpoint: Arc<std::sync::RwLock<Option<Arc<dyn drasi_core::interface::CheckpointStore>>>>,
+    pub _checkpoint:
+        Arc<std::sync::RwLock<Option<Arc<dyn drasi_core::interface::CheckpointStore>>>>,
     pub output_persistence: Arc<std::sync::RwLock<Option<bool>>>,
 }
 
+#[derive(Clone)]
+pub(super) struct CatalogQuery {
+    pub generation: u64,
+    pub output: Arc<super::query_api::QueryApiOutput>,
+    pub telemetry: Arc<crate::observability::QueryProgressObservations>,
+}
+
+#[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct QueryOutputGenerationReader {
     query: ComponentId,
     results: QueryResults,
 }
 
+#[cfg(test)]
 impl QueryOutputGenerationReader {
     pub(crate) fn generation(&self) -> u64 {
-        self.results
-            .state
-            .read()
-            .unwrap_or_else(|poisoned| {
-                log::error!(
-                    "Reading stored output generation for '{}' from poisoned query state",
-                    self.query
-                );
-                poisoned.into_inner()
-            })
-            .generation
+        self.results.observed_generation(self.query.as_str())
     }
 }
 
@@ -89,13 +88,13 @@ pub(crate) struct QuerySubscriptionHead {
     pub(crate) generation: u64,
     pub(super) config_hash: u64,
     pub(super) incarnation: Option<uuid::Uuid>,
-    results: QueryResults,
+    pub(super) output: Arc<super::query_api::QueryApiOutput>,
 }
 
 impl QuerySubscriptionHead {
     pub(super) fn belongs_to(&self, query: &CatalogQuery) -> bool {
         // Linked parent/child catalogs assign different registration generations.
-        Arc::ptr_eq(&self.results.state, &query.results.state)
+        self.output.same_owner(&query.output)
     }
 }
 impl CatalogSubscription {
@@ -105,6 +104,7 @@ impl CatalogSubscription {
             .ok_or_else(|| anyhow::anyhow!("subscription has no captured query head"))
     }
 
+    #[cfg(test)]
     pub(crate) async fn receive(&mut self) -> anyhow::Result<ChangeEnvelope> {
         Ok(self.receive_message().await?.envelope)
     }
@@ -119,6 +119,7 @@ impl CatalogSubscription {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn receive_after_head(&mut self) -> anyhow::Result<ChangeEnvelope> {
         Ok(self.receive_message_after_head().await?.envelope)
     }
@@ -129,8 +130,9 @@ impl CatalogSubscription {
         loop {
             let message = self.receive_message().await?;
             if let Some(head) = &self.head {
-                let current = head.results.snapshot()?;
-                if current.generation == head.generation
+                if QueryChangeCodec::query_generation(&message.envelope)? == head.generation
+                    && QueryRecoveryIdentity::from_query_output(&message.envelope)?.incarnation()
+                        == head.incarnation
                     && QueryChangeCodec::query_sequence(&message.envelope)? <= head.sequence
                 {
                     continue;
@@ -187,7 +189,9 @@ impl Drop for QueryRegistration {
                 .get(&self.id)
                 .is_some_and(|entry| entry.generation == self.generation)
             {
-                state.entries.remove(&self.id);
+                if let Some(entry) = state.entries.remove(&self.id) {
+                    entry.telemetry.publish(None);
+                }
                 catalog.changed.send_modify(|version| *version += 1);
             }
         }
@@ -218,6 +222,7 @@ impl QueryResultsCatalog {
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<ChangeEnvelope> {
         self.0.events.subscribe()
     }
+    #[cfg(test)]
     pub(super) async fn publish(&self, envelope: ChangeEnvelope) -> anyhow::Result<()> {
         self.publish_message(super::EnvelopeMessage::new(
             envelope,
@@ -229,9 +234,20 @@ impl QueryResultsCatalog {
     async fn publish_message(&self, message: super::EnvelopeMessage) -> anyhow::Result<()> {
         let envelope = &message.envelope;
         let id = ComponentId::try_new(QueryChangeCodec::metadata(envelope)?.query_id)?;
-        if self.get(&id)?.is_none() {
-            anyhow::bail!("query publication is not registered in this catalogue");
-        }
+        let query = self.get(&id)?.ok_or_else(|| {
+            anyhow::anyhow!("query publication is not registered in this catalogue")
+        })?;
+        let identity = QueryRecoveryIdentity::from_query_output(envelope)?;
+        query
+            .telemetry
+            .publish(Some(crate::observability::QueryHead {
+                sequence: QueryChangeCodec::query_sequence(envelope)?,
+                epoch: crate::observability::QueryEpoch {
+                    generation: QueryChangeCodec::query_generation(envelope)?,
+                    config_hash: identity.configuration_hash(),
+                    incarnation: identity.incarnation(),
+                },
+            }));
         let subscribers: Vec<_> = self
             .0
             .state
@@ -273,7 +289,7 @@ impl QueryResultsCatalog {
     }
     pub(super) fn configure_delivery(
         &self,
-        config: &crate::config::QueryConfig,
+        config: &crate::config::AssignedQueryConfig,
         metrics: Arc<crate::metrics::QueryOutputMetrics>,
         default_capacity: usize,
     ) -> anyhow::Result<()> {
@@ -309,70 +325,67 @@ impl QueryResultsCatalog {
             .or_default()
             .clone())
     }
-    pub(crate) fn subscribe_query(&self, id: &str) -> anyhow::Result<CatalogSubscription> {
+    pub(crate) async fn subscribe_query(&self, id: &str) -> anyhow::Result<CatalogSubscription> {
         self.subscribe_query_at_head(id)
+            .await
             .map(|(subscription, _)| subscription)
     }
-    pub(crate) fn subscribe_query_at_head(
+    pub(crate) async fn subscribe_query_at_head(
         &self,
         id: &str,
     ) -> anyhow::Result<(CatalogSubscription, u64)> {
         let id = ComponentId::try_new(id)?;
-        let mut state = self
-            .0
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("query catalogue ownership poisoned"))?;
-        let query = state
-            .entries
-            .get(&id)
-            .ok_or_else(|| anyhow::anyhow!("query is not registered"))?
-            .clone();
-        let output = query
-            .results
-            .state
-            .read()
-            .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
-        let head = Self::read_head(&query, output.sequence, output.generation, output.ready)?;
-        let mut receiver = self.subscribe_query_locked(&mut state, id)?;
+        let (query, mut receiver) = {
+            let mut state = self
+                .0
+                .state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("query catalogue ownership poisoned"))?;
+            let query = state
+                .entries
+                .get(&id)
+                .ok_or_else(|| anyhow::anyhow!("query is not registered"))?
+                .clone();
+            // Attach before awaiting a remote head, so intervening output cannot be lost.
+            let receiver = self.subscribe_query_locked(&mut state, id.clone())?;
+            (query, receiver)
+        };
+        let head = Self::read_head(&query).await?;
+        anyhow::ensure!(
+            self.get(&id)?
+                .is_some_and(|current| current.generation == query.generation),
+            "query changed while attaching its result subscription"
+        );
+        let sequence = head.sequence;
         receiver.head = Some(head);
-        Ok((receiver, output.sequence))
+        Ok((receiver, sequence))
     }
 
-    pub(super) fn query_head(&self, id: &str) -> anyhow::Result<QuerySubscriptionHead> {
-        let state = self
-            .0
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("query catalogue ownership poisoned"))?;
-        let query = state
-            .entries
-            .get(&ComponentId::try_new(id)?)
+    pub(super) async fn query_head(&self, id: &str) -> anyhow::Result<QuerySubscriptionHead> {
+        let query = self
+            .get(&ComponentId::try_new(id)?)?
             .ok_or_else(|| anyhow::anyhow!("query is not registered"))?;
-        let output = query
-            .results
-            .state
-            .read()
-            .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
-        Self::read_head(query, output.sequence, output.generation, output.ready)
+        Self::read_head(&query).await
     }
 
-    fn read_head(
-        query: &CatalogQuery,
-        sequence: u64,
-        generation: u64,
-        ready: bool,
-    ) -> anyhow::Result<QuerySubscriptionHead> {
-        anyhow::ensure!(ready, "query output is not ready for subscriptions");
+    async fn read_head(query: &CatalogQuery) -> anyhow::Result<QuerySubscriptionHead> {
+        let (sequence, generation, incarnation) = query.output.head().await?;
+        query
+            .telemetry
+            .publish(Some(crate::observability::QueryHead {
+                sequence,
+                epoch: crate::observability::QueryEpoch {
+                    generation,
+                    config_hash: query.output.configuration_hash(),
+                    incarnation,
+                },
+            }));
         Ok(QuerySubscriptionHead {
             sequence,
             generation,
-            config_hash: query.config_hash,
-            incarnation: *query
-                .incarnation
-                .read()
-                .map_err(|_| anyhow::anyhow!("query output identity poisoned"))?,
-            results: query.results.clone(),
+            config_hash: query.output.configuration_hash(),
+            incarnation,
+            output: query.output.clone(),
         })
     }
 
@@ -380,15 +393,12 @@ impl QueryResultsCatalog {
         let query = self
             .get(&ComponentId::try_new(id)?)?
             .ok_or_else(|| anyhow::anyhow!("query is not registered"))?;
-        let persistence = *query
-            .output_persistence
-            .read()
-            .map_err(|_| anyhow::anyhow!("query output persistence observation poisoned"))?;
-        persistence.ok_or_else(|| anyhow::anyhow!("query output persistence is not yet known"))
+        query.output.is_persistent()
     }
 
     /// Capture while the query is registered. The reader retains only output
     /// state, not index handles, and remains usable after permanent shutdown.
+    #[cfg(test)]
     pub(crate) fn output_generation_reader(
         &self,
         id: &str,
@@ -397,9 +407,12 @@ impl QueryResultsCatalog {
         let query = self
             .get(&id)?
             .ok_or_else(|| anyhow::anyhow!("query is not registered"))?;
+        let super::query_api::QueryApiOutput::Local(output) = query.output.as_ref() else {
+            anyhow::bail!("native query generation reads require an active component");
+        };
         Ok(QueryOutputGenerationReader {
             query: id,
-            results: query.results,
+            results: output.results.clone(),
         })
     }
     fn subscribe_query_locked(
@@ -453,6 +466,7 @@ impl QueryResultsCatalog {
             .get(id)
             .map(|config| config.metrics.clone()))
     }
+    #[cfg(test)]
     pub(crate) fn checkpoint_store(
         &self,
         id: &str,
@@ -460,23 +474,21 @@ impl QueryResultsCatalog {
         let Some(entry) = self.get(&ComponentId::try_new(id)?)? else {
             return Ok(None);
         };
-        let checkpoint = entry
-            .checkpoint
+        let super::query_api::QueryApiOutput::Local(output) = entry.output.as_ref() else {
+            anyhow::bail!("native query checkpoints belong to its processing service");
+        };
+        let checkpoint = output
+            ._checkpoint
             .read()
             .map_err(|_| anyhow::anyhow!("query checkpoint view poisoned"))?
             .clone();
         Ok(checkpoint)
     }
-    pub(crate) fn current_sequence(&self, id: &str) -> anyhow::Result<u64> {
+    pub(crate) async fn current_sequence(&self, id: &str) -> anyhow::Result<u64> {
         let query = self
             .get(&ComponentId::try_new(id)?)?
             .ok_or_else(|| anyhow::anyhow!("query is not registered"))?;
-        let state = query
-            .results
-            .state
-            .read()
-            .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
-        Ok(state.sequence)
+        Ok(query.output.head().await?.0)
     }
 }
 
@@ -638,6 +650,25 @@ impl QueryResultsCatalog {
         checkpoint: Arc<std::sync::RwLock<Option<Arc<dyn drasi_core::interface::CheckpointStore>>>>,
         output_persistence: Arc<std::sync::RwLock<Option<bool>>>,
     ) -> anyhow::Result<QueryRegistration> {
+        self.register_output(
+            id,
+            Arc::new(super::query_api::QueryApiOutput::Local(LocalQueryOutput {
+                config_hash,
+                results: reader.results(),
+                reader,
+                progress,
+                incarnation,
+                _checkpoint: checkpoint,
+                output_persistence,
+            })),
+        )
+    }
+
+    pub(super) fn register_output(
+        &self,
+        id: ComponentId,
+        output: Arc<super::query_api::QueryApiOutput>,
+    ) -> anyhow::Result<QueryRegistration> {
         let mut state = self
             .0
             .state
@@ -647,19 +678,16 @@ impl QueryResultsCatalog {
         state.next_generation = generation
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("query reader generation exhausted"))?;
-        state.entries.insert(
+        if let Some(previous) = state.entries.insert(
             id.clone(),
             CatalogQuery {
                 generation,
-                config_hash,
-                results: reader.results(),
-                reader,
-                progress,
-                incarnation,
-                checkpoint,
-                output_persistence,
+                output,
+                telemetry: Arc::new(Default::default()),
             },
-        );
+        ) {
+            previous.telemetry.publish(None);
+        }
         self.0.changed.send_modify(|version| *version += 1);
         Ok(QueryRegistration {
             catalog: Arc::downgrade(&self.0),
@@ -692,24 +720,26 @@ impl QueryResultsCatalog {
             },
         })
     }
+    #[cfg(test)]
     pub(crate) async fn legacy_snapshot(
         &self,
         id: &str,
         timeout: Duration,
     ) -> anyhow::Result<crate::queries::SnapshotResponse> {
-        let entry = self.ready(id, timeout).await?;
+        let (snapshot, hash) = self.query_snapshot(id, timeout).await?;
         if let Some(metrics) = self.configured_metrics(&ComponentId::try_new(id)?)? {
             metrics.record_snapshot_fetch();
         }
-        super::plugin_reaction::snapshot_response(id, &super::plugin_reaction::output_view(&entry)?)
+        super::plugin_reaction::snapshot_response_parts(id, &snapshot, hash)
     }
+    #[cfg(test)]
     pub(crate) async fn legacy_outbox(
         &self,
         id: &str,
         after: u64,
         timeout: Duration,
     ) -> std::result::Result<crate::queries::OutboxResponse, crate::queries::FetchError> {
-        let entry = self.ready(id, timeout).await.map_err(|error| {
+        let view = self.query_view(id, timeout).await.map_err(|error| {
             log::warn!("Native outbox is not available: {error:#}");
             if error
                 .downcast_ref::<tokio::time::error::Elapsed>()
@@ -720,12 +750,6 @@ impl QueryResultsCatalog {
                 crate::queries::FetchError::NotRunning {
                     status: crate::ComponentStatus::Error,
                 }
-            }
-        })?;
-        let view = super::plugin_reaction::output_view(&entry).map_err(|error| {
-            log::error!("Cannot read native output state: {error:#}");
-            crate::queries::FetchError::NotRunning {
-                status: crate::ComponentStatus::Error,
             }
         })?;
         super::plugin_reaction::outbox_response(&view, after)
@@ -747,15 +771,13 @@ impl QueryResultsCatalog {
             loop {
                 let entry = self.get(&id)?;
                 if let Some(entry) = entry {
-                    let wait = async {
-                        if let Some(progress) = &entry.progress { progress.wait_ready().await?; }
-                        entry.results.wait_ready().await?;
-                        Ok::<_, anyhow::Error>(())
-                    };
+                    let wait = entry.output.wait_ready();
                     tokio::select! {
                         result = wait => {
-                            result?;
-                            if self.get(&id)?.is_some_and(|current| current.generation == entry.generation) { return Ok(entry); }
+                            if self.get(&id)?.is_some_and(|current| current.generation == entry.generation) {
+                                result?;
+                                return Ok(entry);
+                            }
                         }
                         result = changed.changed() => { result?; }
                     }
@@ -763,12 +785,51 @@ impl QueryResultsCatalog {
             }
         }).await?
     }
+
+    fn require_registration(&self, id: &str, entry: &CatalogQuery) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.get(&ComponentId::try_new(id)?)?
+                .is_some_and(|current| current.generation == entry.generation),
+            GraphError::StaleGeneration
+        );
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) async fn query_view(
+        &self,
+        id: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<super::plugin_reaction::OutputView> {
+        tokio::time::timeout(timeout, async {
+            let entry = self.ready(id, timeout).await?;
+            let view = entry.output.view().await?;
+            self.require_registration(id, &entry)?;
+            Ok(view)
+        })
+        .await?
+    }
+
+    pub(super) async fn query_snapshot(
+        &self,
+        id: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<(QueryResultSnapshot, u64)> {
+        tokio::time::timeout(timeout, async {
+            let entry = self.ready(id, timeout).await?;
+            let snapshot = entry.output.snapshot().await?;
+            self.require_registration(id, &entry)?;
+            Ok((snapshot, entry.output.configuration_hash()))
+        })
+        .await?
+    }
+
     pub async fn snapshot(
         &self,
         id: &str,
         timeout: Duration,
     ) -> anyhow::Result<QueryResultSnapshot> {
-        Ok(self.ready(id, timeout).await?.reader.query_view()?.snapshot)
+        Ok(self.query_snapshot(id, timeout).await?.0)
     }
     pub async fn replay(
         &self,
@@ -776,20 +837,245 @@ impl QueryResultsCatalog {
         after: u64,
         timeout: Duration,
     ) -> anyhow::Result<Vec<ChangeEnvelope>> {
-        let entry = self.ready(id, timeout).await?;
-        let head = entry.reader.committed_head().await?;
-        Ok(entry
-            .reader
-            .replay_after(&head.at_sequence(after))
-            .await?
-            .into_envelopes())
+        tokio::time::timeout(timeout, async {
+            let entry = self.ready(id, timeout).await?;
+            let replay = entry.output.replay(after).await?;
+            self.require_registration(id, &entry)?;
+            Ok(replay)
+        })
+        .await?
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use drasi_computation_contracts::{QueryDescription, QueryOutputView, QueryViewProvider};
     use std::num::NonZeroUsize;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct PausedQueryReader {
+        description: QueryDescription,
+        reader: Arc<super::super::query_output::QueryOutputProvider>,
+        pause_head: AtomicBool,
+        pause_reads: AtomicBool,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl QueryViewProvider for PausedQueryReader {
+        fn description(&self) -> QueryDescription {
+            self.description.clone()
+        }
+
+        async fn query_head(&self) -> std::result::Result<(OutputCursor, u64), OutputReadError> {
+            let head = self.reader.query_head();
+            if self.pause_head.swap(false, Ordering::AcqRel) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            head
+        }
+
+        async fn query_snapshot(
+            &self,
+        ) -> std::result::Result<(OutputSnapshot, u64), OutputReadError> {
+            if self.pause_reads.load(Ordering::Acquire) {
+                std::future::pending::<()>().await;
+            }
+            self.reader.query_snapshot()
+        }
+
+        async fn query_view(
+            &self,
+        ) -> std::result::Result<(OutputCursor, QueryOutputView), OutputReadError> {
+            if self.pause_reads.load(Ordering::Acquire) {
+                std::future::pending::<()>().await;
+            }
+            self.reader.query_view_with_cursor()
+        }
+
+        async fn query_replay(
+            &self,
+            after: &OutputCursor,
+        ) -> std::result::Result<(OutputReplay, u64), OutputReadError> {
+            if self.pause_reads.load(Ordering::Acquire) {
+                std::future::pending::<()>().await;
+            }
+            self.reader.query_replay(after)
+        }
+    }
+
+    async fn asynchronous_catalog() -> anyhow::Result<(
+        ContinuousQueryTransformer,
+        QueryResultsCatalog,
+        Arc<QueryApi>,
+        Arc<PausedQueryReader>,
+    )> {
+        let definition = ContinuousQueryDefinition {
+            graph_id: "asynchronous-reader".into(),
+            id: ComponentId::try_new("query")?,
+            query: "MATCH (n:Item) RETURN n.value AS value".into(),
+            language: ComputationQueryLanguage::Cypher,
+            output_stream: StreamId::try_new("query/out")?,
+            outbox_capacity: NonZeroUsize::new(8).unwrap(),
+        };
+        let execution = QueryExecutionSettings::default();
+        let description = QueryDescription {
+            graph_id: definition.graph_id.clone(),
+            query: definition.query.clone(),
+            language: definition.language,
+            output_stream: definition.output_stream.clone(),
+            outbox_capacity: definition.outbox_capacity,
+            bootstrap: false,
+            auto_reset: false,
+            volatile: true,
+            configuration_hash: definition.configuration_hash(&execution)?,
+            execution,
+        };
+        let catalog = QueryResultsCatalog::new(definition.graph_id.as_str())?;
+        let mut query = ContinuousQueryTransformer::new(
+            definition,
+            Arc::new(drasi_core::computation::InMemoryComputationProvider),
+        )
+        .await?;
+        query.start().await?;
+        let provider = Arc::new(PausedQueryReader {
+            reader: super::super::query_output::QueryOutputProvider::new(
+                &query.results(),
+                &description.output_stream,
+            ),
+            description,
+            pause_head: AtomicBool::new(true),
+            pause_reads: AtomicBool::new(false),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let api =
+            QueryApi::from_native_reader(ComponentId::try_new("query")?, provider.clone(), None)?
+                .with_native_result_catalog(catalog.clone(), crate::DispatchMode::Channel, 1)?;
+        Ok((query, catalog, api, provider))
+    }
+
+    async fn first_output(
+        query: &mut ContinuousQueryTransformer,
+    ) -> anyhow::Result<ChangeEnvelope> {
+        use drasi_core::models::{
+            Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+        };
+        Ok(query
+            .transform(InputEnvelope {
+                port: PortId::try_new("in")?,
+                execution_context: Default::default(),
+                envelope: GraphChangeCodec::encode_change(
+                    SourceChange::Insert {
+                        element: Element::Node {
+                            metadata: ElementMetadata {
+                                reference: ElementReference::new("source", "one"),
+                                labels: Arc::from([Arc::from("Item")]),
+                                effective_from: 1,
+                            },
+                            properties: ElementPropertyMap::from(serde_json::json!({"value": 1})),
+                        },
+                    },
+                    StreamId::try_new("source/out")?,
+                    1,
+                    None,
+                )?,
+            })
+            .await?
+            .remove(0)
+            .envelope)
+    }
+
+    #[tokio::test]
+    async fn asynchronous_subscription_attaches_before_sampling_its_head() -> anyhow::Result<()> {
+        let (mut query, catalog, _api, provider) = asynchronous_catalog().await?;
+        let mut attaching = Box::pin(catalog.subscribe_query_at_head("query"));
+        tokio::select! {
+            result = &mut attaching => anyhow::bail!("head did not pause: {}", result.is_ok()),
+            _ = provider.entered.notified() => {}
+        }
+        assert_eq!(catalog.0.state.lock().unwrap().subscribers.len(), 1);
+        catalog.publish(first_output(&mut query).await?).await?;
+        provider.release.notify_one();
+        let (mut subscription, head) = attaching.await?;
+        assert_eq!(head, 0);
+        let delivered =
+            tokio::time::timeout(Duration::from_secs(1), subscription.receive_after_head())
+                .await??;
+        assert_eq!(QueryChangeCodec::query_sequence(&delivered)?, 1);
+        query.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_subscription_head_releases_its_channel() -> anyhow::Result<()> {
+        let (mut query, catalog, _api, provider) = asynchronous_catalog().await?;
+        let mut attaching = Box::pin(catalog.subscribe_query_at_head("query"));
+        tokio::select! {
+            result = &mut attaching => anyhow::bail!("head did not pause: {}", result.is_ok()),
+            _ = provider.entered.notified() => {}
+        }
+        drop(attaching);
+        assert!(catalog.0.state.lock().unwrap().subscribers.is_empty());
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            catalog.publish(first_output(&mut query).await?),
+        )
+        .await??;
+        query.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn subscription_rejects_a_new_volatile_epoch_even_with_the_same_generation(
+    ) -> anyhow::Result<()> {
+        let (mut query, catalog, api, provider) = asynchronous_catalog().await?;
+        provider.pause_head.store(false, Ordering::Release);
+        let (subscription, _) = catalog.subscribe_query_at_head("query").await?;
+        let head = subscription.head()?;
+        api.validate_subscription(&head).await?;
+        let (cursor, generation) = provider.reader.query_head()?;
+        let producer = cursor.producer();
+        query.output_owner().state.write().unwrap().producer =
+            Some(GraphProducerIdentity::volatile(
+                producer.construction_scope().to_owned(),
+                producer.graph_id().to_owned(),
+                producer.component_id().clone(),
+                producer.stream().clone(),
+            )?);
+        assert_eq!(provider.reader.query_head()?.1, generation);
+        assert!(api.validate_subscription(&head).await.is_err());
+        query.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn catalogue_read_deadlines_include_remote_read_time() -> anyhow::Result<()> {
+        let (mut query, catalog, _api, provider) = asynchronous_catalog().await?;
+        provider.pause_head.store(false, Ordering::Release);
+        provider.pause_reads.store(true, Ordering::Release);
+        let deadline = Duration::from_millis(10);
+        let error =
+            tokio::time::timeout(Duration::from_secs(1), catalog.snapshot("query", deadline))
+                .await?
+                .err()
+                .expect("snapshot ignored its deadline");
+        assert!(error.is::<tokio::time::error::Elapsed>());
+        let error =
+            tokio::time::timeout(Duration::from_secs(1), catalog.replay("query", 0, deadline))
+                .await?
+                .expect_err("replay ignored its deadline");
+        assert!(error.is::<tokio::time::error::Elapsed>());
+        assert!(matches!(
+            catalog.legacy_outbox("query", 0, deadline).await,
+            Err(crate::queries::FetchError::TimedOut)
+        ));
+        query.stop().await?;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn fresh_query_subscription_filters_replayed_output_by_logical_sequence(
@@ -800,17 +1086,19 @@ mod tests {
         for mode in [crate::DispatchMode::Channel, crate::DispatchMode::Broadcast] {
             let catalog = QueryResultsCatalog::new("subscription-head")?;
             let stream = StreamId::try_new("query/out")?;
+            let query_id = ComponentId::generate();
             let config = crate::Query::cypher("query")
                 .query("MATCH (n:Person) RETURN n.name AS name")
                 .with_outbox_capacity(8)
                 .enable_bootstrap(false)
-                .build();
+                .build()?
+                .with_assigned_id(query_id.clone());
             let mut config = config;
             config.dispatch_mode = Some(mode);
             let mut query = ContinuousQueryTransformer::new(
                 ContinuousQueryDefinition {
                     graph_id: "subscription-head".into(),
-                    id: ComponentId::try_new("query")?,
+                    id: query_id,
                     query: config.query.clone(),
                     language: ComputationQueryLanguage::Cypher,
                     output_stream: stream.clone(),
@@ -850,7 +1138,7 @@ mod tests {
                 .await?
                 .remove(0)
                 .envelope;
-            let (mut subscription, head) = catalog.subscribe_query_at_head("query")?;
+            let (mut subscription, head) = catalog.subscribe_query_at_head("query").await?;
             assert_eq!(head, 1);
             let second = query.transform(input(2, "Bob")?).await?.remove(0).envelope;
             for (envelope, transport) in [(&first, 99), (&second, 100)] {
@@ -875,17 +1163,19 @@ mod tests {
     #[tokio::test]
     async fn query_replacement_refreshes_identity_and_delivery_without_resetting_transport() {
         let catalog = QueryResultsCatalog::new("delivery").unwrap();
-        let id = ComponentId::try_new("query").unwrap();
+        let id = ComponentId::generate();
         let stream = StreamId::try_new("query/out").unwrap();
         let open = |text: &'static str, capacity| {
             let catalog = catalog.clone();
             let id = id.clone();
             let stream = stream.clone();
             async move {
-                let mut config = crate::Query::cypher(id.as_str())
+                let mut config = crate::Query::cypher("query")
                     .query(text)
                     .with_outbox_capacity(8)
-                    .build();
+                    .build()
+                    .unwrap()
+                    .with_assigned_id(id.clone());
                 config.dispatch_buffer_capacity = Some(capacity);
                 ContinuousQueryTransformer::new(
                     ContinuousQueryDefinition {
@@ -907,7 +1197,12 @@ mod tests {
             }
         };
         let mut first = open("MATCH (n) RETURN n", 1).await;
-        let before = catalog.get(&id).unwrap().unwrap().config_hash;
+        let before = catalog
+            .get(&id)
+            .unwrap()
+            .unwrap()
+            .output
+            .configuration_hash();
         let sequence = catalog.transport_sequence(&stream).unwrap();
         sequence.store(41, std::sync::atomic::Ordering::Release);
         let mut replacement = open("MATCH (n) RETURN n.name", 8).await;
@@ -918,7 +1213,15 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Acquire),
             41
         );
-        assert_ne!(catalog.get(&id).unwrap().unwrap().config_hash, before);
+        assert_ne!(
+            catalog
+                .get(&id)
+                .unwrap()
+                .unwrap()
+                .output
+                .configuration_hash(),
+            before
+        );
         assert_eq!(catalog.0.state.lock().unwrap().delivery[&id].capacity, 8);
         first.stop().await.unwrap();
         replacement.stop().await.unwrap();
@@ -945,7 +1248,11 @@ mod tests {
         .unwrap();
         let linked = QueryResultsCatalog::new("ordinary").unwrap();
         let link = linked.link_query("query", &catalog).unwrap();
-        let observation = catalog.get(&id).unwrap().unwrap().output_persistence;
+        let entry = catalog.get(&id).unwrap().unwrap();
+        let super::super::query_api::QueryApiOutput::Local(output) = entry.output.as_ref() else {
+            panic!("expected a linked query");
+        };
+        let observation = output.output_persistence.clone();
 
         assert!(!catalog.output_is_persistent("query").unwrap());
         assert!(!linked.output_is_persistent("query").unwrap());
@@ -1070,15 +1377,8 @@ mod tests {
         .unwrap();
         let reader = catalog.output_generation_reader("query").unwrap();
         assert_eq!(reader.generation(), 0);
-        catalog
-            .get(&id)
-            .unwrap()
-            .unwrap()
-            .results
-            .state
-            .write()
-            .unwrap()
-            .generation = 7;
+        let owner = query.output_owner();
+        owner.state.write().unwrap().generation = 7;
         assert_eq!(reader.generation(), 7);
         query.stop().await.unwrap();
         drop(query);
@@ -1086,7 +1386,7 @@ mod tests {
         assert_eq!(reader.generation(), 7);
 
         let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _state = reader.results.state.write().unwrap();
+            let _state = owner.state.write().unwrap();
             panic!("injected metadata lock poisoning");
         }));
         assert!(poisoned.is_err());

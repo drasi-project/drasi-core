@@ -54,6 +54,8 @@ use std::sync::{
 use std::time::Duration;
 
 const PHASE_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_PHASE";
+#[allow(dead_code)]
+mod index_observation;
 const EXECUTION_ENV: &str = "DRASI_TEST_EXECUTION";
 const RUNTIME_NAME: &str = "computation";
 const ROCKS_PATH_ENV: &str = "DRASI_RECOVERY_CONFORMANCE_ROCKS_PATH";
@@ -194,6 +196,10 @@ impl IndexBackendPlugin for ObservedRocksDb {
 
     fn is_volatile(&self) -> bool {
         self.inner.is_volatile()
+    }
+
+    fn durability(&self) -> drasi_core::interface::StorageDurability {
+        self.inner.durability()
     }
 
     fn supports_atomic_query_output(&self) -> bool {
@@ -630,7 +636,7 @@ async fn build_fixture_opts(paths: &FixturePaths, opts: FixtureOpts) -> Result<R
     let state_store = Arc::new(RedbStateStoreProvider::new(&paths.state)?);
     let wal = Arc::new(RedbWalProvider::new(&paths.wal));
 
-    let mut builder = DrasiLib::builder()
+    let mut builder = lib_integration_tests::query_builder()
         .with_id(INSTANCE_ID)
         .with_source(source)
         .with_query(
@@ -2662,11 +2668,9 @@ async fn run_uncheckpointed_reconstruction(policy: &str) -> Result<()> {
             let store = indexes
                 .checkpoint_store
                 .context("missing checkpoint store")?;
-            let checkpoints = store.read_all_checkpoints().await?;
-            // Internal query markers use the reserved NUL namespace; this
-            // fixture must not persist any per-source cursor before restart.
+            let checkpoints = index_observation::native_source_checkpoints(store.as_ref()).await?;
             assert!(
-                checkpoints.keys().all(|key| key.starts_with('\0')),
+                checkpoints.is_empty(),
                 "seed process unexpectedly persisted source progress: {checkpoints:?}"
             );
             assert_eq!(store.read_result_sequence(QUERY_ID).await?.unwrap_or(0), 0);
@@ -2677,11 +2681,8 @@ async fn run_uncheckpointed_reconstruction(policy: &str) -> Result<()> {
             let store = indexes
                 .checkpoint_store
                 .context("missing checkpoint store")?;
-            let checkpoints = store.read_all_checkpoints().await?;
-            let source_progress: Vec<_> = checkpoints
-                .iter()
-                .filter(|(key, _)| !key.starts_with('\0'))
-                .collect();
+            let checkpoints = index_observation::native_source_checkpoints(store.as_ref()).await?;
+            let source_progress: Vec<_> = checkpoints.iter().collect();
             assert_eq!(source_progress.len(), 1);
             assert_eq!(source_progress[0].1.sequence, 3);
             assert_eq!(
@@ -3264,6 +3265,45 @@ async fn rocksdb_redb_overflow_gap_autoskip() -> Result<()> {
     run_overflow_reconstruction("recover_overflow_autoskip").await
 }
 
+fn recovery_phase<'a>(
+    phase: &str,
+    paths: &'a FixturePaths,
+) -> Result<std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>>> {
+    // Drop the temporary stack space used to construct the selected boxed
+    // future before polling it on the current-thread runtime.
+    Ok(match phase {
+        "seed" => Box::pin(seed_phase(paths)),
+        "recover" => Box::pin(recover_phase(paths)),
+        "seed_hwm" => Box::pin(seed_hwm_phase(paths)),
+        "recover_hwm" => Box::pin(recover_hwm_phase(paths)),
+        "recover_strict_fail" => Box::pin(recover_strict_fail_phase(paths)),
+        "recover_autoreset" => Box::pin(recover_autoreset_phase(paths)),
+        "seed_trigger_fresh" => Box::pin(seed_trigger_fresh_phase(paths)),
+        "recover_trigger_fresh" => Box::pin(recover_trigger_fresh_phase(paths)),
+        "seed_crash_after_effect" => Box::pin(seed_crash_after_effect_phase(paths)),
+        "recover_crash_after_effect" => Box::pin(recover_crash_after_effect_phase(paths)),
+        "seed_crash_after_checkpoint" => Box::pin(seed_crash_after_checkpoint_phase(paths)),
+        "recover_crash_after_checkpoint" => Box::pin(recover_crash_after_checkpoint_phase(paths)),
+        "seed_fail_effect" => Box::pin(seed_fail_effect_phase(paths)),
+        "recover_fail_effect" => Box::pin(recover_fail_effect_phase(paths)),
+        "recover_fail_effect_again" => Box::pin(recover_fail_effect_again_phase(paths)),
+        "seed_uncheckpointed_wal" => Box::pin(seed_uncheckpointed_wal_phase(paths)),
+        "recover_uncheckpointed_wal" => Box::pin(recover_uncheckpointed_wal_phase(paths)),
+        "reopen_checkpointed_wal" => Box::pin(reopen_checkpointed_wal_phase(paths)),
+        "seed_query_identity_change" => Box::pin(seed_query_identity_change_phase(paths)),
+        "recover_query_identity_strict" => Box::pin(recover_query_identity_strict_phase(paths)),
+        "recover_query_identity_autoreset" => {
+            Box::pin(recover_query_identity_autoreset_phase(paths))
+        }
+        "reopen_query_identity" => Box::pin(reopen_query_identity_phase(paths)),
+        "seed_overflow" => Box::pin(seed_overflow_phase(paths)),
+        "recover_overflow_strict" => Box::pin(recover_overflow_strict_phase(paths)),
+        "recover_overflow_autoreset" => Box::pin(recover_overflow_autoreset_phase(paths)),
+        "recover_overflow_autoskip" => Box::pin(recover_overflow_autoskip_phase(paths)),
+        other => anyhow::bail!("unknown conformance phase '{other}'"),
+    })
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn reaction_recovery_conformance_phase() -> Result<()> {
     validate_runtime_environment()?;
@@ -3273,44 +3313,7 @@ async fn reaction_recovery_conformance_phase() -> Result<()> {
         Err(error) => return Err(error).context("read conformance phase environment variable"),
     };
     let paths = FixturePaths::from_env()?;
-    // Keep the many independently large lifecycle futures off the test
-    // thread's stack without changing its current-thread runtime flavor.
-    let operation: std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + '_>> =
-        match phase.as_str() {
-            "seed" => Box::pin(seed_phase(&paths)),
-            "recover" => Box::pin(recover_phase(&paths)),
-            "seed_hwm" => Box::pin(seed_hwm_phase(&paths)),
-            "recover_hwm" => Box::pin(recover_hwm_phase(&paths)),
-            "recover_strict_fail" => Box::pin(recover_strict_fail_phase(&paths)),
-            "recover_autoreset" => Box::pin(recover_autoreset_phase(&paths)),
-            "seed_trigger_fresh" => Box::pin(seed_trigger_fresh_phase(&paths)),
-            "recover_trigger_fresh" => Box::pin(recover_trigger_fresh_phase(&paths)),
-            "seed_crash_after_effect" => Box::pin(seed_crash_after_effect_phase(&paths)),
-            "recover_crash_after_effect" => Box::pin(recover_crash_after_effect_phase(&paths)),
-            "seed_crash_after_checkpoint" => Box::pin(seed_crash_after_checkpoint_phase(&paths)),
-            "recover_crash_after_checkpoint" => {
-                Box::pin(recover_crash_after_checkpoint_phase(&paths))
-            }
-            "seed_fail_effect" => Box::pin(seed_fail_effect_phase(&paths)),
-            "recover_fail_effect" => Box::pin(recover_fail_effect_phase(&paths)),
-            "recover_fail_effect_again" => Box::pin(recover_fail_effect_again_phase(&paths)),
-            "seed_uncheckpointed_wal" => Box::pin(seed_uncheckpointed_wal_phase(&paths)),
-            "recover_uncheckpointed_wal" => Box::pin(recover_uncheckpointed_wal_phase(&paths)),
-            "reopen_checkpointed_wal" => Box::pin(reopen_checkpointed_wal_phase(&paths)),
-            "seed_query_identity_change" => Box::pin(seed_query_identity_change_phase(&paths)),
-            "recover_query_identity_strict" => {
-                Box::pin(recover_query_identity_strict_phase(&paths))
-            }
-            "recover_query_identity_autoreset" => {
-                Box::pin(recover_query_identity_autoreset_phase(&paths))
-            }
-            "reopen_query_identity" => Box::pin(reopen_query_identity_phase(&paths)),
-            "seed_overflow" => Box::pin(seed_overflow_phase(&paths)),
-            "recover_overflow_strict" => Box::pin(recover_overflow_strict_phase(&paths)),
-            "recover_overflow_autoreset" => Box::pin(recover_overflow_autoreset_phase(&paths)),
-            "recover_overflow_autoskip" => Box::pin(recover_overflow_autoskip_phase(&paths)),
-            other => anyhow::bail!("unknown conformance phase '{other}'"),
-        };
+    let operation = recovery_phase(&phase, &paths)?;
     operation.await
 }
 

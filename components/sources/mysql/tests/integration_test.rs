@@ -133,6 +133,18 @@ async fn test_mysql_source_change_detection() {
         .build();
 
     let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_source(source)
         .with_query(query)
         .with_reaction(reaction)
@@ -394,6 +406,18 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
         .build();
 
     let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_source(source)
         .with_query(query)
         .with_reaction(reaction)
@@ -995,6 +1019,18 @@ async fn test_mysql_checkpoint_recovery_round_trip() {
         let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("mysql-cp-test")
             .with_source(source)
             .with_query(query)
@@ -1136,6 +1172,18 @@ async fn test_mysql_bootstrap_then_restart_resumes_from_snapshot_position() {
         let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("mysql-bs-test")
             .with_source(source)
             .with_query(query)
@@ -1262,6 +1310,18 @@ async fn test_mysql_full_restart_picks_up_offline_changes() {
         let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("mysql-fr-test")
             .with_source(source)
             .with_query(query)
@@ -1406,7 +1466,7 @@ async fn test_mysql_multi_row_transactions_and_partial_resume() {
             .unwrap();
         let (updates, _status_rx) = tokio::sync::mpsc::channel(64);
         source
-            .initialize(drasi_lib::context::SourceRuntimeContext::new(
+            .bind_runtime_context(drasi_lib::context::SourceRuntimeContext::new(
                 "mysql-bulk-test",
                 "mysql-bulk",
                 None,
@@ -1648,7 +1708,7 @@ async fn test_mysql_rollback_preserves_only_nontransactional_rows_and_partial_re
             .unwrap();
         let (updates, _status_rx) = tokio::sync::mpsc::channel(64);
         source
-            .initialize(drasi_lib::context::SourceRuntimeContext::new(
+            .bind_runtime_context(drasi_lib::context::SourceRuntimeContext::new(
                 "mysql-rollback-test",
                 "mysql-bulk",
                 None,

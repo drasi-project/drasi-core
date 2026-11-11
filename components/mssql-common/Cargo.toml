@@ -13,6 +13,7 @@
 # limitations under the License.
 
 [package]
+rust-version.workspace = true
 name = "drasi-mssql-common"
 version = "0.2.11"
 edition = "2021"

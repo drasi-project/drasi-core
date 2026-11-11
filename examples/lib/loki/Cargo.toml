@@ -8,6 +8,8 @@ description = "DrasiLib example: MockSource -> Query -> Loki reaction"
 [workspace]
 
 [dependencies]
+drasi-host-sdk = { path = "../../../components/host-sdk" }
+drasi-computation-transformer-query = { path = "../../../components/computation-plugins/transformers/query" }
 drasi-bootstrap-scriptfile = { path = "../../../components/bootstrappers/scriptfile" }
 drasi-lib = { path = "../../../lib" }
 drasi-reaction-loki = { path = "../../../components/reactions/loki" }

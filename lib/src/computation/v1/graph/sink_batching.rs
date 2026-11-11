@@ -11,7 +11,7 @@ mod tests;
 struct RetainedInput {
     edge: usize,
     queue_id: Arc<str>,
-    producer_role: super::super::ComponentRole,
+    producer: super::super::ProducerBoundary,
     input: InputEnvelope,
     acknowledgement: Option<Box<dyn Acknowledgement>>,
     _work: DeliveryWork,
@@ -50,7 +50,7 @@ impl SinkBatchState {
         self.inputs.push_back(RetainedInput {
             edge: incoming.edge,
             queue_id: incoming.queue_id.clone(),
-            producer_role: incoming.producer_role,
+            producer: incoming.producer,
             input,
             acknowledgement,
             _work: work,
@@ -244,7 +244,7 @@ impl SinkBatchState {
                         self.inputs
                             .iter()
                             .take(count)
-                            .map(|input| (&input.input.envelope, input.producer_role)),
+                            .map(|input| (&input.input.envelope, input.producer)),
                     )
                 })
                 .transpose()
@@ -252,7 +252,7 @@ impl SinkBatchState {
             let is_new = |index: usize| {
                 prepared
                     .as_ref()
-                    .map_or(true, |inputs| !inputs[index].duplicate)
+                    .is_none_or(|inputs| !inputs[index].duplicate)
             };
             self.completion_context = first.input.execution_context.clone();
             if use_batch {
@@ -431,7 +431,7 @@ pub(super) async fn run(
     retained: &mut Option<Box<SinkBatchState>>,
     input_progress: &mut Option<Box<input_progress::InputProgress>>,
 ) -> GraphResult<()> {
-    if inputs.is_empty() && retained.as_ref().map_or(true, |state| state.is_empty()) {
+    if inputs.is_empty() && retained.as_ref().is_none_or(|state| state.is_empty()) {
         cancelled(quiesce).await;
         return Ok(());
     }

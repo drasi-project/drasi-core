@@ -255,7 +255,7 @@ mod tests {
         );
         context.wal_provider = Some(wal.clone());
         context.resource_observer = Some(observer.clone());
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
 
         let replacement_identity = identity("replacement");
         base.clone_shared()
@@ -329,7 +329,7 @@ mod tests {
             Some(identity("default")),
         );
         context.resource_observer = Some(observer.clone());
-        base.initialize(context).await;
+        base.bind_runtime_context(context).await;
         let replacement_identity = identity("replacement");
         base.clone_shared()
             .set_identity_provider(replacement_identity.clone())
@@ -360,8 +360,8 @@ mod tests {
             }
             let source = SourceBase::new(SourceBaseParams::new("source")).unwrap();
             let reaction = ReactionBase::new(ReactionBaseParams::new("reaction", vec![]));
-            source.initialize(source_context).await;
-            reaction.initialize(reaction_context).await;
+            source.bind_runtime_context(source_context).await;
+            reaction.bind_runtime_context(reaction_context).await;
             let reports = observer.reports.lock().await;
             assert_eq!(reports.len(), if observed { 2 } else { 0 });
             assert!(reports.iter().all(Vec::is_empty));
@@ -385,8 +385,8 @@ mod tests {
             reaction_context.resource_observer = Some(observer.clone());
             let source = SourceBase::new(SourceBaseParams::new("source")).unwrap();
             let reaction = ReactionBase::new(ReactionBaseParams::new("reaction", vec![]));
-            source.initialize(source_context).await;
-            reaction.initialize(reaction_context).await;
+            source.bind_runtime_context(source_context).await;
+            reaction.bind_runtime_context(reaction_context).await;
             if !fail_initialize {
                 observer.fail.store(true, Ordering::Release);
                 source.set_bootstrap_provider(TestBootstrap(1)).await;

@@ -15,8 +15,6 @@
 //! Plugin-side proxy that implements `IdentityProvider` by calling through
 //! an FFI vtable back into the host.
 
-use std::ffi::c_void;
-
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_lib::identity::{CredentialContext, Credentials, IdentityProvider};

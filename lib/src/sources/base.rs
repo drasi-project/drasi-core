@@ -442,7 +442,7 @@ impl SourceBase {
     /// - `update_tx`: mpsc sender for fire-and-forget status updates to the component graph
     /// - `state_store`: Optional persistent state storage
     /// - `resource_observer`: Optional reporting of the actual selected providers
-    pub async fn initialize(&self, context: SourceRuntimeContext) {
+    pub async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
         *self.worker_telemetry.write().await = crate::observability::WorkerTelemetry::capture();
         // Store context for later use
         *self.context.write().await = Some(context.clone());
@@ -1878,10 +1878,10 @@ impl SourceBase {
 
     /// Clear the source's state store partition.
     ///
-    /// This is called during deprovision to remove all persisted state
-    /// associated with this source. Sources that override `deprovision()`
+    /// This is called during explicit permanent removal to delete persisted state
+    /// associated with this source. Sources that override `delete_owned_resources()`
     /// can call this to clean up their state store.
-    pub async fn deprovision_common(&self) -> Result<()> {
+    pub async fn delete_owned_resources_common(&self) -> Result<()> {
         info!("Deprovisioning source '{}'", self.id);
         if let Some(store) = self.state_store().await {
             let count = store.clear_store(&self.id).await.map_err(|e| {

@@ -36,7 +36,7 @@
 //!
 //! async fn initialize_source(base: &SourceBase, context: SourceRuntimeContext) {
 //!     // Called from the source's initialize method.
-//!     base.initialize(context).await;
+//!     base.bind_runtime_context(context).await;
 //! }
 //! ```
 //!
@@ -48,7 +48,7 @@
 //!
 //! async fn initialize_reaction(base: &ReactionBase, context: ReactionRuntimeContext) {
 //!     // Called from the reaction's initialize method.
-//!     base.initialize(context).await;
+//!     base.bind_runtime_context(context).await;
 //! }
 //! ```
 
@@ -257,7 +257,7 @@ pub struct ReactionRuntimeContext {
 
     /// Optional snapshot fetcher for on-demand query snapshot access.
     ///
-    /// This is `Some` when the host has a `QueryProvider` available. Reactions can
+    /// This is `Some` when the host supplies graph-owned query readers. Reactions can
     /// use this to fetch the current result set of any subscribed query at any time,
     /// not just during bootstrap.
     ///

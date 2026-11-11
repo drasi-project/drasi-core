@@ -52,7 +52,7 @@ pub fn result(sequence: u64) -> QueryResult {
 pub async fn initialize(reaction: &dyn Reaction, store: Arc<dyn StateStoreProvider>) {
     let (updates, _receiver) = tokio::sync::mpsc::channel(64);
     reaction
-        .initialize(drasi_lib::context::ReactionRuntimeContext::new(
+        .bind_runtime_context(drasi_lib::context::ReactionRuntimeContext::new(
             "lifecycle",
             reaction.id(),
             Some(store),
@@ -60,6 +60,10 @@ pub async fn initialize(reaction: &dyn Reaction, store: Arc<dyn StateStoreProvid
             None,
         ))
         .await;
+    reaction
+        .initialize()
+        .await
+        .expect("reaction initialization");
 }
 
 pub async fn assert_incomplete_stop(reaction: &dyn Reaction, base: &ReactionBase) {

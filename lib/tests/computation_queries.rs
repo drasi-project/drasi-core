@@ -14,6 +14,9 @@
 
 #![cfg(test)]
 
+#[path = "fixtures/query_semantics.rs"]
+mod query_semantics;
+
 use std::{
     collections::VecDeque,
     num::NonZeroUsize,
@@ -335,194 +338,16 @@ async fn generic_snapshot_watermark_binds_epoch_before_live_deduplication() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn canonical_replacement_removes_omitted_properties_without_intermediate_results() {
-    let mut query = ContinuousQueryTransformer::new(
-        definition("MATCH (n:Person) RETURN n.name AS name, n.extra AS extra"),
-        Arc::new(InMemoryComputationProvider),
-    )
-    .await
-    .unwrap();
-    query.start().await.unwrap();
-    let element = |time, properties| Element::Node {
-        metadata: ElementMetadata {
-            reference: ElementReference::new("people", "one"),
-            labels: Arc::from([Arc::from("Person")]),
-            effective_from: time,
-        },
-        properties: ElementPropertyMap::from(properties),
-    };
-    query
-        .transform(InputEnvelope {
-            execution_context: Default::default(),
-            port: port("in"),
-            envelope: GraphChangeCodec::encode_change(
-                SourceChange::Insert {
-                    element: element(1000, serde_json::json!({"name":"Alice","extra":"old"})),
-                },
-                stream("source/out"),
-                1,
-                None,
-            )
-            .unwrap(),
-        })
+    query_semantics::reference(query_semantics::canonical_replacement().expect("case"))
         .await
-        .unwrap();
-    let after = GraphChangeCodec::element_record(
-        &ElementImage::try_from(element(2000, serde_json::json!({"name":"Bob"}))).unwrap(),
-    )
-    .unwrap();
-    let changes = ChangeSet::try_new(
-        ChangeSetId::try_new("source/out", bytes::Bytes::from_static(b"replace")).unwrap(),
-        GraphChangeCodec::schema().descriptor().clone(),
-        vec![ChangeOperation::Updated {
-            ordinal: 0,
-            before: None,
-            after,
-            semantics: UpdateSemantics::Replace,
-        }],
-    )
-    .unwrap();
-    let output = query
-        .transform(InputEnvelope {
-            execution_context: Default::default(),
-            port: port("in"),
-            envelope: ChangeEnvelope::new(
-                emission_id(&stream("source/out"), 2).unwrap(),
-                changes,
-                SystemMetadata::new(stream("source/out"), 2),
-            ),
-        })
-        .await
-        .unwrap();
-    assert_eq!(output.len(), 1);
-    let result = QueryChangeCodec::to_legacy_result(&output[0].envelope).unwrap();
-    assert_eq!(result.results.len(), 1);
-    let ResultDiff::Update { before, after, .. } = &result.results[0] else {
-        panic!("replacement must be one update, not independent delete/add results");
-    };
-    assert_eq!(before, &serde_json::json!({"name":"Alice","extra":"old"}));
-    assert_eq!(after, &serde_json::json!({"name":"Bob","extra":null}));
-    query.stop().await.unwrap();
+        .expect("reference replacement semantics");
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn one_ordered_batch_applies_add_removal_null_and_replacement_in_order() {
-    let mut query = ContinuousQueryTransformer::new(
-        definition("MATCH (n:Person) RETURN n.name AS name, n.extra AS extra"),
-        Arc::new(InMemoryComputationProvider),
-    )
-    .await
-    .unwrap();
-    query.start().await.unwrap();
-    let element = |time, properties| Element::Node {
-        metadata: ElementMetadata {
-            reference: ElementReference::new("people", "one"),
-            labels: Arc::from([Arc::from("Person")]),
-            effective_from: time,
-        },
-        properties: ElementPropertyMap::from(properties),
-    };
-    let image = |element: Element| ElementImage::try_from(element).unwrap();
-    let operations = vec![
-        ChangeOperation::Added {
-            ordinal: 0,
-            after: GraphChangeCodec::element_record(&image(element(
-                1000,
-                serde_json::json!({"name":"Alice","extra":"old"}),
-            )))
-            .unwrap(),
-        },
-        ChangeOperation::Updated {
-            ordinal: 1,
-            before: None,
-            after: GraphChangeCodec::patch_record(
-                &ElementPatch::try_new(
-                    image(element(2000, serde_json::json!({"name":"Bob"}))),
-                    ["extra".to_string()].into(),
-                )
-                .unwrap(),
-            )
-            .unwrap(),
-            semantics: UpdateSemantics::Patch,
-        },
-        ChangeOperation::Updated {
-            ordinal: 2,
-            before: None,
-            after: GraphChangeCodec::patch_record(
-                &ElementPatch::try_new(
-                    image(element(3000, serde_json::json!({"extra":null}))),
-                    Default::default(),
-                )
-                .unwrap(),
-            )
-            .unwrap(),
-            semantics: UpdateSemantics::Patch,
-        },
-        ChangeOperation::Updated {
-            ordinal: 3,
-            before: None,
-            after: GraphChangeCodec::element_record(&image(element(
-                4000,
-                serde_json::json!({"name":"Carol","extra":"new"}),
-            )))
-            .unwrap(),
-            semantics: UpdateSemantics::Replace,
-        },
-    ];
-    let output = query
-        .transform(InputEnvelope {
-            execution_context: Default::default(),
-            port: port("in"),
-            envelope: ChangeEnvelope::new(
-                emission_id(&stream("source/out"), 1).unwrap(),
-                ChangeSet::try_new(
-                    ChangeSetId::try_new("source/out", bytes::Bytes::from_static(b"batch"))
-                        .unwrap(),
-                    GraphChangeCodec::schema().descriptor().clone(),
-                    operations,
-                )
-                .unwrap(),
-                SystemMetadata::new(stream("source/out"), 1),
-            ),
-        })
+    query_semantics::reference(query_semantics::ordered_batch().expect("case"))
         .await
-        .unwrap();
-    assert_eq!(output.len(), 1);
-    let result = QueryChangeCodec::to_legacy_result(&output[0].envelope).unwrap();
-    let [ResultDiff::Add { data, .. }, ResultDiff::Update {
-        before: removed_before,
-        after: removed_after,
-        ..
-    }, ResultDiff::Update {
-        before: replaced_before,
-        after: replaced_after,
-        ..
-    }] = result.results.as_slice()
-    else {
-        panic!(
-            "the ordered batch is one add and two updates: {:?}",
-            result.results
-        );
-    };
-    assert_eq!(data, &serde_json::json!({"name":"Alice","extra":"old"}));
-    // Removing a property and then setting null leave the same null answer, so only
-    // the removal produces a row change; the null patch is a no-op for the query.
-    assert_eq!(
-        removed_before,
-        &serde_json::json!({"name":"Alice","extra":"old"})
-    );
-    assert_eq!(
-        removed_after,
-        &serde_json::json!({"name":"Bob","extra":null})
-    );
-    assert_eq!(
-        replaced_before,
-        &serde_json::json!({"name":"Bob","extra":null})
-    );
-    assert_eq!(
-        replaced_after,
-        &serde_json::json!({"name":"Carol","extra":"new"})
-    );
-    query.stop().await.unwrap();
+        .expect("reference ordered-batch semantics");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -605,7 +430,7 @@ async fn run_query(
     let events = Arc::new(Mutex::new(Vec::new()));
     let mut graph = ComputationGraph::builder("query-graph")
         .source(Box::new(source(changes)))
-        .query(Box::new(query))
+        .transformer(Box::new(query))
         .sink(Box::new(sink("sink", events.clone())))
         .bind_stream(endpoint("source", "out"), stream("source/out"))
         .bind_stream(endpoint("query", "out"), stream("query/out"))
@@ -694,7 +519,7 @@ async fn source_fanout_to_real_queries_and_multiple_sinks(fault: Option<(&str, &
         let results = query.results();
         owners.push(progress);
         builder = builder
-            .query(Box::new(query))
+            .transformer(Box::new(query))
             .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
             .connect(
                 EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
@@ -828,7 +653,7 @@ async fn consumer_changes_await_the_feedback_producer_stop() {
                 .unwrap();
         owners.push(owner);
         builder = builder
-            .query(Box::new(query))
+            .transformer(Box::new(query))
             .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
             .connect(
                 EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
@@ -1108,7 +933,7 @@ async fn independent_bootstrap_positions_filter_replay(relay: bool, positions: b
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink_id = format!("{name}-sink");
         builder = builder
-            .query(Box::new(query))
+            .transformer(Box::new(query))
             .sink(Box::new(sink(&sink_id, events.clone())))
             .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
             .connect(

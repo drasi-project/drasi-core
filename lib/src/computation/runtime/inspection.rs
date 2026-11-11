@@ -47,7 +47,7 @@ impl Runtime {
             == ComponentSemanticKind::Query
     }
 
-    pub(super) fn public_component_kind(
+    pub(crate) fn public_component_kind(
         snapshot: &GraphSnapshot,
         node: &NodeSnapshot,
     ) -> Option<&'static str> {
@@ -161,28 +161,22 @@ impl Runtime {
             .find(|node| node.descriptor.id().as_str() == id && Self::is_query_node(node))
             .ok_or_else(|| crate::error::ComponentNotFoundError::new("query", id))?;
         let component = node.descriptor.id();
-        let mut config = if let Some(api) = publication.query_api(component) {
-            api.config.clone()
-        } else if let Some(ConfigurationValue::Literal(value)) = publication
+        let mut config = if let Some(ConfigurationValue::Literal(value)) = publication
             .desired
             .specifications
             .get(component)
             .and_then(|spec| spec.configuration.get("query_config"))
         {
             serde_json::from_value(value.clone())?
-        } else if let Some(spec) =
-            publication
-                .desired
-                .specifications
-                .get(component)
-                .filter(|spec| {
-                    spec.implementation
-                        == ContinuousQueryFactory::default()
-                            .descriptor()
-                            .implementation
-                })
+        } else if let Some(config) = publication
+            .desired
+            .specifications
+            .get(component)
+            .and_then(|spec| publication.authored_query_configuration(spec))
         {
-            ContinuousQueryFactory::query_configuration(spec, &publication.desired.id)?
+            config?
+        } else if let Some(api) = publication.query_api(component) {
+            api.config.clone()
         } else {
             anyhow::bail!("Query '{id}' exists but does not expose ordinary query configuration in its current construction state");
         };
@@ -191,6 +185,7 @@ impl Runtime {
             "query configuration identity does not match its graph node"
         );
         config.auto_start = publication.desired.lifecycle_policies[component].auto_start;
+        config.name = node.name.to_string();
         Ok(config)
     }
 
@@ -216,7 +211,7 @@ impl Runtime {
                     ComponentType::Source | ComponentType::Query | ComponentType::Reaction
                 ) && kind
                     .as_ref()
-                    .map_or(true, |kind| kind == &event.component_type)
+                    .is_none_or(|kind| kind == &event.component_type)
             })
             .collect()
     }
@@ -371,6 +366,12 @@ impl Runtime {
         };
         Ok(SourceRuntime {
             id: id.to_owned(),
+            name: publication
+                .desired
+                .component(&record.node)
+                .ok_or(GraphError::StaleGeneration)?
+                .name
+                .to_string(),
             source_type: source.source.type_name().to_owned(),
             status: status(&record, &observed),
             error_message: error_message(&record, &observed),
@@ -384,6 +385,7 @@ impl Runtime {
         let observed = self.query_observation_at(&publication, id)?;
         Ok(QueryRuntime {
             id: id.to_owned(),
+            name: config.name,
             query: config.query,
             status: events::observed_status(observed, ComponentStatus::Added),
             error_message: observed
@@ -407,10 +409,16 @@ impl Runtime {
         };
         Ok(ReactionRuntime {
             id: id.to_owned(),
+            name: publication
+                .desired
+                .component(&record.node)
+                .ok_or(GraphError::StaleGeneration)?
+                .name
+                .to_string(),
             reaction_type: reaction.reaction.type_name().to_owned(),
             status: status(&record, &observed),
             error_message: error_message(&record, &observed),
-            queries: reaction.query_ids.clone(),
+            queries: reaction.references()?,
             properties: reaction.reaction.properties(),
         })
     }
@@ -425,6 +433,12 @@ impl Runtime {
             self.native_component_properties(publication, id, "source")?;
         Ok(SourceRuntime {
             id: id.into(),
+            name: publication
+                .desired
+                .component(&ComponentId::try_new(id)?)
+                .ok_or(GraphError::StaleGeneration)?
+                .name
+                .to_string(),
             source_type,
             properties,
             status: events::observed_status(state, ComponentStatus::Added),
@@ -455,10 +469,16 @@ impl Runtime {
                     .iter()
                     .any(|node| node.descriptor.id() == id && Self::is_query_node(node))
             })
-            .map(|id| id.to_string())
+            .map(crate::config::ComponentReference::by_id)
             .collect();
         Ok(ReactionRuntime {
             id: id.into(),
+            name: publication
+                .desired
+                .component(&ComponentId::try_new(id)?)
+                .ok_or(GraphError::StaleGeneration)?
+                .name
+                .to_string(),
             reaction_type,
             properties,
             queries,
@@ -665,6 +685,7 @@ impl Runtime {
                     let info = self.native_source_info_at(&publication, id)?;
                     snapshot.sources.push(crate::config::SourceSnapshot {
                         id: id.into(),
+                        name: node.name.to_string(),
                         source_type: info.source_type,
                         status: info.status,
                         auto_start: publication.desired.lifecycle_policies[node.descriptor.id()]
@@ -682,6 +703,7 @@ impl Runtime {
                     let info = self.native_reaction_info_at(&publication, id)?;
                     snapshot.reactions.push(crate::config::ReactionSnapshot {
                         id: id.into(),
+                        name: node.name.to_string(),
                         reaction_type: info.reaction_type,
                         status: info.status,
                         auto_start: publication.desired.lifecycle_policies[node.descriptor.id()]
@@ -708,6 +730,7 @@ impl Runtime {
                     .queries
                     .push(crate::config::QueryConfigurationSnapshot {
                         id: id.to_owned(),
+                        name: node.name.to_string(),
                         config: self.native_query_configuration_at(&publication, id)?,
                         status: events::observed_status(
                             self.query_observation_at(&publication, id)?,
@@ -742,6 +765,12 @@ impl Runtime {
             edges: Vec::new(),
         };
         for (id, record) in &records {
+            if !record.value.instance().configuration_available() {
+                return Err(crate::config::ComponentConfigurationUnavailable {
+                    component: record.node.clone(),
+                }
+                .into());
+            }
             let observed = publication
                 .observed
                 .components
@@ -753,6 +782,12 @@ impl Runtime {
                 Value::Source(source) => {
                     snapshot.sources.push(SourceSnapshot {
                         id: id.clone(),
+                        name: publication
+                            .desired
+                            .component(&record.node)
+                            .ok_or(GraphError::StaleGeneration)?
+                            .name
+                            .to_string(),
                         source_type: source.source.type_name().to_owned(),
                         status,
                         auto_start,
@@ -762,10 +797,16 @@ impl Runtime {
                 }
                 Value::Reaction(reaction) => snapshot.reactions.push(ReactionSnapshot {
                     id: id.clone(),
+                    name: publication
+                        .desired
+                        .component(&record.node)
+                        .ok_or(GraphError::StaleGeneration)?
+                        .name
+                        .to_string(),
                     reaction_type: reaction.reaction.type_name().to_owned(),
                     status,
                     auto_start,
-                    queries: reaction.query_ids.clone(),
+                    queries: reaction.references()?,
                     properties: reaction.reaction.properties(),
                 }),
             }
@@ -788,6 +829,7 @@ impl Runtime {
             config.auto_start = publication.desired.lifecycle_policies[id].auto_start;
             snapshot.queries.push(QueryConfigurationSnapshot {
                 id: id.to_string(),
+                name: config.name.clone(),
                 config,
                 status: events::observed_status(
                     self.query_observation_at(publication, id.as_str())?,

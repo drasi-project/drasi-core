@@ -251,7 +251,7 @@ async fn wait_for_error(source: &KubernetesSource) {
 async fn capture_updates(source: &KubernetesSource) -> mpsc::Receiver<ComponentUpdate> {
     let (updates, receiver) = mpsc::channel(32);
     source
-        .initialize(SourceRuntimeContext::new(
+        .bind_runtime_context(SourceRuntimeContext::new(
             "test",
             source.id(),
             None,
@@ -643,7 +643,7 @@ async fn startup_rejects_fatal_list_errors_without_running() {
         let source = api.source();
         let (updates, mut receiver) = mpsc::channel(16);
         source
-            .initialize(SourceRuntimeContext::new(
+            .bind_runtime_context(SourceRuntimeContext::new(
                 "test",
                 source.id(),
                 None,
@@ -816,6 +816,18 @@ async fn managed_recovery_after_fatal_watch_with_or_without_stop() {
     for stop_first in [false, true] {
         let api = MockApi::new().await;
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_source(api.source_builder().with_auto_start(false).build().unwrap())
             .build()
             .await

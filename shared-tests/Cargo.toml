@@ -1,4 +1,5 @@
 [package]
+rust-version.workspace = true
 name = "shared-tests"
 version = "0.2.3"
 publish = false
@@ -35,6 +36,8 @@ testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["redis"] }
 # For test utilities that need to create test sources/queries
 drasi-lib.workspace = true
+drasi-host-sdk.workspace = true
+drasi-computation-transformer-query = { path = "../components/computation-plugins/transformers/query" }
 
 [dev-dependencies]
 serial_test = "3.0"

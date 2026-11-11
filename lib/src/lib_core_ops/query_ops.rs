@@ -16,12 +16,15 @@
 //!
 //! This module provides all query-related operations including creating, removing,
 //! starting, and stopping queries.
+//! String selectors are exact current query names, including UUID-shaped names.
+//! Use the paired `_by_id` methods for explicit [`crate::config::ComponentId`]
+//! selection.
 
 use futures::{stream::Stream, StreamExt};
 
 use crate::channels::{ComponentEvent, ComponentStatus};
 use crate::component_ops::map_component_error;
-use crate::config::{QueryConfig, QueryRuntime};
+use crate::config::{ComponentId, QueryConfig, QueryRuntime};
 use crate::error::Result;
 use crate::lib_core::DrasiLib;
 use crate::queries::QueryResultSubscription;
@@ -42,7 +45,7 @@ impl DrasiLib {
     ///         .query("MATCH (n) RETURN n")
     ///         .from_input("source1")
     ///         .auto_start(true)
-    ///         .build()
+    ///         .build()?
     /// ).await?;
     /// # Ok(())
     /// # }
@@ -70,15 +73,15 @@ impl DrasiLib {
         query: QueryConfig,
     ) -> Result<crate::computation::v1::ComponentHandle> {
         self.state_guard.require_initialized()?;
-        let _lifecycle = self.instance_graph.lifecycle.lock().await;
         query
             .validate_declarations()
             .map_err(|error| crate::error::DrasiError::validation(error.to_string()))?;
-        let id = query.id.clone();
+        let name = query.name.clone();
         self.computation_runtime
             .add_query(query, self.is_running().await)
             .await
-            .map_err(|error| crate::computation::runtime::map_addition_error("query", &id, error))
+            .and_then(|handle| self.computation_runtime.public_handle(handle))
+            .map_err(|error| crate::computation::runtime::map_addition_error("query", &name, error))
     }
 
     /// Remove a query from a running server
@@ -93,14 +96,20 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn remove_query(&self, id: &str) -> Result<()> {
+    pub async fn remove_query(&self, name: &str) -> Result<()> {
+        let id = self.resolve_component_name(name, "query")?;
+        self.remove_query_by_id(&id).await
+    }
+
+    /// Remove the query with the supplied immutable UUID.
+    pub async fn remove_query_by_id(&self, id: &ComponentId) -> Result<()> {
         self.state_guard.require_initialized()?;
         map_component_error(
             self.computation_runtime
-                .remove_component(id, "query", true)
+                .remove_component(id.as_str(), "query", true)
                 .await,
             "query",
-            id,
+            id.as_str(),
             "remove",
         )
     }
@@ -117,12 +126,20 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn start_query(&self, id: &str) -> Result<()> {
+    pub async fn start_query(&self, name: &str) -> Result<()> {
+        let id = self.resolve_component_name(name, "query")?;
+        self.start_query_by_id(&id).await
+    }
+
+    /// Start the query with the supplied immutable UUID.
+    pub async fn start_query_by_id(&self, id: &ComponentId) -> Result<()> {
         self.state_guard.require_initialized()?;
         map_component_error(
-            self.computation_runtime.start_component(id, "query").await,
+            self.computation_runtime
+                .start_component(id.as_str(), "query")
+                .await,
             "query",
-            id,
+            id.as_str(),
             "start",
         )
     }
@@ -145,33 +162,53 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn stop_query(&self, id: &str) -> Result<()> {
+    pub async fn stop_query(&self, name: &str) -> Result<()> {
+        let id = self.resolve_component_name(name, "query")?;
+        self.stop_query_by_id(&id).await
+    }
+
+    /// Stop the query with the supplied immutable UUID.
+    pub async fn stop_query_by_id(&self, id: &ComponentId) -> Result<()> {
         self.state_guard.require_initialized()?;
         map_component_error(
-            self.computation_runtime.stop_component(id, "query").await,
+            self.computation_runtime
+                .stop_component(id.as_str(), "query")
+                .await,
             "query",
-            id,
+            id.as_str(),
             "stop",
         )
     }
 
-    /// Update a query by replacing it with a new configuration.
+    /// Ask the registered query factory to assess and apply a configuration change.
     ///
-    /// Uses the `Reconfiguring` state transition to preserve the graph node, edges,
-    /// and event history. The old query is stopped, the runtime is swapped, and the
-    /// query is restarted if it was running. Failed queries are also stopped to
-    /// release retained resources, but their replacement is not automatically started.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query doesn't exist, if the new configuration
-    /// references non-existent sources, or if provisioning fails.
-    pub async fn update_query(&self, id: &str, config: QueryConfig) -> Result<()> {
+    /// The UUID and name are preserved. No reset flag or reconstruction strategy
+    /// is inferred from a changed query. Rebootstrap plans are rejected unless
+    /// the owner can establish snapshot/live and downstream-reset guarantees.
+    pub async fn update_query(&self, name: &str, config: QueryConfig) -> Result<()> {
+        let id = self.resolve_component_name(name, "query")?;
+        self.update_query_by_id(&id, config).await
+    }
+
+    /// Update the query with the supplied immutable UUID.
+    pub async fn update_query_by_id(&self, id: &ComponentId, config: QueryConfig) -> Result<()> {
         self.state_guard.require_initialized()?;
+        let assigned = id.clone();
+        if config
+            .id
+            .as_ref()
+            .is_some_and(|supplied| supplied != &assigned)
+        {
+            return Err(crate::DrasiError::invalid_config(
+                "an update cannot change the component UUID",
+            ));
+        }
         map_component_error(
-            self.computation_runtime.update_query(id, config).await,
+            self.computation_runtime
+                .update_query(id.as_str(), config.with_assigned_id(assigned))
+                .await,
             "query",
-            id,
+            id.as_str(),
             "update",
         )
     }
@@ -206,8 +243,14 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_query_info(&self, id: &str) -> Result<QueryRuntime> {
-        self.inspection.get_query_info(id).await
+    pub async fn get_query_info(&self, name: &str) -> Result<QueryRuntime> {
+        let id = self.resolve_component_name(name, "query")?;
+        self.get_query_info_by_id(&id).await
+    }
+
+    /// Get detailed query information by immutable UUID.
+    pub async fn get_query_info_by_id(&self, id: &ComponentId) -> Result<QueryRuntime> {
+        self.inspection.get_query_info(id.as_str()).await
     }
 
     /// Get the current status of a specific query
@@ -221,8 +264,14 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_query_status(&self, id: &str) -> Result<ComponentStatus> {
-        self.inspection.get_query_status(id).await
+    pub async fn get_query_status(&self, name: &str) -> Result<ComponentStatus> {
+        let id = self.resolve_component_name(name, "query")?;
+        self.get_query_status_by_id(&id).await
+    }
+
+    /// Get query status by immutable UUID.
+    pub async fn get_query_status_by_id(&self, id: &ComponentId) -> Result<ComponentStatus> {
+        self.inspection.get_query_status(id.as_str()).await
     }
 
     /// Get the current result set for a running query
@@ -236,8 +285,17 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_query_results(&self, id: &str) -> Result<Vec<serde_json::Value>> {
-        self.inspection.get_query_results(id).await
+    pub async fn get_query_results(&self, name: &str) -> Result<Vec<serde_json::Value>> {
+        let id = self.resolve_component_name(name, "query")?;
+        self.get_query_results_by_id(&id).await
+    }
+
+    /// Get the current query result set by immutable UUID.
+    pub async fn get_query_results_by_id(
+        &self,
+        id: &ComponentId,
+    ) -> Result<Vec<serde_json::Value>> {
+        self.inspection.get_query_results(id.as_str()).await
     }
 
     /// Read a consistent snapshot followed by changes, without a reaction or worker.
@@ -251,18 +309,27 @@ impl DrasiLib {
     /// This is a connection-local reader, not a durable consumer checkpoint.
     /// Replacement, output reset and owner shutdown invalidate it. Dropping the
     /// stream unregisters it synchronously, even if it was never polled.
-    pub async fn subscribe_query_results(&self, id: &str) -> Result<QueryResultSubscription> {
+    pub async fn subscribe_query_results(&self, name: &str) -> Result<QueryResultSubscription> {
+        let id = self.resolve_component_name(name, "query")?;
+        self.subscribe_query_results_by_id(&id).await
+    }
+
+    /// Subscribe to query results by immutable UUID.
+    pub async fn subscribe_query_results_by_id(
+        &self,
+        id: &ComponentId,
+    ) -> Result<QueryResultSubscription> {
         self.state_guard.require_initialized()?;
         let result = async {
             self.computation_runtime
-                .query(id)
+                .query(id.as_str())
                 .await?
                 .subscribe_results()
                 .await
         }
         .await;
-        let (snapshot, stream) = map_component_error(result, "query", id, "subscribe")?;
-        let id = id.to_owned();
+        let (snapshot, stream) = map_component_error(result, "query", id.as_str(), "subscribe")?;
+        let id = id.to_string();
         Ok(QueryResultSubscription {
             snapshot,
             stream: stream
@@ -285,8 +352,17 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_query_config(&self, id: &str) -> Result<QueryConfig> {
-        self.inspection.get_query_config(id).await
+    pub async fn get_query_config(&self, name: &str) -> Result<crate::config::AssignedQueryConfig> {
+        let id = self.resolve_component_name(name, "query")?;
+        self.get_query_config_by_id(&id).await
+    }
+
+    /// Get query configuration by immutable UUID.
+    pub async fn get_query_config_by_id(
+        &self,
+        id: &ComponentId,
+    ) -> Result<crate::config::AssignedQueryConfig> {
+        self.inspection.get_query_config(id.as_str()).await
     }
 
     /// Get lifecycle events for a specific query as an async stream.
@@ -306,8 +382,17 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_query_events(&self, id: &str) -> Result<impl Stream<Item = ComponentEvent>> {
-        self.inspection.get_query_events(id).await
+    pub async fn get_query_events(&self, name: &str) -> Result<impl Stream<Item = ComponentEvent>> {
+        let id = self.resolve_component_name(name, "query")?;
+        self.get_query_events_by_id(&id).await
+    }
+
+    /// Get query lifecycle events by immutable UUID.
+    pub async fn get_query_events_by_id(
+        &self,
+        id: &ComponentId,
+    ) -> Result<impl Stream<Item = ComponentEvent>> {
+        self.inspection.get_query_events(id.as_str()).await
     }
 
     /// Get all lifecycle events across all queries as an async stream.
@@ -355,12 +440,24 @@ impl DrasiLib {
     /// ```
     pub async fn subscribe_query_logs(
         &self,
-        id: &str,
+        name: &str,
     ) -> Result<(
         Vec<crate::observability::LogMessage>,
         tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
     )> {
-        self.inspection.subscribe_query_logs(id).await
+        let id = self.resolve_component_name(name, "query")?;
+        self.subscribe_query_logs_by_id(&id).await
+    }
+
+    /// Subscribe to query logs by immutable UUID.
+    pub async fn subscribe_query_logs_by_id(
+        &self,
+        id: &ComponentId,
+    ) -> Result<(
+        Vec<crate::observability::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::observability::LogMessage>,
+    )> {
+        self.inspection.subscribe_query_logs(id.as_str()).await
     }
 
     /// Subscribe to live events for a query.
@@ -370,12 +467,24 @@ impl DrasiLib {
     /// Error, Stopped.
     pub async fn subscribe_query_events(
         &self,
-        id: &str,
+        name: &str,
     ) -> Result<(
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
-        self.inspection.subscribe_query_events(id).await
+        let id = self.resolve_component_name(name, "query")?;
+        self.subscribe_query_events_by_id(&id).await
+    }
+
+    /// Subscribe to query lifecycle events by immutable UUID.
+    pub async fn subscribe_query_events_by_id(
+        &self,
+        id: &ComponentId,
+    ) -> Result<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        self.inspection.subscribe_query_events(id.as_str()).await
     }
 }
 
@@ -384,14 +493,27 @@ mod tests {
     use crate::channels::ComponentStatus;
     use crate::error::DrasiError;
     use crate::sources::tests::TestMockSource;
+    use crate::test_helpers::creation::BuilderFixtures;
     use crate::{DrasiLib, Query};
 
     /// Build a DrasiLib with a single mock source, started and ready for queries.
     async fn build_core_with_source() -> DrasiLib {
-        let source = TestMockSource::new("test-source".to_string()).unwrap();
+        let source = TestMockSource::fixture("test-source", true);
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("test")
-            .with_source(source)
+            .with_source_fixture(source)
             .build()
             .await
             .unwrap();
@@ -411,7 +533,8 @@ mod tests {
             .query("MATCH (n:Test) RETURN n")
             .from_input("test-source")
             .auto_start(false)
-            .build();
+            .build()
+            .unwrap();
 
         core.add_query(config).await.unwrap();
 
@@ -428,7 +551,8 @@ mod tests {
             .query("MATCH (n) RETURN n")
             .from_input("nonexistent-source")
             .auto_start(false)
-            .build();
+            .build()
+            .unwrap();
 
         let handle = core.add_query_with_handle(config).await.unwrap();
         let observed = handle.observed().unwrap();
@@ -457,7 +581,8 @@ mod tests {
             .query("MATCH (n:Test) RETURN n")
             .from_input("test-source")
             .auto_start(false)
-            .build();
+            .build()
+            .unwrap();
         core.add_query(config).await.unwrap();
 
         // Remove should succeed
@@ -507,12 +632,14 @@ mod tests {
             .query("MATCH (n) RETURN n")
             .from_input("test-source")
             .auto_start(false)
-            .build();
+            .build()
+            .unwrap();
         let config2 = Query::cypher("q-list-2")
             .query("MATCH (n) RETURN n")
             .from_input("test-source")
             .auto_start(false)
-            .build();
+            .build()
+            .unwrap();
         core.add_query(config1).await.unwrap();
         core.add_query(config2).await.unwrap();
 
@@ -535,7 +662,8 @@ mod tests {
             .query("MATCH (n:Test) RETURN n")
             .from_input("test-source")
             .auto_start(false)
-            .build();
+            .build()
+            .unwrap();
         core.add_query(config).await.unwrap();
 
         // Query added without auto-start should be Added
@@ -568,7 +696,8 @@ mod tests {
             .query("MATCH (n:Test) RETURN n")
             .from_input("test-source")
             .auto_start(false)
-            .build();
+            .build()
+            .unwrap();
         core.add_query(config).await.unwrap();
 
         // Subscribe to events before triggering actions
@@ -613,7 +742,8 @@ mod tests {
             .query("MATCH (n:Person) RETURN n.name")
             .from_input("test-source")
             .auto_start(false)
-            .build();
+            .build()
+            .unwrap();
         core.add_query(config).await.unwrap();
 
         let retrieved = core.get_query_config("q-config").await.unwrap();
@@ -621,6 +751,9 @@ mod tests {
         assert_eq!(retrieved.query, "MATCH (n:Person) RETURN n.name");
         assert!(!retrieved.auto_start);
         assert_eq!(retrieved.inputs.len(), 1);
-        assert_eq!(retrieved.inputs[0].component, "test-source");
+        assert_eq!(
+            retrieved.inputs[0].component.as_id(),
+            Some(core.component_by_name("test-source").unwrap().id())
+        );
     }
 }

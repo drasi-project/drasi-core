@@ -19,6 +19,8 @@ use bytes::Bytes;
 use super::{ContractError, Result};
 use crate::internal::change::computation_bridge;
 
+pub use crate::component_id::ComponentId;
+
 pub fn validate_identifier(kind: &'static str, value: &str) -> Result<()> {
     if value.is_empty() || value.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(ContractError::InvalidIdentifier {
@@ -78,7 +80,10 @@ name_type!(
     SchemaId,
     "Schema identity, scoped by its provider's naming convention."
 );
-name_type!(ComponentId, "Component identity within a graph.");
+name_type!(
+    ComponentName,
+    "Unique, editable component name within a DrasiLib instance."
+);
 name_type!(PortId, "Port identity within a component.");
 name_type!(ResourceId, "Resource identity within a computation graph.");
 name_type!(

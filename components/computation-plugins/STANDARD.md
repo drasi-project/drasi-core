@@ -1,8 +1,8 @@
-# Counter, middleware, capture and arithmetic components
+# Counter, middleware, view, capture and arithmetic components
 
-These four [independent component crates](README.md) supply real graph components through native ABI
-**1.0.0**, independently of the Source/Reaction/Bootstrap ABI **0.17.0**
-(with 0.16 fast-mode compatibility).
+These five [independent component crates](README.md) supply real graph components through native ABI
+**2.0.0**, independently of the Source/Reaction/Bootstrap ABI **0.18.0**.
+Earlier layouts are rejected; rebuild the host and the required libraries together.
 The package uses the workspace version; that version is not its ABI version.
 Each plugin identity is its component's package name. Implementation versions
 are `"1"` and configuration versions are `1`.
@@ -11,6 +11,7 @@ are `"1"` and configuration versions are `1`.
 |---|---|---|
 | `drasi.standard/volatile-counter` | `EnvelopeSource` | `stream` required; `count=10`, `start=0`, `step=1`, `interval_ms=0`, `paused=false` |
 | `drasi.standard/middleware` | `Transformer` | Required `stream`, `middleware`, `pipeline`; supports existing `map` and `relabel` middleware |
+| `drasi.standard/view` | `Transformer` | Required `stream`, `middleware`, `pipeline`; maintains complete map/relabel projections and recorded output associations |
 | `drasi.standard/capture` | `EnvelopeSink` | `path` required; `append=false` |
 | `drasi.standard/arithmetic` | `Transformer`, optional transaction participant | `stream` required; `field="value"`, `add=0`, `multiply=1`, `counter_property="batch_count"` |
 
@@ -45,6 +46,15 @@ in-flight operation. Control handling remains independent of a blocked `next()`.
 Ordinary peer status notifications are advisory. Unknown custom commands and
 non-null payloads fail explicitly.
 
+The counter factory supports managed `interval_ms` updates using
+`InPlace`/`Preserve`. The host pauses processing around the update; the component
+keeps its UUID, emitted count, next value, sequence, and explicit control pause
+state. Changes to count, start, step, stream, or the initial paused setting are
+rejected rather than silently resetting the source. Stop/start of this same
+object does not repeat `initialize`; final `dispose` does not delete other
+components' state. Factory registration and an accepted factory-backed recipe
+are required for managed updates.
+
 The middleware factory reuses `MiddlewareTransformer`, not a legacy Source or
 Reaction wrapper. For example:
 
@@ -63,6 +73,13 @@ Reaction wrapper. For example:
 The selected middleware implementations are stateless. The surrounding transformer
 owns volatile sequencing/element bookkeeping and marks its producer identity as
 nonpersistent. No jq feature or bundled jq build is required.
+
+Choose the separate [view transformer](transformers/view/README.md) when the
+output must remain a projection of the current input dataset. It reconstructs
+patches, retracts filtered/removed children and replaces changed output keys.
+Its coherent snapshots and producer epoch are volatile; stop/start of the same
+object retains them, while reconstruction starts empty. It is not a durable,
+transactional, replay-capable or input-deduplicating middleware mode.
 
 The capture sink writes one complete `EnvelopeCodec` JSON frame per line to its
 configured file. `append=false` truncates on start; `append=true` preserves prior
@@ -95,8 +112,9 @@ without rerunning either step.
 When that host container uses `SharedStorageGroup` and participating QoS pipes,
 both steps' state and the outgoing journal entries share its actual commit.
 Journal acknowledgements still follow consumer handling separately. Existing
-native ABI 1.0 participants need no new capability or rebuild for this host-owned
-arrangement; it does not make standalone arithmetic persistent.
+participants need no additional shared-storage capability for this host-owned
+arrangement, but must be built for the host's native ABI 2.0. It does not make
+standalone arithmetic persistent.
 
 The component supports serialized state `get/put/remove`, element
 `get/put/remove`, and host-authoritative `derive` through the native C operations.
@@ -138,7 +156,8 @@ same input with one committed count per step and one acceptance in each of two
 output journals. The required crash parent checks both child exits explicitly;
 its ignored helper is not a skipped recovery scenario.
 
-Native libraries are process-pinned. Query-role snapshot/outbox hosting, source
-recovery-progress handles, native resource injection, in-place reconfiguration
-and hot unloading remain explicitly unsupported. Host-owned transaction/index/
-retained-pipe resources do not extend those native ABI capabilities.
+Native libraries are process-pinned; hot unloading is unsupported. Update,
+snapshot, recovery, resource, and transaction capabilities are explicit
+per-factory contracts, not properties of every plugin using this ABI. The
+counter, middleware, view, capture and arithmetic factories do not become
+durable simply because their host has durable configuration or storage.

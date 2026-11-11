@@ -70,6 +70,18 @@ async fn test_kubernetes_source_configmap_crud_cycle() -> Result<()> {
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("k8s-source-it")
             .with_source(source)
             .with_query(query)
@@ -185,6 +197,18 @@ async fn test_kubernetes_bootstrap_paginates_existing_configmaps() -> Result<()>
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("k8s-bootstrap-page-it")
             .with_source(source)
             .with_query(query)

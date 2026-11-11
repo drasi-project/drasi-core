@@ -198,6 +198,18 @@ async fn test_sqs_reaction_end_to_end() -> Result<()> {
         .build();
 
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("sqs-test-core")
         .with_source(source)
         .with_query(query)
@@ -332,6 +344,18 @@ async fn test_sqs_reaction_aggregation_query() -> Result<()> {
         .build();
 
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("sqs-agg-test-core")
         .with_source(source)
         .with_query(query)

@@ -268,8 +268,8 @@ impl Source for OracleSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
         // Oracle SCNs are 8-byte big-endian u64 — byte-lexicographic comparison is correct.
         self.base
             .set_position_comparator(drasi_lib::sources::ByteLexPositionComparator)

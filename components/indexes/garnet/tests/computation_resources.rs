@@ -326,6 +326,95 @@ async fn output_generation_and_committed_head_survive_checkpoint_clear_and_reope
                 Some(41)
             );
         }
+        assert!(checkpoint.stage_clear_checkpoints().await.is_err());
+        {
+            let _session = SessionGuard::begin(resources.indexes().session_control.clone())
+                .await
+                .expect("begin discarded checkpoint clear");
+            checkpoint
+                .stage_clear_checkpoints()
+                .await
+                .expect("stage checkpoint clear");
+            assert!(checkpoint
+                .read_all_checkpoints()
+                .await
+                .expect("staged clear")
+                .is_empty());
+            checkpoint
+                .stage_checkpoint("transient", 4, None)
+                .await
+                .expect("stage after clear");
+            assert!(checkpoint
+                .read_checkpoint("source")
+                .await
+                .expect("staged source deletion")
+                .is_none());
+        }
+        assert_eq!(
+            checkpoint
+                .read_checkpoint("source")
+                .await
+                .expect("rolled-back clear")
+                .expect("restored source")
+                .sequence,
+            3,
+        );
+        assert!(checkpoint
+            .read_checkpoint("transient")
+            .await
+            .expect("rolled-back insert")
+            .is_none());
+        assert_eq!(
+            checkpoint.read_config_hash().await.expect("retained hash"),
+            Some(123)
+        );
+        {
+            let session = SessionGuard::begin(resources.indexes().session_control.clone())
+                .await
+                .expect("begin committed checkpoint clear");
+            checkpoint
+                .stage_clear_checkpoints()
+                .await
+                .expect("stage checkpoint clear");
+            session.commit().await.expect("commit checkpoint clear");
+        }
+        assert!(checkpoint
+            .read_all_checkpoints()
+            .await
+            .expect("committed clear")
+            .is_empty());
+        assert_eq!(
+            checkpoint.read_config_hash().await.expect("cleared hash"),
+            None
+        );
+        assert_eq!(
+            checkpoint
+                .read_result_sequence(QUERY)
+                .await
+                .expect("retained head"),
+            Some(41)
+        );
+        assert_eq!(
+            checkpoint
+                .read_output_generation(QUERY)
+                .await
+                .expect("retained generation"),
+            Some(u64::MAX)
+        );
+        checkpoint
+            .write_config_hash(123)
+            .await
+            .expect("restore hash for immediate clear");
+        {
+            let session = SessionGuard::begin(resources.indexes().session_control.clone())
+                .await
+                .expect("restore source for immediate clear");
+            checkpoint
+                .stage_checkpoint("source", 3, Some(&Bytes::from_static(b"pos")))
+                .await
+                .expect("restore source");
+            session.commit().await.expect("commit restored source");
+        }
         checkpoint
             .clear_checkpoints()
             .await

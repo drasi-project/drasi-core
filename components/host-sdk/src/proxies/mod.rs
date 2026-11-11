@@ -20,7 +20,11 @@ pub(crate) mod drop_worker;
 pub mod identity_provider;
 pub(crate) mod identity_resolution;
 pub mod reaction;
+mod retained_call;
 pub mod secret_store;
 pub mod source;
 
 pub use secret_store::SecretStoreValueResolverAdapter;
+
+#[cfg(test)]
+mod lifecycle_tests;

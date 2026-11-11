@@ -13,6 +13,7 @@
 # limitations under the License.
 
 [package]
+rust-version.workspace = true
 name = "drasi-oracle-common"
 version = "0.1.9"
 edition = "2021"

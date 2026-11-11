@@ -107,7 +107,7 @@ fn durability_config(
 async fn init_source_with_wal(source: &dyn Source, wal: Arc<dyn WalProvider>, source_id: &str) {
     let (update_tx, _update_rx) = tokio::sync::mpsc::channel(16);
     source
-        .initialize(SourceRuntimeContext {
+        .bind_runtime_context(SourceRuntimeContext {
             instance_id: "test-instance".to_string(),
             source_id: source_id.to_string(),
             update_tx: update_tx.into(),
@@ -291,7 +291,7 @@ async fn test_grpc_deprovision_removes_wal() {
     assert_eq!(count, 0);
 
     source.stop().await.unwrap();
-    source.deprovision().await.unwrap();
+    source.delete_owned_resources().await.unwrap();
 
     let count = wal.event_count("grpc-deprov").await;
     assert!(count.is_err(), "WAL should be deleted after deprovision");

@@ -3,7 +3,7 @@
 
 import unittest
 
-from check_native_dependencies import dependency_selections, forbidden_dependencies
+from check_native_dependencies import QUERY_PLUGIN, dependency_selections, forbidden_dependencies
 
 
 class NativeDependencyTests(unittest.TestCase):
@@ -28,6 +28,16 @@ class NativeDependencyTests(unittest.TestCase):
                 "drasi-query-cypher v1\n"
             ),
             {"drasi-lib", "drasi-core", "drasi-query-cypher"},
+        )
+
+    def test_only_query_plugin_can_depend_on_the_query_engine(self):
+        tree = "drasi-core v1\ndrasi-query-cypher v1\ndrasi-lib v1\ndrasi-plugin-sdk v1\n"
+        self.assertEqual(
+            forbidden_dependencies(tree, QUERY_PLUGIN), {"drasi-lib", "drasi-plugin-sdk"}
+        )
+        self.assertEqual(
+            forbidden_dependencies(tree, "another-plugin"),
+            {"drasi-core", "drasi-query-cypher", "drasi-lib", "drasi-plugin-sdk"},
         )
 
 

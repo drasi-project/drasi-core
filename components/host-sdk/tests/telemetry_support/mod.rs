@@ -15,6 +15,8 @@ pub use fixtures::fixture;
 pub mod metrics;
 pub use metrics::RecordingMetrics;
 
+pub const PROBE_ID: &str = "45b5d856-324e-4d9d-9e97-28db6168f7cf";
+
 pub fn load() -> Result<Arc<NativePlugin>> {
     let path = fixture("telemetry_fixture");
     anyhow::ensure!(
@@ -59,7 +61,7 @@ pub fn binding(
 ) -> Result<PluginTelemetry> {
     Ok(graph.telemetry().plugin_binding(
         TelemetryScope::graph(instance, "telemetry-graph")?.component(
-            ComponentId::try_new("probe")?,
+            ComponentId::try_new(PROBE_ID)?,
             ComponentRole::Service,
             ComponentSemanticKind::Service,
         ),
@@ -79,7 +81,7 @@ pub fn create(
         .with_plugin_telemetry(Some(binding.clone()))
         .in_scope(|| {
             plugin.factories()[0].create_component(
-                ComponentId::try_new("probe")?,
+                ComponentId::try_new(PROBE_ID)?,
                 serde_json::json!({"absolute": absolute}),
             )
         })
@@ -90,7 +92,7 @@ pub async fn run(component: &mut NativeComponentProxy, parent: ExecutionContext)
 }
 
 pub fn update(instance: &str, generation: u64, absolute: bool, value: u64) -> Result<()> {
-    let bytes = wire::encode(&(instance, "probe", generation, absolute, value))?;
+    let bytes = wire::encode(&(instance, PROBE_ID, generation, absolute, value))?;
     unsafe {
         let library = libloading::Library::new(fixture("telemetry_fixture"))?;
         let call = library.get::<unsafe extern "C" fn(abi::BorrowedBytes) -> abi::Status>(
@@ -128,6 +130,7 @@ pub async fn metrics_contract() -> Result<()> {
     let graph = graph("native-metrics", &metrics, logging.clone(), None, false)?;
     let old = binding(&graph, "native-metrics", 1, logging.clone())?;
     let mut a = create(&plugin, &old, 100)?;
+    a.initialize().await?;
     a.start().await?;
     run(&mut a, Default::default()).await?;
     assert_eq!(
@@ -137,6 +140,7 @@ pub async fn metrics_contract() -> Result<()> {
     a.stop().await?;
     let new = binding(&graph, "native-metrics", 2, logging.clone())?;
     let mut b = create(&plugin, &new, 10)?;
+    b.initialize().await?;
     b.start().await?;
     run(&mut b, Default::default()).await?;
     update("native-metrics", 2, true, 10)?;
@@ -179,11 +183,13 @@ pub async fn metrics_contract() -> Result<()> {
         220
     );
     logging.flush().await?;
-    let key = ComponentLogKey::new("native-metrics", ComponentLogType::Service, "probe");
+    let key = ComponentLogKey::new("native-metrics", ComponentLogType::Service, PROBE_ID);
     assert!(logging.registry().log_count_by_key(&key).await >= 7);
     let values = observations()?;
     assert_eq!(values.as_array().context("observations")?.len(), 2);
     b.stop().await?;
+    a.dispose().await?;
+    b.dispose().await?;
     drop(a);
     drop(b);
     assert_eq!(
@@ -200,6 +206,7 @@ pub async fn metrics_contract() -> Result<()> {
     clear()?;
     let renewed = binding(&graph, "native-metrics", 2, logging.clone())?;
     let mut restarted = create(&plugin, &renewed, 3)?;
+    restarted.initialize().await?;
     restarted.start().await?;
     run(&mut restarted, Default::default()).await?;
     assert_eq!(
@@ -207,6 +214,7 @@ pub async fn metrics_contract() -> Result<()> {
         223
     );
     restarted.stop().await?;
+    restarted.dispose().await?;
     drop(restarted);
     clear()?;
     drop(graph);

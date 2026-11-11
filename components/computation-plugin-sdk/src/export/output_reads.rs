@@ -8,23 +8,29 @@
 //! activation generation: stop, restart, release or replacement ends it.
 
 use super::*;
-use crate::output_reads::{Outcome, WireCursor, WireFrame, WireRecord, WireReplay, WireSnapshot};
+use anyhow::Context as _;
+mod transfer;
+use crate::output_reads::{
+    Outcome, OutputReadLimit, WireCursor, WireFrame, WireQueryHead, WireQueryReplay,
+    WireQuerySnapshot, WireQueryView, WireRecord, WireReplay, WireSnapshot,
+};
 use drasi_computation_contracts::{
     encode_bounded_messagepack, BinaryEnvelopeCodecError, ComponentDescriptor, OutputCursor,
     OutputPortReaders, OutputReadError, OutputReaders, OutputReplay, OutputSnapshot, PortId,
-    ReplayProvider, SchemaDescriptor, SnapshotProvider,
+    QueryDescription, QueryViewProvider, ReplayProvider, SchemaDescriptor, SnapshotProvider,
 };
 use serde::Serialize;
 use std::{
     borrow::Cow,
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{atomic::AtomicUsize, Mutex},
     time::Duration,
 };
+pub(super) use transfer::Pages;
 
-pub(super) static EXTENSION: abi::output_reads::PluginOutputReadsV1 =
-    abi::output_reads::PluginOutputReadsV1 {
-        header: Header::new::<abi::output_reads::PluginOutputReadsV1>(),
+pub(super) static EXTENSION: abi::output_reads::PluginOutputReadsV2 =
+    abi::output_reads::PluginOutputReadsV2 {
+        header: Header::new::<abi::output_reads::PluginOutputReadsV2>(),
         version: abi::output_reads::VERSION,
         reserved: 0,
         open: Some(open),
@@ -34,6 +40,7 @@ static HANDLE_VTABLE: abi::output_reads::OutputReadVTable = abi::output_reads::O
     header: Header::new::<abi::output_reads::OutputReadVTable>(),
     release: Some(release_handle),
     request: Some(request),
+    transfer: Some(transfer::open),
 };
 
 pub(super) const READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -42,6 +49,7 @@ pub(super) const READ_TIMEOUT: Duration = Duration::from_secs(30);
 enum Phase {
     Inactive,
     Active,
+    Retained,
     Retired,
 }
 
@@ -56,13 +64,19 @@ pub(super) struct ReadBinding {
     pub(super) descriptor: ComponentDescriptor,
     pub(super) codec: Arc<BinaryEnvelopeCodec>,
     pub(super) readers: OutputReaders,
+    query_descriptions: Mutex<BTreeMap<PortId, QueryDescription>>,
+    query_observations: bool,
+    query_recovery_views: bool,
     lifecycle: Mutex<Lifecycle>,
     inflight: AtomicUsize,
     changed: tokio::sync::watch::Sender<()>,
+    quiescence: tokio::sync::watch::Sender<()>,
     pub(super) damaged: Arc<transport::PanicState>,
     /// Weak registry so stop/release can end live leases promptly.
     pub(super) leases: Mutex<Vec<std::sync::Weak<super::output_follow::Lease>>>,
     pub(super) lease_count: AtomicUsize,
+    transfers: Mutex<Vec<std::sync::Weak<transfer::Transfer>>>,
+    transfer_count: AtomicUsize,
 }
 
 /// Validate the constructed component's actual registrations against its
@@ -74,6 +88,41 @@ pub(super) fn capture(
     codec: Arc<BinaryEnvelopeCodec>,
     damaged: Arc<transport::PanicState>,
 ) -> anyhow::Result<Option<Arc<ReadBinding>>> {
+    validate_registrations(metadata, descriptor, &readers)?;
+    let capabilities = &metadata.capabilities;
+    if !capabilities.declares_output_reads() && !capabilities.declares_output_follows() {
+        return Ok(None);
+    }
+    let queries = describe_queries(&readers);
+    Ok(Some(Arc::new(ReadBinding {
+        execution_scope: crate::telemetry::ExecutionScope::capture()
+            .with_context(Default::default()),
+        descriptor: descriptor.clone(),
+        codec,
+        readers,
+        query_descriptions: Mutex::new(queries),
+        query_observations: capabilities.query_observations,
+        query_recovery_views: capabilities.query_recovery_views,
+        lifecycle: Mutex::new(Lifecycle {
+            generation: 0,
+            phase: Phase::Inactive,
+        }),
+        inflight: AtomicUsize::new(0),
+        changed: tokio::sync::watch::channel(()).0,
+        quiescence: tokio::sync::watch::channel(()).0,
+        damaged,
+        leases: Mutex::new(Vec::new()),
+        lease_count: AtomicUsize::new(0),
+        transfers: Mutex::new(Vec::new()),
+        transfer_count: AtomicUsize::new(0),
+    })))
+}
+
+fn validate_registrations(
+    metadata: &FactoryMetadata,
+    descriptor: &ComponentDescriptor,
+    readers: &OutputReaders,
+) -> anyhow::Result<()> {
     readers.validate(descriptor)?;
     fn declared(ports: &[PortId]) -> BTreeSet<PortId> {
         ports.iter().cloned().collect()
@@ -90,42 +139,143 @@ pub(super) fn capture(
             .collect()
     }
     let capabilities = &metadata.capabilities;
+    if capabilities.query_observations {
+        let port = capabilities
+            .output_queries
+            .first()
+            .context("missing query observation port")?;
+        anyhow::ensure!(
+            readers
+                .ports()
+                .get(port)
+                .and_then(|output| output.query())
+                .is_some_and(|reader| reader.supports_observations()),
+            "declared query observations have no implementation"
+        );
+    }
+    if capabilities.query_recovery_views {
+        anyhow::ensure!(
+            readers
+                .ports()
+                .get(&capabilities.output_queries[0])
+                .and_then(|port| port.query())
+                .is_some_and(|reader| reader.supports_recovery_views()),
+            "declared query recovery views have no implementation"
+        );
+    }
     anyhow::ensure!(
         declared(&capabilities.output_snapshots)
-            == actual(&readers, |port| port.snapshot().is_some()),
+            == actual(readers, |port| port.snapshot().is_some()),
         "native output snapshot providers do not match the declared output_snapshots"
     );
     anyhow::ensure!(
-        declared(&capabilities.output_replays) == actual(&readers, |port| port.replay().is_some()),
+        declared(&capabilities.output_replays) == actual(readers, |port| port.replay().is_some()),
         "native output replay providers do not match the declared output_replays"
     );
     anyhow::ensure!(
         declared(&capabilities.output_follows)
-            == actual(&readers, |port| port.snapshot_follow().is_some()),
+            == actual(readers, |port| port.snapshot_follow().is_some()),
         "native output snapshot-follow providers do not match the declared output_follows"
     );
-    if !capabilities.declares_output_reads() && !capabilities.declares_output_follows() {
-        return Ok(None);
+    anyhow::ensure!(
+        declared(&capabilities.output_queries) == actual(readers, |port| port.query().is_some()),
+        "native query readers do not match the declared output_queries"
+    );
+    Ok(())
+}
+
+fn describe_queries(readers: &OutputReaders) -> BTreeMap<PortId, QueryDescription> {
+    readers
+        .ports()
+        .iter()
+        .filter_map(|(port, readers)| {
+            readers
+                .query()
+                .map(|reader| (port.clone(), reader.description()))
+        })
+        .collect()
+}
+
+/// Prepare new descriptions without publishing a partial or invalid update.
+/// The existing binding and provider Arcs remain the owners of all read handles.
+pub(super) fn updated_queries(
+    metadata: &FactoryMetadata,
+    descriptor: &ComponentDescriptor,
+    current: Option<&ReadBinding>,
+    readers: OutputReaders,
+) -> anyhow::Result<BTreeMap<PortId, QueryDescription>> {
+    validate_registrations(metadata, descriptor, &readers)?;
+    let Some(current) = current else {
+        anyhow::ensure!(
+            readers.is_empty(),
+            "native update introduced output readers"
+        );
+        return Ok(BTreeMap::new());
+    };
+    fn same<T: ?Sized>(before: Option<&Arc<T>>, after: Option<&Arc<T>>) -> bool {
+        match (before, after) {
+            (Some(before), Some(after)) => Arc::ptr_eq(before, after),
+            (None, None) => true,
+            _ => false,
+        }
     }
-    Ok(Some(Arc::new(ReadBinding {
-        execution_scope: crate::telemetry::ExecutionScope::capture()
-            .with_context(Default::default()),
-        descriptor: descriptor.clone(),
-        codec,
-        readers,
-        lifecycle: Mutex::new(Lifecycle {
-            generation: 0,
-            phase: Phase::Inactive,
-        }),
-        inflight: AtomicUsize::new(0),
-        changed: tokio::sync::watch::channel(()).0,
-        damaged,
-        leases: Mutex::new(Vec::new()),
-        lease_count: AtomicUsize::new(0),
-    })))
+    anyhow::ensure!(
+        current.readers.ports().len() == readers.ports().len(),
+        "native update changed output reader registrations"
+    );
+    for (port, before) in current.readers.ports() {
+        let after = readers
+            .ports()
+            .get(port)
+            .context("native update removed an output reader")?;
+        anyhow::ensure!(
+            same(before.snapshot(), after.snapshot())
+                && same(before.replay(), after.replay())
+                && same(before.snapshot_follow(), after.snapshot_follow())
+                && same(before.query(), after.query()),
+            "native retained update replaced the registered output reader for {port}"
+        );
+    }
+    Ok(describe_queries(&current.readers))
 }
 
 impl ReadBinding {
+    pub(super) fn query_descriptions(&self) -> Result<BTreeMap<PortId, QueryDescription>, Failure> {
+        Ok(self
+            .query_descriptions
+            .lock()
+            .map_err(|_| Failure::protocol("native query description lock is poisoned"))?
+            .clone())
+    }
+
+    pub(super) fn query_description(&self, port: &PortId) -> Result<QueryDescription, Failure> {
+        self.query_descriptions
+            .lock()
+            .map_err(|_| Failure::protocol("native query description lock is poisoned"))?
+            .get(port)
+            .cloned()
+            .ok_or_else(|| Failure::protocol("missing native query description"))
+    }
+
+    pub(super) fn publish_queries(
+        &self,
+        queries: BTreeMap<PortId, QueryDescription>,
+    ) -> Result<(), Failure> {
+        *self
+            .query_descriptions
+            .lock()
+            .map_err(|_| Failure::protocol("native query description lock is poisoned"))? = queries;
+        Ok(())
+    }
+
+    pub(super) async fn wait_quiescent(&self) -> anyhow::Result<()> {
+        let mut changed = self.quiescence.subscribe();
+        while self.inflight.load(Ordering::Acquire) != 0 {
+            changed.changed().await?;
+        }
+        Ok(())
+    }
+
     /// Called when START succeeds. Earlier reads can never become valid again.
     pub(super) fn activate(&self) -> anyhow::Result<()> {
         let mut lifecycle = self
@@ -146,15 +296,45 @@ impl ReadBinding {
     }
 
     /// Called when STOP begins: in-flight reads are cancelled and new reads fail.
-    pub(super) fn deactivate(&self) {
+    pub(super) fn deactivate(&self) -> Result<(), Failure> {
+        let mut exhausted = false;
         {
             let mut lifecycle = self.lock_to_fence(&self.lifecycle);
-            if lifecycle.phase == Phase::Active {
-                lifecycle.phase = Phase::Inactive;
+            if lifecycle.phase != Phase::Retired {
+                if let Some(generation) = lifecycle.generation.checked_add(1) {
+                    lifecycle.generation = generation;
+                    lifecycle.phase = Phase::Inactive;
+                } else {
+                    lifecycle.phase = Phase::Retired;
+                    exhausted = true;
+                }
             }
             self.changed.send_modify(|_| ());
         }
         self.close_leases();
+        if exhausted {
+            Err(Failure::protocol(
+                "native output read lifecycle generation exhausted",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(super) fn retain_recovery(&self) -> anyhow::Result<()> {
+        if self.query_recovery_views {
+            let mut lifecycle = self
+                .lifecycle
+                .lock()
+                .map_err(|_| anyhow::anyhow!("native output read lifecycle lock is poisoned"))?;
+            anyhow::ensure!(
+                lifecycle.phase != Phase::Retired,
+                "native output reads were retired"
+            );
+            lifecycle.phase = Phase::Retained;
+            self.changed.send_modify(|_| ());
+        }
+        Ok(())
     }
 
     /// Called when the component is released; permanent.
@@ -187,6 +367,12 @@ impl ReadBinding {
                 lease.close();
             }
         }
+        let transfers = std::mem::take(&mut *self.lock_to_fence(&self.transfers));
+        for transfer in transfers {
+            if let Some(transfer) = transfer.upgrade() {
+                transfer.close();
+            }
+        }
     }
 
     pub(super) fn claim(
@@ -201,14 +387,32 @@ impl ReadBinding {
         self: &Arc<Self>,
         lease_generation: Option<u64>,
     ) -> Result<(ReadGuard, tokio::sync::watch::Receiver<()>), Failure> {
+        self.claim_mode(lease_generation, false)
+    }
+
+    fn claim_read(
+        self: &Arc<Self>,
+        code: u32,
+    ) -> Result<(ReadGuard, tokio::sync::watch::Receiver<()>), Failure> {
+        self.claim_mode(None, recovery_request(code))
+    }
+
+    fn claim_mode(
+        self: &Arc<Self>,
+        lease_generation: Option<u64>,
+        recovery: bool,
+    ) -> Result<(ReadGuard, tokio::sync::watch::Receiver<()>), Failure> {
         let lifecycle = self
             .lifecycle
             .lock()
             .map_err(|_| Failure::protocol("native output read lifecycle lock is poisoned"))?;
         match lifecycle.phase {
             Phase::Retired => return Err(retired()),
-            Phase::Inactive if lease_generation.is_some() => return Err(retired()),
-            Phase::Inactive => {
+            Phase::Retained if recovery && self.query_recovery_views => {}
+            Phase::Inactive | Phase::Retained if lease_generation.is_some() => {
+                return Err(retired())
+            }
+            Phase::Inactive | Phase::Retained => {
                 return Err(Failure::new(
                     abi::output_reads::status::NOT_ACTIVE,
                     "native component is not active",
@@ -230,6 +434,7 @@ impl ReadBinding {
             ReadGuard {
                 binding: self.clone(),
                 generation: lifecycle.generation,
+                recovery,
             },
             self.changed.subscribe(),
         ))
@@ -275,6 +480,14 @@ impl ReadBinding {
                     )
                 })?)
             }
+            abi::output_reads::capability::QUERY => {
+                Provider::Query(registered.query().cloned().ok_or_else(|| {
+                    Failure::new(
+                        abi::status::UNSUPPORTED,
+                        "native output has no query reader",
+                    )
+                })?)
+            }
             _ => {
                 return Err(Failure::new(
                     abi::status::INVALID_ARGUMENT,
@@ -295,6 +508,7 @@ impl ReadBinding {
             state: Box::into_raw(Box::new(Arc::new(HandleState {
                 binding: self.clone(),
                 provider,
+                port: port.clone(),
                 schema,
             })))
             .cast(),
@@ -313,6 +527,7 @@ pub(super) fn retired() -> Failure {
 pub(super) struct ReadGuard {
     binding: Arc<ReadBinding>,
     generation: u64,
+    recovery: bool,
 }
 
 impl ReadGuard {
@@ -326,7 +541,9 @@ impl ReadGuard {
             .lifecycle
             .lock()
             .map_err(|_| Failure::protocol("native output read lifecycle lock is poisoned"))?;
-        if lifecycle.phase == Phase::Active && lifecycle.generation == self.generation {
+        if (lifecycle.phase == Phase::Active || self.recovery && lifecycle.phase == Phase::Retained)
+            && lifecycle.generation == self.generation
+        {
             Ok(())
         } else {
             Err(retired())
@@ -337,6 +554,7 @@ impl ReadGuard {
 impl Drop for ReadGuard {
     fn drop(&mut self) {
         self.binding.inflight.fetch_sub(1, Ordering::AcqRel);
+        self.binding.quiescence.send_modify(|_| ());
     }
 }
 
@@ -384,12 +602,26 @@ pub(super) fn snapshot_reply(
 pub(super) fn encode_snapshot(
     snapshot: &OutputSnapshot,
 ) -> Result<Result<Vec<u8>, String>, Failure> {
+    let snapshot = match snapshot_wire(snapshot) {
+        Ok(snapshot) => snapshot,
+        Err(message) => return Ok(Err(message)),
+    };
+    match encode_bounded_messagepack(&Outcome::Ok(snapshot), abi::output_reads::MAX_READ_BYTES) {
+        Ok(bytes) => Ok(Ok(bytes)),
+        Err(BinaryEnvelopeCodecError::SizeLimit { limit: bytes }) => {
+            Ok(Err(format!("encoded output read exceeds {bytes} bytes")))
+        }
+        Err(error) => Err(Failure::failed(error.to_string())),
+    }
+}
+
+fn snapshot_wire(snapshot: &OutputSnapshot) -> Result<WireSnapshot<'_>, String> {
     if snapshot.records().len() > abi::output_reads::MAX_SNAPSHOT_RECORDS {
-        return Ok(Err(format!(
+        return Err(format!(
             "snapshot has {} records; at most {} are supported",
             snapshot.records().len(),
             abi::output_reads::MAX_SNAPSHOT_RECORDS
-        )));
+        ));
     }
     let mut records: Vec<WireRecord<'_>> = snapshot
         .records()
@@ -404,24 +636,39 @@ pub(super) fn encode_snapshot(
     records.sort_by(|left, right| {
         (&*left.namespace, &*left.identity).cmp(&(&*right.namespace, &*right.identity))
     });
-    let reply = Outcome::Ok(WireSnapshot {
+    Ok(WireSnapshot {
         cursor: WireCursor::new(snapshot.cursor()),
         dataset: snapshot.dataset().to_owned(),
         schema: snapshot.schema().clone(),
         records,
-    });
-    match encode_bounded_messagepack(&reply, abi::output_reads::MAX_READ_BYTES) {
-        Ok(bytes) => Ok(Ok(bytes)),
-        Err(BinaryEnvelopeCodecError::SizeLimit { limit: bytes }) => {
-            Ok(Err(format!("encoded output read exceeds {bytes} bytes")))
-        }
-        Err(error) => Err(Failure::failed(error.to_string())),
-    }
+    })
 }
 
 enum Provider {
     Snapshot(Arc<dyn SnapshotProvider>),
     Replay(Arc<dyn ReplayProvider>),
+    Query(Arc<dyn QueryViewProvider>),
+}
+
+fn recovery_request(code: u32) -> bool {
+    matches!(
+        code,
+        abi::output_reads::operation::QUERY_RECOVERY_OBSERVATION
+            | abi::output_reads::operation::QUERY_RECOVERY_VIEW
+    )
+}
+
+pub(super) enum CapturedRead {
+    Snapshot(OutputSnapshot),
+    Replay(OutputReplay),
+    QuerySnapshot(OutputSnapshot, u64),
+    QueryReplay(OutputReplay, u64),
+    QueryView {
+        snapshot: OutputSnapshot,
+        retained: OutputReplay,
+        generation: u64,
+        config_hash: u64,
+    },
 }
 
 /// One provider handle. It owns its provider reference and the binding, but not
@@ -429,6 +676,7 @@ enum Provider {
 struct HandleState {
     binding: Arc<ReadBinding>,
     provider: Provider,
+    port: PortId,
     schema: SchemaDescriptor,
 }
 
@@ -464,9 +712,152 @@ impl HandleState {
         Ok(())
     }
 
+    fn request_cursor(&self, code: u32, input: &[u8]) -> Result<Option<OutputCursor>, Failure> {
+        use abi::output_reads::operation::*;
+        if code == QUERY_OBSERVATION && !self.binding.query_observations {
+            return Err(Failure::new(
+                abi::status::UNSUPPORTED,
+                "query observations were not negotiated",
+            ));
+        }
+        if recovery_request(code) && !self.binding.query_recovery_views {
+            return Err(Failure::new(
+                abi::status::UNSUPPORTED,
+                "query recovery views were not negotiated",
+            ));
+        }
+        match (&self.provider, code) {
+            (Provider::Snapshot(_), SNAPSHOT)
+            | (Provider::Replay(_), COMMITTED_HEAD)
+            | (
+                Provider::Query(_),
+                QUERY_SNAPSHOT
+                | QUERY_HEAD
+                | QUERY_VIEW
+                | QUERY_OBSERVATION
+                | QUERY_RECOVERY_OBSERVATION
+                | QUERY_RECOVERY_VIEW,
+            ) => {
+                if !input.is_empty() {
+                    return Err(Failure::new(
+                        abi::status::INVALID_ARGUMENT,
+                        "this output read takes no input",
+                    ));
+                }
+                Ok(None)
+            }
+            (Provider::Replay(_), REPLAY_AFTER) | (Provider::Query(_), QUERY_REPLAY) => {
+                decode_cursor(input).map(Some)
+            }
+            _ => Err(Failure::new(
+                abi::status::UNSUPPORTED,
+                "operation is not supported by this output provider",
+            )),
+        }
+    }
+
+    async fn capture(
+        &self,
+        code: u32,
+        cursor: Option<&OutputCursor>,
+    ) -> Result<CapturedRead, OutputReadError> {
+        use abi::output_reads::operation::*;
+        let captured = match (&self.provider, code) {
+            (Provider::Snapshot(provider), SNAPSHOT) => {
+                CapturedRead::Snapshot(provider.snapshot().await?)
+            }
+            (Provider::Replay(provider), REPLAY_AFTER) => CapturedRead::Replay(
+                provider
+                    .replay_after(cursor.expect("validated cursor"))
+                    .await?,
+            ),
+            (Provider::Query(provider), QUERY_SNAPSHOT) => {
+                let (snapshot, generation) = provider.query_snapshot().await?;
+                CapturedRead::QuerySnapshot(snapshot, generation)
+            }
+            (Provider::Query(provider), QUERY_REPLAY) => {
+                let (replay, generation) = provider
+                    .query_replay(cursor.expect("validated cursor"))
+                    .await?;
+                CapturedRead::QueryReplay(replay, generation)
+            }
+            (Provider::Query(provider), QUERY_VIEW | QUERY_RECOVERY_VIEW) => {
+                let (cursor, view) = if code == QUERY_RECOVERY_VIEW {
+                    provider.query_recovery_view().await?
+                } else {
+                    provider.query_view().await?
+                };
+                if cursor.sequence() != view.snapshot.as_of_sequence {
+                    return Err(OutputReadError::invalid(
+                        "query view cursor differs from its snapshot",
+                    ));
+                }
+                if view.incarnation
+                    != (!cursor.producer().persistent()).then_some(cursor.producer().incarnation())
+                {
+                    return Err(OutputReadError::invalid(
+                        "query view incarnation differs from its producer epoch",
+                    ));
+                }
+                let after = match view.retained.first() {
+                    Some(envelope) => {
+                        envelope.system().sequence().checked_sub(1).ok_or_else(|| {
+                            OutputReadError::invalid("query retained output has a zero sequence")
+                        })?
+                    }
+                    None => cursor.sequence(),
+                };
+                CapturedRead::QueryView {
+                    retained: OutputReplay::try_new(
+                        cursor.at_sequence(after),
+                        cursor.clone(),
+                        view.retained,
+                    )?,
+                    snapshot: OutputSnapshot::try_new(
+                        cursor,
+                        view.snapshot.projector.dataset(),
+                        self.schema.clone(),
+                        view.snapshot.rows,
+                    )?,
+                    generation: view.snapshot.generation,
+                    config_hash: view.config_hash,
+                }
+            }
+            _ => return Err(OutputReadError::invalid("this read cannot be transferred")),
+        };
+        match &captured {
+            CapturedRead::Snapshot(snapshot) | CapturedRead::QuerySnapshot(snapshot, _) => {
+                self.check_snapshot(snapshot)?;
+            }
+            CapturedRead::Replay(replay) | CapturedRead::QueryReplay(replay, _) => {
+                self.check_replay(cursor.expect("validated cursor"), replay)?;
+            }
+            CapturedRead::QueryView {
+                snapshot, retained, ..
+            } => {
+                self.check_snapshot(snapshot)?;
+                self.check_replay(retained.after(), retained)?;
+            }
+        }
+        Ok(captured)
+    }
+
     async fn serve(&self, code: u32, cursor: Option<&OutputCursor>) -> Result<Vec<u8>, Failure> {
         use abi::output_reads::operation::*;
         match (&self.provider, code) {
+            (Provider::Query(provider), QUERY_OBSERVATION | QUERY_RECOVERY_OBSERVATION) => {
+                let description = self.binding.query_description(&self.port)?;
+                let result = if code == QUERY_RECOVERY_OBSERVATION {
+                    provider.query_recovery_observation().await
+                } else {
+                    provider.query_observation().await
+                }
+                .and_then(|observation| {
+                    observation.validate(self.binding.descriptor.id(), &description)?;
+                    crate::output_reads::WireQueryObservation::new(&observation)
+                });
+                finish(Outcome::from_result(result))
+            }
             (Provider::Snapshot(provider), SNAPSHOT) => {
                 let result = provider
                     .snapshot()
@@ -491,6 +882,52 @@ impl HandleState {
                     .and_then(|replay| self.check_replay(after, &replay).map(|()| replay));
                 self.replay_reply(result)
             }
+            (Provider::Query(provider), QUERY_SNAPSHOT) => {
+                let result = provider
+                    .query_snapshot()
+                    .await
+                    .and_then(|(snapshot, generation)| {
+                        self.check_snapshot(&snapshot)?;
+                        Ok((snapshot, generation))
+                    });
+                match result {
+                    Ok((snapshot, generation)) => match snapshot_wire(&snapshot) {
+                        Ok(snapshot) => finish(Outcome::Ok(WireQuerySnapshot {
+                            snapshot,
+                            generation,
+                        })),
+                        Err(message) => limit(message),
+                    },
+                    Err(error) => finish(Outcome::<WireQuerySnapshot<'_>>::from_result(Err(error))),
+                }
+            }
+            (Provider::Query(provider), QUERY_HEAD) => {
+                let result = provider.query_head().await.and_then(|(head, generation)| {
+                    self.check_cursor(&head)?;
+                    Ok(WireQueryHead {
+                        cursor: WireCursor::new(&head),
+                        generation,
+                    })
+                });
+                finish(Outcome::from_result(result))
+            }
+            (Provider::Query(provider), QUERY_REPLAY) => {
+                let after = cursor.expect("validated query cursor");
+                let result = provider
+                    .query_replay(after)
+                    .await
+                    .and_then(|(replay, generation)| {
+                        self.check_replay(after, &replay)?;
+                        Ok(WireQueryReplay {
+                            replay: self.replay_wire(&replay)?,
+                            generation,
+                        })
+                    });
+                finish(Outcome::from_result(result))
+            }
+            (Provider::Query(_), QUERY_VIEW) => {
+                self.query_view_reply(self.capture(code, cursor).await)
+            }
             _ => Err(Failure::new(
                 abi::status::UNSUPPORTED,
                 "operation is not supported by this output provider",
@@ -498,19 +935,58 @@ impl HandleState {
         }
     }
 
+    fn query_view_reply(
+        &self,
+        result: Result<CapturedRead, OutputReadError>,
+    ) -> Result<Vec<u8>, Failure> {
+        let checked = result.and_then(|captured| match captured {
+            CapturedRead::QueryView {
+                snapshot,
+                retained,
+                generation,
+                config_hash,
+            } => Ok((
+                snapshot,
+                self.replay_wire(&retained)?,
+                generation,
+                config_hash,
+            )),
+            _ => Err(OutputReadError::invalid("expected a query view")),
+        });
+        let (snapshot, retained, generation, config_hash) = match checked {
+            Ok(view) => view,
+            Err(error) => return finish(Outcome::<WireQueryView<'_>>::from_result(Err(error))),
+        };
+        let snapshot = match snapshot_wire(&snapshot) {
+            Ok(snapshot) => snapshot,
+            Err(message) => return limit(message),
+        };
+        finish(Outcome::Ok(WireQueryView {
+            snapshot,
+            retained,
+            generation,
+            config_hash,
+        }))
+    }
+
     fn replay_reply(
         &self,
         result: Result<OutputReplay, OutputReadError>,
     ) -> Result<Vec<u8>, Failure> {
-        let replay = match result {
-            Ok(replay) => replay,
-            Err(error) => return finish(Outcome::<WireReplay<'_>>::from_result(Err(error))),
-        };
+        finish(Outcome::from_result(
+            result.and_then(|replay| self.replay_wire(&replay)),
+        ))
+    }
+
+    fn replay_wire(&self, replay: &OutputReplay) -> Result<WireReplay<'static>, OutputReadError> {
         if replay.envelopes().len() > abi::output_reads::MAX_REPLAY_ENVELOPES {
-            return limit(format!(
-                "replay has {} envelopes; at most {} are supported",
-                replay.envelopes().len(),
-                abi::output_reads::MAX_REPLAY_ENVELOPES
+            return Err(OutputReadError::Failed(
+                OutputReadLimit(format!(
+                    "replay has {} envelopes; at most {} are supported",
+                    replay.envelopes().len(),
+                    abi::output_reads::MAX_REPLAY_ENVELOPES
+                ))
+                .into(),
             ));
         }
         let mut envelopes = Vec::with_capacity(replay.envelopes().len());
@@ -520,20 +996,23 @@ impl HandleState {
                     envelope: Cow::Owned(bytes),
                 }),
                 Err(BinaryEnvelopeCodecError::SizeLimit { limit: bytes }) => {
-                    return limit(format!("a replayed envelope exceeds {bytes} bytes"))
+                    return Err(OutputReadError::Failed(
+                        OutputReadLimit(format!("a replayed envelope exceeds {bytes} bytes"))
+                            .into(),
+                    ));
                 }
                 Err(error) => {
-                    return finish(Outcome::<WireReplay<'_>>::Invalid(format!(
+                    return Err(OutputReadError::invalid(format!(
                         "replayed envelope cannot be encoded: {error}"
-                    )))
+                    )));
                 }
             }
         }
-        finish(Outcome::Ok(WireReplay {
+        Ok(WireReplay {
             after: WireCursor::new(replay.after()),
             head: WireCursor::new(replay.head()),
             envelopes,
-        }))
+        })
     }
 }
 
@@ -611,26 +1090,8 @@ unsafe extern "C" fn request(
         let input =
             unsafe { transport::borrowed_bytes(input, abi::output_reads::MAX_REQUEST_BYTES)? }
                 .to_vec();
-        use abi::output_reads::operation::*;
-        let cursor = match (&handle.provider, code) {
-            (Provider::Snapshot(_), SNAPSHOT) | (Provider::Replay(_), COMMITTED_HEAD) => {
-                if !input.is_empty() {
-                    return Err(Failure::new(
-                        abi::status::INVALID_ARGUMENT,
-                        "this output read takes no input",
-                    ));
-                }
-                None
-            }
-            (Provider::Replay(_), REPLAY_AFTER) => Some(decode_cursor(&input)?),
-            _ => {
-                return Err(Failure::new(
-                    abi::status::UNSUPPORTED,
-                    "operation is not supported by this output provider",
-                ))
-            }
-        };
-        let (guard, mut changed) = handle.binding.claim()?;
+        let cursor = handle.request_cursor(code, &input)?;
+        let (guard, mut changed) = handle.binding.claim_read(code)?;
         let runtime = io_runtime()?;
         let damaged = handle.binding.damaged.clone();
         let scope = handle
@@ -690,9 +1151,11 @@ pub(super) fn test_binding() -> Arc<ReadBinding> {
         GraphChangeCodec::schema().descriptor().clone(),
         PipeRequirements::default(),
     )];
-    let descriptor =
-        ComponentDescriptor::try_new(ComponentId::try_new("component").unwrap(), ports.clone())
-            .unwrap();
+    let descriptor = ComponentDescriptor::try_new(
+        ComponentId::try_new("49a5d640-ec80-4c62-9cdb-1baab036e8be").unwrap(),
+        ports.clone(),
+    )
+    .unwrap();
     let metadata = FactoryMetadata {
         implementation: ImplementationIdentity::try_new("test/binding", "1").unwrap(),
         role: ComponentRole::Source,
@@ -737,7 +1200,7 @@ mod tests {
         assert!(!binding.damaged.is_damaged());
 
         // Fencing must still happen, and the poisoning must be observable.
-        binding.deactivate();
+        binding.deactivate().expect("deactivate output reads");
         assert!(
             binding.damaged.is_damaged(),
             "a poisoned lifecycle lock must quarantine the component"

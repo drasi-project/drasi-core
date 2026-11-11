@@ -247,10 +247,16 @@ mod tests {
         let (owner, binding) = graph
             .resource_binding("instance", "graph", "bootstrap", 42, None)
             .unwrap();
-        assert_eq!(
-            binding.config().scope.component_id().unwrap().as_str(),
-            "resource/bootstrap"
-        );
+        let id = binding.config().scope.component_id().unwrap();
+        assert!(id.as_str().parse::<uuid::Uuid>().is_ok());
+        let (_same_owner, same) = graph
+            .resource_binding("instance", "graph", "bootstrap", 43, None)
+            .unwrap();
+        let (_other_owner, other) = graph
+            .resource_binding("instance", "graph", "other", 42, None)
+            .unwrap();
+        assert_eq!(same.config().scope.component_id(), Some(id));
+        assert_ne!(other.config().scope.component_id(), Some(id));
         assert_eq!(binding.config().generation, 42);
         assert!(binding.is_active().unwrap());
         let retained = owner.clone();

@@ -271,20 +271,21 @@ impl MySqlSource {
         })
     }
 
-    pub fn describe(id: ComponentId, output: MySqlOutput) -> Result<ComponentDescriptor> {
+    pub fn ports(output: MySqlOutput) -> Result<Vec<PortDescriptor>> {
         let schema = match output {
             MySqlOutput::Changes => GraphChangeCodec::schema(),
             MySqlOutput::Transactions => SourceTransactionCodec::schema(),
         };
-        Ok(ComponentDescriptor::try_new(
-            id,
-            vec![PortDescriptor::new(
-                PortId::try_new("out")?,
-                PortDirection::Output,
-                schema.descriptor().clone(),
-                PipeRequirements::default(),
-            )],
-        )?)
+        Ok(vec![PortDescriptor::new(
+            PortId::try_new("out")?,
+            PortDirection::Output,
+            schema.descriptor().clone(),
+            PipeRequirements::default(),
+        )])
+    }
+
+    pub fn describe(id: ComponentId, output: MySqlOutput) -> Result<ComponentDescriptor> {
+        Ok(ComponentDescriptor::try_new(id, Self::ports(output)?)?)
     }
 
     async fn prepare(&self, snapshot: Starting) -> Result<Worker> {

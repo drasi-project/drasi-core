@@ -70,7 +70,7 @@ impl Fixture {
             },
         )
         .unwrap();
-        let mut builder = DrasiLib::builder()
+        let mut builder = lib_integration_tests::query_builder()
             .with_id("computation-reaction-recovery")
             .with_source(source)
             .with_state_store_provider(state.clone());

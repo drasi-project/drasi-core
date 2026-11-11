@@ -8,6 +8,8 @@ description = "DrasiLib OpenTelemetry source getting-started example"
 [workspace]
 
 [dependencies]
+drasi-host-sdk = { path = "../../../components/host-sdk" }
+drasi-computation-transformer-query = { path = "../../../components/computation-plugins/transformers/query" }
 anyhow = "1.0"
 drasi-lib = { path = "../../../lib" }
 drasi-source-otel = { path = "../../../components/sources/otel" }

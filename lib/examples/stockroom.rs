@@ -111,6 +111,7 @@ async fn basic() -> anyhow::Result<()> {
         .await
         .context("alerts receiver was already taken")?;
     let core = DrasiLib::builder()
+        .with_query_factory(Arc::new(ContinuousQueryFactory::default()))
         .with_id("stockroom")
         .with_source(source)
         .with_query(
@@ -349,7 +350,7 @@ async fn graph() -> anyhow::Result<()> {
     let mut batch = ComponentBatch::builder()
         .source(Box::new(inventory))
         .transformer(Box::new(audit))
-        .query(Box::new(query))
+        .transformer(Box::new(query))
         .sink(Box::new(alerts));
     for producer in ["inventory", "audit", "low-stock"] {
         batch = batch.bind_stream(

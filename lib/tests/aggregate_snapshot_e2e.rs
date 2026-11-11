@@ -307,6 +307,18 @@ async fn aggregate_snapshot_trading_bootstrap_updates_deletes_and_rebootstrap() 
         .set_bootstrap_provider(Box::new(BootstrapRows(price_rows)))
         .await;
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("aggregate-snapshot-trading")
         .with_source(postgres)
         .with_source(prices)
@@ -453,6 +465,18 @@ async fn aggregate_snapshot_floor_comfort_keeps_independent_equal_valued_groups(
         .set_bootstrap_provider(Box::new(BootstrapRows(Arc::new(RwLock::new(rows)))))
         .await;
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("aggregate-snapshot-floor-comfort")
         .with_source(source)
         .with_query(
@@ -527,7 +551,7 @@ async fn aggregate_snapshot_floor_comfort_keeps_independent_equal_valued_groups(
 #[tokio::test]
 async fn grouping_numeric_public_snapshot_updates_one_row() -> Result<()> {
     let (source, handle) = MockSource::new("numeric")?;
-    let core = DrasiLib::builder()
+    let core = DrasiLib::builder().with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone())
         .with_id("numeric-identity")
         .with_source(source)
         .with_query(Query::cypher("numeric-summary")
@@ -611,6 +635,18 @@ async fn grouping_numeric_public_snapshot_updates_one_row() -> Result<()> {
 async fn terminal_aggregate_public_notifications_skip_unchanged_zero() -> Result<()> {
     let (source, handle) = MockSource::new("terminal")?;
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("terminal-identity")
         .with_source(source)
         .with_query(

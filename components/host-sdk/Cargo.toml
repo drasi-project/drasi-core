@@ -1,4 +1,5 @@
 [package]
+rust-version.workspace = true
 name = "drasi-host-sdk"
 version.workspace = true
 edition = "2021"
@@ -11,11 +12,14 @@ otel-context = ["drasi-lib/otel-context", "drasi-computation-plugin-sdk/otel-con
 registry = ["oci-client", "tokio/fs", "x509-parser", "p256", "p384", "pem", "base64"]
 fetcher = ["reqwest", "url", "tokio/fs"]
 watcher = ["notify", "notify-debouncer-mini"]
+test-support = ["drasi-lib/test-support"]
 
 [dependencies]
+im = { workspace = true }
 drasi-ffi-primitives = { workspace = true }
 drasi-lib = { workspace = true }
 drasi-core = { workspace = true }
+drasi-query-common = { workspace = true }
 drasi-plugin-sdk = { workspace = true, features = ["computation"] }
 drasi-computation-plugin-abi = { workspace = true }
 drasi-computation-plugin-sdk = { workspace = true }
@@ -33,6 +37,7 @@ tracing = "0.1"
 tokio-stream = "0.1"
 futures-util = "0.3"
 indexmap = "2"
+ordered-float = "3"
 chrono = "0.4"
 sha2 = "0.10"
 toml = "0.8"
@@ -58,11 +63,13 @@ notify-debouncer-mini = { version = "0.4", optional = true }
 workspace = true
 
 [dev-dependencies]
+uuid = "=1.29.0"
 metrics = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-opentelemetry = { version = "0.32", default-features = false }
-opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
-opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace", "testing"] }
+tracing-opentelemetry = { version = "=0.34.0", default-features = false }
+opentelemetry = { version = "=0.33.1", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "=0.33.1", default-features = false, features = ["trace", "testing"] }
+drasi-core-types = { workspace = true }
 drasi-computation-bootstrap-mssql = { workspace = true }
 drasi-computation-source-mssql = { workspace = true }
 drasi-computation-sink-storedproc-mssql = { workspace = true }
@@ -91,16 +98,28 @@ tempfile = "3"
 libloading = "0.8"
 rmp-serde = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util", "test-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util", "test-util", "process"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 tokio-util = { version = "0.7", features = ["io"] }
 serial_test = "3"
-im = { workspace = true }
 tokio-stream = { version = "0.1", features = ["net"] }
 async-stream = "0.3"
 axum = "0.7"
 prost-types = "0.14"
 tonic = "0.14"
+drasi-computation-transformer-query = { path = "../computation-plugins/transformers/query" }
+
+[[example]]
+name = "native_scheduling"
+path = "tests/fixtures/native_scheduling.rs"
+crate-type = ["cdylib"]
+test = false
+
+[[example]]
+name = "native_custom_query"
+path = "tests/fixtures/native_custom_query.rs"
+crate-type = ["cdylib"]
+test = false
 
 [[example]]
 name = "native_activation_credentials"

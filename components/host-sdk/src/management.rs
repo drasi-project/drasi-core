@@ -18,12 +18,14 @@ mod bootstrap_coordination;
 mod composite_bootstrap_tests;
 mod identity;
 mod native;
+mod time_merge;
 pub use bootstrap_coordination::NativeSourceBootstrapConfig;
 pub use identity::NativeIdentityConfig;
 pub use native::{
     CompositeBootstrapConfig, ConsumerProgressConfig, NativeBootstrapConfig, NativeOutputSelector,
     NativeOutputSnapshotsConfig,
 };
+pub use time_merge::SourceTimeMergeStorageConfig;
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
@@ -35,12 +37,17 @@ enum Recipe {
     },
     Indexes {
         provider: String,
+        #[serde(default)]
+        implementation: Option<ImplementationIdentity>,
+        #[serde(default, rename = "configurationVersion")]
+        configuration_version: Option<u32>,
     },
     SharedStorage {
         provider: String,
         component: ComponentId,
     },
     SharedQos(SharedQosConfig),
+    SourceTimeMergeStorage(SourceTimeMergeStorageConfig),
     NativeConsumer(NativeConsumerConfig),
     NativeBootstrap(NativeBootstrapConfig),
     NativeSourceBootstrap(NativeSourceBootstrapConfig),
@@ -190,7 +197,12 @@ pub struct HostManagementResources {
     bootstraps: crate::computation::NativeBootstrapFactories,
     source_bootstraps: crate::computation::NativeSourceBootstrapFactories,
     identity_providers: crate::computation::NativeIdentityProviders,
-    indexes: BTreeMap<String, Arc<dyn drasi_core::computation::ComputationIndexProvider>>,
+    indexes: BTreeMap<String, RegisteredIndexes>,
+}
+
+struct RegisteredIndexes {
+    provider: Arc<dyn drasi_core::computation::ComputationIndexProvider>,
+    identity: Option<(ImplementationIdentity, u32)>,
 }
 
 /// Durable consumer settings; the actual provider is a declared graph dependency.
@@ -291,17 +303,50 @@ impl HostManagementResources {
 
     /// Register an external index implementation for durable QoS journal recipes.
     pub fn with_index_provider(
-        mut self,
+        self,
         name: impl Into<String>,
         provider: Arc<dyn drasi_core::computation::ComputationIndexProvider>,
     ) -> Result<Self> {
-        let name = name.into();
+        self.register_indexes(name.into(), provider, None)
+    }
+
+    /// Register the actual implementation/configuration identity used by a host
+    /// index recipe. An `indexes` recipe can pin `implementation` and
+    /// `configurationVersion`; mismatches fail resource construction without
+    /// discarding the accepted declaration. Unversioned registrations remain
+    /// supported but cannot satisfy a version-pinned recipe.
+    pub fn with_versioned_index_provider(
+        self,
+        name: impl Into<String>,
+        implementation: ImplementationIdentity,
+        configuration_version: u32,
+        provider: Arc<dyn drasi_core::computation::ComputationIndexProvider>,
+    ) -> Result<Self> {
+        implementation.validate()?;
+        anyhow::ensure!(
+            configuration_version > 0,
+            "invalid index configuration version"
+        );
+        self.register_indexes(
+            name.into(),
+            provider,
+            Some((implementation, configuration_version)),
+        )
+    }
+
+    fn register_indexes(
+        mut self,
+        name: String,
+        provider: Arc<dyn drasi_core::computation::ComputationIndexProvider>,
+        identity: Option<(ImplementationIdentity, u32)>,
+    ) -> Result<Self> {
         ResourceId::try_new(name.clone())?;
         anyhow::ensure!(
             !self.indexes.contains_key(&name),
             "duplicate managed index provider"
         );
-        self.indexes.insert(name, provider);
+        self.indexes
+            .insert(name, RegisteredIndexes { provider, identity });
         Ok(self)
     }
 }
@@ -383,20 +428,36 @@ impl ManagementResourceResolver for HostManagementResources {
                 Recipe::NativeBootstrap(config) => {
                     config.validate(resource, &dependencies)?;
                     config.validate_owner(&resource.id, desired)?;
-                    config.validate_configuration(
-                        &self.bootstraps,
-                        &dependencies,
-                        &BTreeMap::new(),
-                    )?;
+                    if self
+                        .bootstraps
+                        .get(&config.implementation)
+                        .is_some_and(|factory| {
+                            factory.metadata().configuration_version == config.configuration_version
+                        })
+                    {
+                        config.validate_configuration(
+                            &self.bootstraps,
+                            &dependencies,
+                            &BTreeMap::new(),
+                        )?;
+                    }
                 }
                 Recipe::NativeSourceBootstrap(config) => {
                     config.validate(resource, &dependencies)?;
                     config.validate_owner(&resource.id, desired)?;
-                    config.validate_configuration(
-                        &self.source_bootstraps,
-                        &dependencies,
-                        &BTreeMap::new(),
-                    )?;
+                    if self
+                        .source_bootstraps
+                        .get(&config.implementation)
+                        .is_some_and(|factory| {
+                            factory.metadata().configuration_version == config.configuration_version
+                        })
+                    {
+                        config.validate_configuration(
+                            &self.source_bootstraps,
+                            &dependencies,
+                            &BTreeMap::new(),
+                        )?;
+                    }
                 }
                 Recipe::CompositeBootstrap(config) => {
                     config.validate(resource, &dependencies)?;
@@ -410,6 +471,10 @@ impl ManagementResourceResolver for HostManagementResources {
                 }
                 Recipe::ConsumerProgress(config) => config.validate(resource, &dependencies)?,
                 Recipe::NativeIdentity(config) => config.validate(resource, &dependencies)?,
+                Recipe::SourceTimeMergeStorage(config) => {
+                    config.validate(resource, &dependencies)?;
+                    config.validate_owner(&resource.id, desired)?;
+                }
                 _ => {}
             }
         }
@@ -421,13 +486,14 @@ impl ManagementResourceResolver for HostManagementResources {
                 .context("managed resource recipe is unavailable")?;
             let recipe: Recipe = serde_json::from_value(configuration.clone())?;
             let persistent = match recipe {
-                Recipe::Indexes { provider } => self
+                Recipe::Indexes { provider, .. } => self
                     .indexes
                     .get(&provider)
-                    .is_none_or(|provider| !provider.is_volatile()),
-                Recipe::SharedStorage { .. } | Recipe::SharedQos(_) | Recipe::NativeConsumer(_) => {
-                    true
-                }
+                    .is_none_or(|entry| !entry.provider.is_volatile()),
+                Recipe::SharedStorage { .. }
+                | Recipe::SharedQos(_)
+                | Recipe::NativeConsumer(_)
+                | Recipe::SourceTimeMergeStorage(_) => true,
                 Recipe::Qos {
                     provider, recovery, ..
                 } => provider.is_some() || recovery.is_some(),
@@ -473,6 +539,9 @@ impl ManagementResourceResolver for HostManagementResources {
                 .await;
         }
         if let Recipe::NativeConsumer(config) = recipe {
+            return config.resolve(instance, graph, specification, dependencies);
+        }
+        if let Recipe::SourceTimeMergeStorage(config) = recipe {
             return config.resolve(instance, graph, specification, dependencies);
         }
         if let Recipe::NativeBootstrap(config) = recipe {
@@ -536,15 +605,32 @@ impl ManagementResourceResolver for HostManagementResources {
                     QuerySourceProgress::new(graph, component)?,
                 ))),
             ),
-            Recipe::Indexes { provider } => ResourceHandle::new(
-                ResourceRole::IndexBackend,
-                Arc::new(QueryIndexProviderResource(
-                    self.indexes
-                        .get(&provider)
-                        .context("managed index provider is not registered")?
-                        .clone(),
-                )),
-            ),
+            Recipe::Indexes {
+                provider,
+                implementation,
+                configuration_version,
+            } => {
+                let entry = self
+                    .indexes
+                    .get(&provider)
+                    .context("managed index provider is not registered")?;
+                match (implementation, configuration_version) {
+                    (None, None) => {}
+                    (Some(implementation), Some(version)) if version > 0 => {
+                        anyhow::ensure!(
+                            entry.identity.as_ref() == Some(&(implementation, version)),
+                            "managed index provider implementation or configuration version mismatch"
+                        );
+                    }
+                    _ => anyhow::bail!(
+                        "version-pinned indexes require implementation and a positive configurationVersion"
+                    ),
+                }
+                ResourceHandle::new(
+                    ResourceRole::IndexBackend,
+                    Arc::new(QueryIndexProviderResource(entry.provider.clone())),
+                )
+            }
             Recipe::SharedStorage {
                 provider,
                 component,
@@ -560,12 +646,16 @@ impl ManagementResourceResolver for HostManagementResources {
                     .context("shared storage index provider is not registered")?;
                 let scope = format!("shared/{}/{instance}/{graph}", instance.len());
                 let indexes = provider
+                    .provider
                     .create_indexes(&scope, specification.id.as_str())
                     .await?;
                 SharedStorageGroup::new(graph, component, indexes)?.resource()
             }
             Recipe::SharedQos(_) => unreachable!("shared QoS resolved with dependencies"),
             Recipe::NativeConsumer(_) => unreachable!("native consumer resolved with dependencies"),
+            Recipe::SourceTimeMergeStorage(_) => {
+                unreachable!("time merge storage resolved with dependencies")
+            }
             Recipe::NativeBootstrap(_) => {
                 unreachable!("native bootstrap resolved with dependencies")
             }
@@ -619,11 +709,12 @@ impl ManagementResourceResolver for HostManagementResources {
                         .and_then(|name| self.indexes.get(name))
                         .context("durable QoS requires a registered index provider")?;
                     anyhow::ensure!(
-                        !provider.is_volatile(),
+                        !provider.provider.is_volatile(),
                         "durable QoS cannot use volatile indexes"
                     );
                     let scope = format!("qos/{}/{instance}/{graph}", instance.len());
                     let indexes = provider
+                        .provider
                         .create_indexes(&scope, specification.id.as_str())
                         .await?;
                     QosChannel::persistent_with_recovery(

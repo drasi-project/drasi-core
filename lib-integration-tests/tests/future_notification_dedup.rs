@@ -95,7 +95,7 @@ async fn run_future_notification_dedup(runtime: &str) {
             .auto_start(true)
             .enable_bootstrap(false)
             .build();
-        let drasi = DrasiLib::builder()
+        let drasi = lib_integration_tests::query_builder()
             .with_id(format!("future-dedup-{runtime}-{source_id}"))
             .with_source(source)
             .with_query(query)

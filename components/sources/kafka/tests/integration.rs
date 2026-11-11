@@ -117,6 +117,18 @@ async fn test_kafka_source_detects_changes() {
     // Build and start DrasiLib
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_source(source)
             .with_query(query)
             .with_reaction(reaction)
@@ -301,6 +313,18 @@ async fn test_kafka_source_custom_mapping() {
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_source(source)
             .with_query(query)
             .with_reaction(reaction)

@@ -5,10 +5,12 @@
 This document is a guide for software developers that explains how to create and
 maintain custom **Reaction plugins** in Rust for `drasi-lib`.
 
-The `Reaction`/`ReactionBase` requirements below apply to legacy plugins.
-Native `EnvelopeSink` components follow the ComputationGraph contract instead;
-the [native application reaction](application/README.md#native-application-delivery)
-is an in-process example without a legacy adapter or background processor.
+The `Reaction`/`ReactionBase` requirements below apply to the **ordinary
+Source/Reaction family** and `drasi-plugin-sdk`. Native plugin authors use
+`NativeComponent` and `NativeSink` from the
+[native SDK](../computation-plugin-sdk/README.md), not `ReactionBase` or ordinary
+vtables. The [native application reaction](application/README.md#native-application-delivery)
+is a linked ComputationGraph example without an ordinary adapter.
 
 Reactions are the component of Drasi that act when Continuous Query results change.
 
@@ -41,7 +43,7 @@ message broker or database, appending to a file, or updating a UI.
 10. [Default Output Structure (SHOULD)](#10-default-output-structure-should)
 11. [Output Templating (SHOULD)](#11-output-templating-should)
 12. [Optional Capabilities](#12-optional-capabilities)
-    1. [Deprovisioning](#121-deprovisioning)
+    1. [Deleting owned resources](#121-deleting-owned-resources)
     2. [Durable State & Checkpoints](#122-durable-state--checkpoints)
     3. [Recovery Policy](#123-recovery-policy)
     4. [Bootstrap on Fresh Start](#124-bootstrap-on-fresh-start)
@@ -116,10 +118,10 @@ appending to a file, or updating a UI.
    instantiate a reaction and pass it to a `drasi-lib` instance, that
    instance takes ownership of the reaction.
 
-5. **FFI safety matters.** When compiled as a dynamic plugin
-   (`cdylib`), every trait method is dispatched across a stable C ABI
-   vtable. Panics at the boundary are caught and turned into
-   transient errors — but you SHOULD NOT rely on this.
+5. **FFI safety matters.** Dynamic plugins use a versioned C ABI, not a
+   cross-library Rust trait object. Supported unwinding panics are reported as
+   failures, not automatically retryable errors. Failed initialization requires
+   disposal of that object before constructing a new one.
 
 ### Bundled completion boundaries
 
@@ -183,52 +185,73 @@ Wrapping a legacy enqueue method in `DeliveryRunner` MUST NOT claim completion.
 
 The Quickstart below builds `MyReaction`. In a real application, the
 reaction is one piece of a `drasi-lib` instance alongside at least one
-source and one query. The application creates those pieces, transfers
-ownership to `DrasiLib::builder()`, then starts the runtime.
+source and one query. The application declares constructors/configuration through
+`DrasiLib::builder()`, which owns construction and lifecycle, then starts the runtime.
 
-The example below uses the published mock source crate so the moving
-parts are visible without an external database. To run it, add
-`drasi-source-mock = "0.2"` to your application crate's dependencies
-alongside `drasi-lib`.
+The example below uses the mock source so the moving parts are visible without
+an external database. Use `drasi-source-mock` from the same Core checkout as
+`drasi-lib` (for the directory layout below,
+`{ path = "../drasi-core/components/sources/mock" }`).
 
 ```rust,ignore
+use std::sync::Arc;
 use drasi_lib::{DrasiLib, Query};
+use drasi_lib::config::ComponentReference;
+use drasi_lib::computation::v1::ComponentFactory;
 use drasi_source_mock::{DataType, MockSource, MockSourceConfig};
 use my_reaction::{MyReaction, MyReactionConfig};
 
-async fn run() -> anyhow::Result<()> {
-    let source = MockSource::new(
-        "mock-source",
-        MockSourceConfig {
-            data_type: DataType::Counter,
-            interval_ms: 1_000,
-        },
-    )?;
-
+async fn run(query_factory: Arc<dyn ComponentFactory>) -> anyhow::Result<DrasiLib> {
     let query = Query::cypher("counter-query")
         .query("MATCH (c:Counter) RETURN c.value AS value")
         .from_input("mock-source")
-        .build();
-
-    let reaction = MyReaction::builder("my-reaction")
-        .from_query("counter-query")
-        .with_config(MyReactionConfig {
-            endpoint: "https://example.test/webhook".to_string(),
-            timeout_ms: Some(5_000),
-        })
+        .enable_bootstrap(false)
         .build()?;
 
     let drasi = DrasiLib::builder()
-        .with_source(source)
+        .with_query_factory(query_factory)
+        .with_source_factory("mock-source", true, |id| {
+            MockSource::new(id.to_string(), MockSourceConfig {
+                data_type: DataType::Counter,
+                interval_ms: 1_000,
+            })
+        })
         .with_query(query)
-        .with_reaction(reaction)
+        .with_reaction_factory(
+            "my-reaction",
+            vec![ComponentReference::by_name("counter-query")?],
+            true,
+            |id, queries| {
+                MyReaction::builder(id.to_string())
+                    .with_queries(queries.into_iter().map(|query| query.to_string()).collect())
+                    .with_config(MyReactionConfig {
+                        endpoint: "https://example.test/webhook".to_string(),
+                        timeout_ms: Some(5_000),
+                    })
+                    .build()
+            },
+        )
         .build()
         .await?;
 
     drasi.start().await?;
-    Ok(())
+    Ok(drasi)
 }
 ```
+
+Names such as `"my-reaction"` and `"counter-query"` belong to the graph catalog.
+The creation callbacks receive immutable component UUIDs. The reaction MUST
+preserve its supplied UUID and return the resolved query UUIDs from `query_ids()`;
+do not pass display names into `ReactionBaseParams` or `from_query` on the
+plugin's own builder. `ComponentReference::by_name` selects a name;
+`ComponentReference::by_id` explicitly selects a UUID.
+
+Preconstructed objects require `with_allow_external_component_ids(true)` and
+`with_reaction(name, reaction)`. Prefer the default factory-based admission above.
+The application must supply its explicitly selected query-authoring factory
+and retain the returned runtime owner; see the
+[Core developer guide](../../lib/docs/developer-guide/README.md). Loading a
+plugin is not automatic query-factory selection or managed-update authorization.
 
 This guide focuses on the reaction plugin itself. The source and query
 above are context: they show where the reaction fits once you have
@@ -243,14 +266,14 @@ query result to stdout. You will then expand it in later sections.
 
 ### Prerequisites
 
-> ✅ A recent stable Rust toolchain (`rustc --version` ≥ 1.83).  
+> ✅ Rust 1.95.0 or a compatible newer toolchain matching your host build.<br>
 > ✅ Familiarity with async Rust and the `tokio` ecosystem.  
-> ✅ An internet connection so `cargo` can resolve `drasi-lib` and
->    its transitive dependencies from crates.io.  
+> ✅ Matching Core/runtime/SDK sources or releases providing this lifecycle/UUID API.
 
-You do **not** need a clone of the Drasi source tree. Your reaction
-lives in its own crate and depends on the
-published `drasi-lib` and `drasi-plugin-sdk` crates.
+Your reaction lives in its own crate. The path dependencies below assume
+`my-reaction/` is beside the host's matching `drasi-core/` checkout. Published
+dependencies are also possible when they provide these APIs and the required
+ordinary ABI; an unrelated older release is not interchangeable.
 
 ### Step 1: Create the crate
 
@@ -285,10 +308,8 @@ license = "Apache-2.0"
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
-# Pin to a single drasi-lib version across your project. The version
-# below was current at the time this guide was written; check
-# https://crates.io/crates/drasi-lib for the latest.
-drasi-lib = "0.8"
+# Use the Core checkout that matches the embedding application.
+drasi-lib = { path = "../drasi-core/lib" }
 anyhow = "1"
 async-trait = "0.1"
 log = "0.4"
@@ -298,10 +319,9 @@ serde_json = "1"
 chrono = "0.4"
 ```
 
-> 🔴 **MUST** — Depend on `drasi-lib` from crates.io and pin a single
-> version across your project. The dynamic plugin loader must use the
-> matching SDK version; mismatched `drasi-lib` versions cause
-> link-time failures and incompatible FFI vtables.
+> 🔴 **MUST** — Select compatible runtime/SDK builds. Dynamic plugins must
+> satisfy the host's ordinary ABI/version and target checks. SDK crate package
+> versions are not the ABI version.
 
 > 🟡 **SHOULD** — Declare `crate-type = ["lib", "cdylib"]` even if you
 > only need the static `lib` path today. Adding `cdylib` later requires
@@ -361,6 +381,7 @@ pub struct MyReaction {
 impl MyReaction {
     /// Convenience constructor. Most callers should use
     /// [`MyReaction::builder`] instead.
+    /// `id` and `queries` are framework-supplied UUIDs, not graph names.
     pub fn new(
         id: impl Into<String>,
         queries: Vec<String>,
@@ -410,13 +431,13 @@ impl MyReactionBuilder {
         }
     }
 
-    /// Subscribe to multiple queries at once (replaces any previously-set list).
+    /// Set resolved query UUIDs (replaces any previously-set list).
     pub fn with_queries(mut self, queries: Vec<String>) -> Self {
         self.queries = queries;
         self
     }
 
-    /// Subscribe to one additional query.
+    /// Add one resolved query UUID.
     pub fn with_query(mut self, q: impl Into<String>) -> Self {
         self.queries.push(q.into());
         self
@@ -498,8 +519,8 @@ impl Reaction for MyReaction {
         self.base.get_auto_start()
     }
 
-    async fn initialize(&self, context: ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -616,6 +637,12 @@ cargo build
 >   on shutdown.
 > - Status transitions wired through `ReactionBase`.
 
+The required binding hook wires the base regardless of lifecycle customization.
+This scaffold uses no additional instance-lifetime setup, so its optional
+`initialize()` and `dispose()` retain their successful no-op defaults. Its
+processing worker belongs to each start/stop cycle. Default pause/resume hooks
+do not make that independently running worker safely pausable or update-capable.
+
 You now have a buildable reaction scaffold. It demonstrates the trait,
 builder, lifecycle, and descriptor shape, but it does not implement a
 real transport. Later sections show the default output, templating,
@@ -628,7 +655,48 @@ tests you apply when replacing the log statements with actual dispatch.
 
 ### 4.1 The Component Lifecycle
 
-Every reaction follows the same state machine:
+The activation statuses below are only part of the lifetime of an owned reaction.
+The framework first performs mandatory context binding and optional instance
+initialization, and finally awaits disposal:
+
+```
+construct → bind_runtime_context(context) → initialize()
+              start() → stop() → start() → stop()
+              [delete_owned_resources(), only when explicitly requested]
+              dispose() → final object release
+```
+
+`bind_runtime_context(context)` is required, async, and returns `()`.
+`initialize`, `start`, `stop`, `dispose`, `pause_processing`, and
+`resume_processing` are no-argument async `Result<()>` hooks with no-op defaults.
+Independent processing and resources still require appropriate overrides.
+No-op defaults do not prove that work paused, effects drained, state was
+preserved, or data was deleted.
+
+Initialization is once per **actual constructed object**, not once per UUID,
+library, port or query subscription. The initialized object survives normal
+start/stop cycles. A reconstructed object with the same UUID gets a fresh
+initialize/dispose lifetime. A borrowed object stays its actual owner's
+responsibility; shared wrappers do not acquire extra disposal rights.
+
+Failed initialization prevents start and still requires disposal of the
+partially initialized object. Do not retry initialization on that object.
+A failed start may already own work and must be settled by stop before
+restart or retirement. An initialized object that never started still receives
+dispose. Successful transitions are not repeated; incomplete cleanup must
+remain retry-safe.
+
+Stop, disposal or deletion failure/timeout/cancellation is not completed cleanup.
+The actual owner and unfinished work MUST remain available for retry, and
+conflicting restart or release MUST remain blocked. Dispose is awaited final
+instance cleanup, not deletion of checkpoints, output topics or other artifacts.
+
+`pause_processing()` / `resume_processing()` apply only to a temporary processing
+boundary retaining the activation. They are not aliases for stop/start and are
+not called around every normal activation. Stop a paused reaction directly;
+do not resume it merely to stop it.
+
+Activation status:
 
 ```
                  ┌─────────────┐
@@ -661,14 +729,17 @@ Every reaction follows the same state machine:
 
 | Call            | Caller         | Frequency                                |
 |-----------------|----------------|------------------------------------------|
-| `initialize`    | Host           | Exactly once per reaction lifetime.      |
-| `start`         | Host           | Once after `initialize`, then again after every `stop`. |
-| `stop`          | Host           | At shutdown or when reconfiguring.       |
+| `bind_runtime_context` | Host    | Required framework wiring before optional initialization. |
+| `initialize`    | Host           | Once per actual object, before its first start. |
+| `start`         | Host           | On each stopped-to-running activation after successful initialization. |
+| `stop`          | Host           | End an activation or settle a partially failed start; retain restartable state. |
+| `pause_processing` / `resume_processing` | Host | Only for a real temporary processing pause. |
 | `enqueue_query_result` | Host    | Many times while `Running`.              |
 | `status`        | Host / API     | Anytime, including before `start`.       |
 | `properties`    | Host           | On config snapshot.                      |
-| `deprovision`   | Host           | At most once, when removed with `cleanup=true`. |
-| `bootstrap`     | Host           | At most once per `start`, only if `needs_snapshot_on_fresh_start()` is `true`. |
+| `delete_owned_resources` | Host  | Explicit destructive removal, after stop and before dispose; failures require retry. |
+| `dispose`       | Host           | Final object retirement, including never-started and partially initialized objects. |
+| `bootstrap`     | Host           | Per query when fresh-start policy or recovery requires it; not generic initialization. |
 
 > 🔴 **MUST** — `stop()` MUST be safe to call without a prior `start()`,
 > and safe to call repeatedly. Always use `ReactionBase::stop_common()`
@@ -790,7 +861,8 @@ replaced with a new or wall-clock start.
 
 > 🔴 **MUST** — Use `tokio::select!` with `biased;` and the shutdown
 > receiver. Without it your reaction will not stop promptly when the
-> runtime calls `stop()`, and you will time out and be force-aborted.
+> runtime calls `stop()`. A timeout may request abort of cancellable work, but
+> does not prove that cleanup completed; retain and join the unfinished worker.
 
 > 🟡 **SHOULD** — Tune `priority_queue_capacity` only when you have
 > measured a problem. The default of 10,000 is correct for the vast
@@ -799,9 +871,8 @@ replaced with a new or wall-clock start.
 
 ### 4.4 The Runtime Context
 
-When the `drasi-lib` instance adds your reaction it calls `initialize(context)` with a
-`ReactionRuntimeContext` that contains everything you can possibly need
-from the runtime:
+Before optional initialization, the runtime calls `bind_runtime_context(context)`
+with a `ReactionRuntimeContext` providing framework services:
 
 | Field                | Type                                            | Always present?      |
 |----------------------|-------------------------------------------------|----------------------|
@@ -813,22 +884,27 @@ from the runtime:
 | `snapshot_fetcher`   | `Option<Arc<dyn SnapshotFetcher>>`              | If query is loaded   |
 | `log_binding`        | `Option<ComponentLogBinding>`                  | Host-local capture; not serialized over FFI |
 
-> 🔴 **MUST** — Implement `initialize` by delegating to
-> `ReactionBase::initialize()`. It wires the status handle to the graph
+> 🔴 **MUST** — Implement `bind_runtime_context` by delegating to
+> `self.base.bind_runtime_context(context).await`. It wires the status handle to the graph
 > update channel and stashes the state store and identity provider
 > internally for later use. Reading these values without delegating
-> first will return `None`.
+> first will return `None`. Mandatory wiring MUST NOT depend on overriding the
+> optional `initialize()` hook. Fallible developer setup belongs in that
+> separate `initialize() -> Result<()>`.
 
 > 🟡 **SHOULD** — Do not capture the context fields directly into your
 > processing task. Read them through `ReactionBase` (e.g.
 > `self.base.state_store().await`) so that programmatic overrides
-> (e.g. an identity provider set after construction) take effect.
+> set before context binding take precedence. Ordinary FFI proxies do not
+> support late identity-provider replacement.
 
 ---
 
 ## 5. The `Reaction` Trait
 
-The full trait, declared in `drasi_lib::Reaction`:
+The lifecycle and delivery surface of `drasi_lib::Reaction` is shown below.
+See the [trait definition](../../lib/src/reactions/traits.rs) for the complete
+API. Optional Rust update hooks do not imply an ordinary ABI update capability.
 
 ```rust
 #[async_trait]
@@ -839,13 +915,19 @@ pub trait Reaction: Send + Sync {
     fn query_ids(&self) -> Vec<String>;
     fn auto_start(&self) -> bool { true }
 
-    async fn initialize(&self, context: ReactionRuntimeContext);
-    async fn start(&self) -> Result<()>;
-    async fn stop(&self) -> Result<()>;
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext);
+    async fn initialize(&self) -> Result<()> { Ok(()) }
+    async fn start(&self) -> Result<()> { Ok(()) }
+    async fn stop(&self) -> Result<()> { Ok(()) }
+    async fn dispose(&self) -> Result<()> { Ok(()) }
+    async fn pause_processing(&self) -> Result<()> { Ok(()) }
+    async fn resume_processing(&self) -> Result<()> { Ok(()) }
     async fn status(&self) -> ComponentStatus;
 
     async fn enqueue_query_result(&self, _result: QueryResult) -> Result<()> { Ok(()) }
-    async fn deprovision(&self) -> Result<()> { Ok(()) }
+    async fn delete_owned_resources(&self) -> Result<()> {
+        anyhow::bail!("owned-resource deletion is unsupported")
+    }
     async fn set_identity_provider(&self, _provider: Arc<dyn IdentityProvider>) {}
 
     fn is_durable(&self) -> bool { false }
@@ -866,7 +948,8 @@ The methods fall into three groups:
 
 ### 5.1 Required methods
 
-Every reaction MUST implement these. The right-hand columns describe
+The table distinguishes required wiring/delivery methods from lifecycle hooks
+that need overrides when the reaction owns processing or resources. The right-hand columns describe
 what the runtime calls each method for and what `ReactionBase` provides
 when you delegate; doing so is SHOULD throughout.
 
@@ -876,9 +959,11 @@ when you delegate; doing so is SHOULD throughout.
 | `type_name` | `&str` | Type identification in inspection APIs and runtime logs. | None — return a stable lowercase kebab-case literal that matches your `ReactionPluginDescriptor::kind()`. |
 | `properties` | `HashMap<String, serde_json::Value>` | Persistence hook — snapshotted by the `drasi-lib` instance. | `self.base.properties_or_serialize(&dto)` returns the raw config JSON for descriptor-built reactions, otherwise serializes the DTO. |
 | `query_ids` | `Vec<String>` | The `drasi-lib` instance subscribes to these queries on the reaction's behalf after `start()` returns. | Returns `self.base.queries.clone()`. |
-| `initialize` | `()` | Single dependency-injection call: wires the status handle to the runtime's graph channel; stashes state-store and identity-provider references. | `self.base.initialize(context).await` does the full wiring. |
-| `start` | `Result<()>` | Begin processing. Returning `Err` puts the reaction into `Error`. | Provides `create_shutdown_channel`, `priority_queue`, `set_processing_task`, `set_status`. |
-| `stop` | `Result<()>` | Graceful teardown. Must be idempotent. | `self.base.stop_common().await` sends shutdown, joins forwarders and processing, then drains the queue and sets `Stopped`. Timeout requests abort and returns an error; the handle remains owned for a later join. |
+| `bind_runtime_context` | `()` | Required dependency injection before optional initialization. | `self.base.bind_runtime_context(context).await` wires status, state store, identity and other services. |
+| `initialize` | `Result<()>` | Optional instance-lifetime setup after binding, once per object; defaults to success. | No base initializer is required; mandatory wiring has already run. |
+| `start` | `Result<()>` | Acquire activation work; override when the reaction owns processing. | Provides `create_shutdown_channel`, `priority_queue`, `set_processing_task`, `set_status`. |
+| `stop` | `Result<()>` | Settle activation work, including a partial start; override when resources require it. | `stop_common` joins owned work; incomplete cleanup retains ownership for retry. |
+| `dispose` | `Result<()>` | Optional final instance cleanup, including failed initialization; defaults to success. | Do not call destructive state deletion from disposal. |
 | `status` | `ComponentStatus` | Anytime status read, including before `start`. | Returns `self.base.get_status().await`. |
 | `enqueue_query_result` | `Result<()>` | The runtime's push entry-point. The trait default is a **no-op that silently drops results** — you MUST override it. | `self.base.enqueue_query_result(result).await` pushes onto the priority queue with the appropriate backpressure strategy. |
 
@@ -886,8 +971,8 @@ Per-method details and the contracts that go beyond the table:
 
 #### `id` — **MUST**
 
-Return the unique identifier passed in at construction. SHOULD delegate
-to `&self.base.id`.
+Return the immutable component UUID passed in at construction, unchanged.
+SHOULD delegate to `&self.base.id`. Its editable graph name is separate.
 
 #### `type_name` — **MUST**
 
@@ -918,18 +1003,26 @@ secrets**.
 
 #### `query_ids` — **MUST**
 
-Return the list of query IDs this reaction is configured for. Used by the
+Return the resolved query UUIDs this reaction is configured for, not query names. Used by the
 runtime to set up subscriptions after `start()` returns. SHOULD return
 `self.base.queries.clone()`.
 
-#### `initialize(context)` — **MUST**
+#### `bind_runtime_context(context)` — **MUST**
 
-Called exactly once by the `drasi-lib` instance when adding the reaction. SHOULD
-delegate to `self.base.initialize(context).await`. Do not perform
-expensive work here; this method is synchronous from the runtime's
-perspective.
+Mandatory framework wiring and optional developer initialization are separate.
+Reactions using `ReactionBase` MUST delegate to
+`self.base.bind_runtime_context(context).await`, whether or not they override
+`initialize()`. Do not move fallible external setup into this unit-returning hook.
 
-#### `start()` — **MUST**
+#### `initialize()` / `dispose()` — optional instance-lifetime hooks
+
+Use `initialize() -> Result<()>` for fallible setup needing bound services
+that should survive start/stop cycles. Do not start normal processing or
+wait for live query bootstrap here. Use `dispose() -> Result<()>` to release
+those resources on final retirement, including after partial initialization.
+Both have successful no-op defaults; neither performs persistent-state deletion.
+
+#### `start()` — **MUST override when the reaction owns processing**
 
 Start your processing loop. **Must return promptly.** Long-running
 work belongs in a worker registered with
@@ -946,7 +1039,7 @@ If start-up genuinely fails (cannot connect, invalid config detected
 late), set status to `Error` and return an `Err`. The `drasi-lib` instance will surface
 this to the operator.
 
-#### `stop()` — **MUST**
+#### `stop()` — **MUST override when the reaction owns activation resources**
 
 Stop processing. SHOULD delegate to `self.base.stop_common().await`,
 which sends shutdown, aborts and joins forwarders, and waits up to 2 seconds for
@@ -1002,15 +1095,15 @@ The `drasi-lib` instance calls the reaction's methods in a defined order. Knowin
 order tells you what state each method can assume.
 
 ```
-construction          MyReaction::builder(id)...build()
-                      └── you hold the reaction, drasi-lib does not
+declaration           with_reaction_factory(name, input_references, auto_start, constructor)
+                      └── graph resolves query names and allocates the reaction UUID
+construction          constructor(reaction_uuid, query_uuids)
+                      └── returns the owned reaction with those immutable IDs
                           ─────────────────────────────────────
-add to drasi-lib      drasi.add_reaction(reaction)
-                      └── drasi-lib calls initialize(ctx)
-                          ├── ReactionBase wires the status handle
-                          │   to the component graph
-                          └── ReactionBase stashes state_store and
-                              identity_provider (if present)
+mandatory wiring      bind_runtime_context(ctx)
+                      └── ReactionBase wires status and injected services
+instance setup        initialize() -> Result<()>
+                      └── once for this actual object, before its first start
                           ─────────────────────────────────────
 optional auto-start   if reaction.auto_start() { drasi-lib calls start() }
                       └── reaction sets status Starting → Running
@@ -1025,7 +1118,7 @@ steady state          drasi-lib pushes results via enqueue_query_result(qr)
                       reaction's processing task drains its priority
                       queue and dispatches to the external system
                           ─────────────────────────────────────
-shutdown              drasi-lib calls stop()
+activation stop       drasi-lib calls stop()
                       └── ReactionBase::stop_common()
                           ├── sends the shutdown signal
                           ├── aborts and joins subscription forwarders
@@ -1033,36 +1126,46 @@ shutdown              drasi-lib calls stop()
                           ├── timeout: requests abort, returns error, retains handle
                           └── success: drains queue, sets status Stopped
                           ─────────────────────────────────────
-optional teardown     drasi-lib calls deprovision()
-                      (only if removed with cleanup=true)
+restart               start() on the same initialized object
+                      └── no repeated initialize or intervening dispose
+                          ─────────────────────────────────────
+optional deletion     delete_owned_resources() -> Result<()>
+                      └── only after stop, on explicit destructive removal
+final retirement      dispose() -> Result<()>
+                      └── await success before final object release
 ```
 
 Key invariants the lifecycle imposes:
 
-- `initialize` runs **before** `start`. You can read context-injected
-  state (state store, identity provider) starting in `start`, but not
-  in `new` or `builder().build()`.
+- Required context binding runs **before** optional `initialize()`, which runs
+  before the first start. Context-provided services are available in
+  `initialize()`, but not in `new` or the plugin builder.
 - `start` runs **before** the `drasi-lib` instance subscribes to any query. The first
   `enqueue_query_result` call you receive arrives *after* `start`
   returns `Ok(())`, never during it.
 - `stop` may run with or without a prior `start`. It MUST be safe in
   both cases. `ReactionBase::stop_common` is.
+- Initialization failure still requires disposal, not start or initialization
+  retry on the same object. Failed start can require stop even when it never
+  reached `Running`.
+- A successful stop preserves the object for restart; dispose retires it.
+  Stopping or disposing does not implicitly invoke destructive deletion.
+- Cleanup failure or interrupted waiting retains the owner and unfinished work
+  for retry. A timeout is not permission to remove it or run a conflicting start.
 - `bootstrap`, if you opt in via
   [`needs_snapshot_on_fresh_start`](#53-optional-capability-overrides),
   runs **between** `start` and the first `enqueue_query_result`.
 
-#### Who calls what — quick reference
+The [lifecycle table in §4.1](#41-the-component-lifecycle) summarizes the callers
+and repetition rules.
 
-| Call            | Caller         | Frequency                                |
-|-----------------|----------------|------------------------------------------|
-| `initialize`    | `drasi-lib` instance | Exactly once per reaction lifetime. |
-| `start`         | `drasi-lib` instance | Once after `initialize`, then again after every `stop`. |
-| `stop`          | `drasi-lib` instance | At shutdown or when reconfiguring. |
-| `enqueue_query_result` | `drasi-lib` instance | Many times while `Running`. |
-| `status`        | `drasi-lib` instance / API | Anytime, including before `start`. |
-| `properties`    | `drasi-lib` instance | On config snapshot. |
-| `deprovision`   | `drasi-lib` instance | At most once, when removed with `cleanup=true`. |
-| `bootstrap`     | `drasi-lib` instance | At most once per `start`, only if `needs_snapshot_on_fresh_start()` is `true`. |
+**Managed updates require explicit author support.** Ordinary ABI 0.18
+descriptors and proxies are creation-only for managed updates: they expose no
+factory `plan_update` or component `apply_update` bridge. A creation descriptor
+or no-op lifecycle hooks do not authorize a live update, state reset, or
+same-UUID replacement callback. In-process author-supplied planning must
+implement the actual Core contract rather than infer support from construction.
+See the [plugin architecture](../plugin-architecture.md).
 
 ### 5.3 Optional capability overrides
 
@@ -1073,7 +1176,8 @@ covers the capability in depth.
 | Method | Default | What overriding it does | See |
 |---|---|---|---|
 | `auto_start` | `true` | Returning `false` makes the `drasi-lib` instance *not* auto-start the reaction; the operator or application must start it explicitly. | This page. |
-| `deprovision` | no-op | Lets you clean up **external** state (output topics, webhook registrations, etc.) when the reaction is removed with `cleanup=true`. | [§12.1 Deprovisioning](#121-deprovisioning) |
+| `delete_owned_resources` | unsupported error | Explicitly delete owned persistent state or external artifacts on destructive removal; never implicit in stop/dispose. | [§12.1 Deleting owned resources](#121-deleting-owned-resources) |
+| `pause_processing` / `resume_processing` | successful no-op | Implement an actual temporary processing boundary when independent work must pause without ending the activation. | [§4.1 Lifecycle](#41-the-component-lifecycle) |
 | `is_durable` | `false` | Returning `true` tells the `drasi-lib` instance you need a durable `StateStoreProvider`; volatile in-memory state stores will be rejected. | [§12.2 Durable State & Checkpoints](#122-durable-state--checkpoints) |
 | `default_recovery_policy` | `Strict` | Choose `AutoSkipGap` to accept data loss on a checkpoint gap, or `AutoReset` to force a fresh bootstrap. | [§12.3 Recovery Policy](#123-recovery-policy) |
 | `needs_snapshot_on_fresh_start` | `false` | Returning `true` causes the `drasi-lib` instance to call `bootstrap()` on first start (and after `AutoReset`). | [§12.4 Bootstrap on Fresh Start](#124-bootstrap-on-fresh-start) |
@@ -1090,23 +1194,25 @@ configuration injected at runtime before processing can begin).
 Delegate to `self.base.get_auto_start()` if you want operators to
 control it through `MyReactionBuilder::with_auto_start(...)`.
 
-#### `deprovision` — **MAY**
+#### `delete_owned_resources` — **MAY**
 
-Default no-op. Override only if removing your reaction from the
-system requires cleaning up **external** state. The `drasi-lib` instance calls this
-when the reaction is removed with `cleanup=true`. Errors are logged
-but do not block removal.
+The default is an unsupported error, not a deletion guarantee. Override for
+explicitly requested deletion of owned state or external artifacts. The runtime
+calls it after successful stop and before disposal on destructive removal.
+Failure blocks completion and retains the owner for inspection/retry.
 
 If you implement it and use the state store, SHOULD call
-`self.base.deprovision_common().await` first to clear the reaction's
-state-store partition.
+`self.base.delete_owned_resources_common().await?` to clear the reaction's
+own state-store partition. It does not clean up external destinations for you.
+Propagate failures; make all destructive steps retry-safe.
 
 #### `set_identity_provider(provider)` — **MAY**
 
 Override if your reaction authenticates to an external system using
 named identity providers from declarative config. SHOULD delegate to
 `self.base.set_identity_provider(provider).await`. Providers set this
-way take precedence over any context-injected provider.
+way before context binding take precedence over any context-injected provider.
+The ordinary FFI path has no late identity-provider replacement hook.
 
 #### `is_durable` — **MAY**
 
@@ -1155,24 +1261,26 @@ mark the starting sequence.
 
 ### 5.4 Error handling
 
-Drasi's reaction error model is intentionally minimal: methods return
-`anyhow::Result<()>` and the `drasi-lib` instance classifies failures by **when** they
+Fallible lifecycle and delivery methods return `anyhow::Result<()>`; mandatory
+context binding returns `()`. The `drasi-lib` instance classifies failures by **when** they
 happen, not by what type they are.
 
 | Where the error happens             | Host behavior                                                                |
 |-------------------------------------|------------------------------------------------------------------------------|
 | `Reaction::new` / builder           | Caller's problem — surfaced directly to the operator.                        |
 | Descriptor `create_reaction`        | Surfaced via the management API. The reaction is not added.                  |
-| `start()` returns `Err`             | Reaction status set to `Error`. Operator must intervene.                     |
+| `initialize()` returns `Err`        | Do not start or initialize again; dispose the partially initialized object. |
+| `start()` returns `Err`             | Report failure and settle any acquired work with stop before restart/retirement. |
+| Stop/dispose/deletion fails or times out | Retain the actual owner and unfinished work for retry; do not claim cleanup completed. |
 | `enqueue_query_result` returns `Err`| Logged. Backpressure may apply. The `drasi-lib` instance does not retry.     |
-| Inside your processing task         | Your choice. The `drasi-lib` instance has no visibility once you have spawned the task. |
+| Inside your processing task         | Report failures through status/observations and retain the handle so join failures remain observable during cleanup. |
 | `bootstrap` returns `Err`           | Treated as a fatal start failure.                                            |
 
 #### Inside the processing task
 
-> 🔴 **MUST NOT** — Let a panic escape your processing task. Catch and
-> log any panic from `tokio::spawn`-wrapped code, or rely on
-> `JoinHandle::abort` semantics in your shutdown.
+> 🔴 **MUST** — Retain and join processing tasks, including panicked tasks.
+> Report their failures; do not catch a panic and silently turn incomplete
+> cleanup into success. An abort request or dropped waiter is not a completed join.
 
 > 🟡 **SHOULD** — Differentiate transient and permanent failures in
 > your code:
@@ -1209,12 +1317,12 @@ Methods you call from your `Reaction` implementation, alphabetical:
 | Method | Purpose |
 |---|---|
 | `create_shutdown_channel()` | Allocate the oneshot receiver passed into your processing loop. |
-| `deprovision_common()` | Clear the reaction's state-store partition (use from `Reaction::deprovision`). |
+| `bind_runtime_context(context)` | Mandatory status/service wiring; call from `Reaction::bind_runtime_context`, not optional initialization. |
+| `delete_owned_resources_common()` | Clear the reaction's own state-store partition only from explicitly requested `Reaction::delete_owned_resources`. |
 | `enqueue_query_result(result)` | Push an inbound result into the priority queue. |
 | `get_auto_start()` | Read the auto-start flag set via `ReactionBaseParams::with_auto_start`. |
 | `get_status()` | Read the current `ComponentStatus`. |
 | `identity_provider()` | Lazy accessor for the `IdentityProvider` injected via context or `set_identity_provider`. |
-| `initialize(context)` | Wire the status handle to the component graph and stash injected services. Call from `Reaction::initialize`. |
 | `new(params)` | Construct from `ReactionBaseParams`. |
 | `properties_or_serialize(&dto)` | Build the `properties()` map (raw config if descriptor-built, DTO serialization otherwise). |
 | `read_all_checkpoints()` | Bulk-read every checkpoint for this reaction (state store required). |
@@ -1242,6 +1350,10 @@ let params = ReactionBaseParams::new(id, queries)
     .with_auto_start(false)                                     // optional, default true
     .with_recovery_policy(ReactionRecoveryPolicy::AutoSkipGap); // optional
 ```
+
+`id` and `queries` here are the reaction UUID and resolved query UUIDs supplied
+to the creation callback. Names are resolved by the owning graph, not by
+`ReactionBase`.
 
 > 🟡 **SHOULD** — Always compose with `ReactionBase` rather than
 > re-implementing these patterns. Behavior diverges silently when
@@ -1310,7 +1422,7 @@ pieces:
 2. A **`ReactionPluginDescriptor`** that tells the loader how to build
    an instance from validated config JSON.
 3. The **`drasi_plugin_sdk::export_plugin!`** macro that emits the
-   stable C ABI entry points.
+   versioned C ABI entry points.
 
 ### Cargo.toml additions
 
@@ -1319,10 +1431,9 @@ pieces:
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
-# Pin the same versions of drasi-lib and drasi-plugin-sdk that the
-# dynamic plugin loader you intend to load this plugin into was built against.
-drasi-lib = "0.8"
-drasi-plugin-sdk = "0.8"
+# Use the Core checkout that matches the host and the APIs in this guide.
+drasi-lib = { path = "../drasi-core/lib" }
+drasi-plugin-sdk = { path = "../drasi-core/components/plugin-sdk" }
 utoipa = { version = "4", features = ["chrono"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
@@ -1332,9 +1443,9 @@ serde_json = "1"
 dynamic-plugin = []
 ```
 
-The `dynamic-plugin` feature is conventional but optional. It lets you
-gate the `export_plugin!` call so the same crate works both as an
-embedded library and as a `cdylib`.
+Gate `export_plugin!` behind `dynamic-plugin` so static builds do not define
+duplicate plugin entry-point symbols. The same crate can then be embedded or
+built as a `cdylib`.
 
 ### The configuration DTO
 
@@ -1482,8 +1593,8 @@ pub use myreaction::{MyReaction, MyReactionBuilder};
 #[cfg(feature = "dynamic-plugin")]
 drasi_plugin_sdk::export_plugin!(
     plugin_id = "myreaction",
-    core_version = env!("CARGO_PKG_VERSION"),
-    lib_version  = env!("CARGO_PKG_VERSION"),
+    core_version = "0.5.10",
+    lib_version  = "0.9.3",
     plugin_version = env!("CARGO_PKG_VERSION"),
     source_descriptors   = [],
     reaction_descriptors = [descriptor::MyReactionDescriptor],
@@ -1495,6 +1606,9 @@ This macro generates two C ABI symbols (`drasi_plugin_init` and
 `drasi_plugin_metadata`) that the dynamic plugin loader looks up at
 load time, along with a per-plugin tokio runtime and lifecycle hooks. A single crate
 MAY export multiple descriptor types in one call.
+
+Set `core_version` and `lib_version` to the actual dependency versions used to
+build the plugin; they are not the plugin's own package version or its ABI version.
 
 ### Build
 
@@ -1523,16 +1637,34 @@ plugin loader checks SDK version compatibility before loading.
 
 ### FFI compatibility — what you need to know
 
-The `Reaction` trait crosses FFI as a vtable
-(`drasi_plugin_sdk::ffi::ReactionVtable`). Every method is dispatched
-through a function pointer in this table. Two consequences:
+Ordinary reaction creation, lifecycle and delivery cross
+`drasi_plugin_sdk::ffi::ReactionVtable` and its factory table. The binary
+contract is **`FFI_SDK_VERSION = "0.18.0"`**, independent of crate package
+versions. Hosts accept 0.18.x tables on the same target and reject old
+0.16/0.17 component layouts before plugin initialization. Rebuild both sides
+from matching sources/toolchains; unchanged state-store layout is not component
+layout compatibility.
 
-- **Both sides MUST be built with the exact same `drasi-plugin-sdk`
-  version** (and a compatible Rust toolchain). Mismatched versions are
-  rejected at load time.
-- **Panics in your trait methods are caught at the boundary** and
-  reported as transient errors. This is a safety net, not a license to
-  panic — your reaction SHOULD never panic in normal operation.
+Mandatory binding is separate from zero-argument initialization. Binding and
+lifecycle callbacks return `FfiResult`; binding failures are preserved for the
+fallible initialization call. Initialization/disposal failures are returned,
+not reported as successful fire-and-forget cleanup.
+
+The host retains serialized blocking calls, their actual object/library and
+worker handles across cancelled waits and deadlines, without blocking a
+`current_thread` executor. A synchronous callback cannot be force-cancelled
+safely. Retry cleanup on the retained proxy; stop joins the activation's result
+forwarder before another activation is allowed. Dropping an undisposed proxy
+retains unfinished ownership with a diagnostic instead of freeing live state.
+
+Supported unwinding initialization panics prevent reuse of that object and
+still require disposal. Neither family can contain `panic=abort`, memory
+corruption or arbitrary non-yielding code.
+
+ABI 0.18 exports no ordinary factory planning or `apply_update` bridge. It is
+**creation-only for managed updates**: plugin presence, a creation descriptor,
+or no-op hooks do not authorize replacement or state loss. Native sink authoring
+uses the [separate native SDK](../computation-plugin-sdk/README.md).
 
 ---
 
@@ -2277,24 +2409,34 @@ my-reaction:
 
 ## 12. Optional Capabilities
 
-### 12.1 Deprovisioning
+### 12.1 Deleting owned resources
 
-Implemented by overriding `Reaction::deprovision`.
+Implemented by overriding `Reaction::delete_owned_resources`.
 
-Override `deprovision()` if removing your reaction from the system
-requires cleaning up external state. Typical examples: deleting an
+Override it when explicitly requested removal must delete owned persistent or
+external state. Typical examples: deleting an
 output topic that was created by the reaction; removing a webhook
 registration; deleting a downstream materialized view.
 
+The following implementation covers **only the reaction's state-store
+partition**, for a reaction with no owned external artifacts:
+
 ```rust
-async fn deprovision(&self) -> Result<()> {
-    self.base.deprovision_common().await?;  // clears state-store partition
-    // ... your external cleanup ...
-    Ok(())
+async fn delete_owned_resources(&self) -> Result<()> {
+    self.base.delete_owned_resources_common().await
 }
 ```
 
-Errors are logged but do not block removal.
+If the reaction owns an external artifact, its implementation must also await
+the real destination-specific deletion and propagate failures. The default
+trait implementation returns unsupported. Failure or timeout blocks completed
+removal and retains the actual cleanup owner for inspection/retry. Make partial
+deletion retry-safe; do not convert an uncertain outcome to success.
+
+Ordering is successful stop, explicitly requested deletion, disposal, then final
+release. Removal without deletion skips only this hook. Neither ordinary stop
+nor disposal may invoke it implicitly, and an update/reset request is not blanket
+permission to delete persistent resources.
 
 ### 12.2 Durable State & Checkpoints
 
@@ -2645,9 +2787,14 @@ the dispatch side.
 > 3. Template compilation (every template you support compiles).
 > 4. Template rendering (each operation type produces the expected
 >    output for a representative input).
-> 5. The full start → enqueue → process → stop cycle.
+> 5. Binding → initialize → repeated start/enqueue/stop → dispose, with
+>    observable processing/resource assertions.
+> 6. Failed initialization, partial start, cleanup failure/cancellation and retry,
+>    including real FFI calls on both Tokio runtime flavors for dynamic plugins.
 
-A minimal example covering items 1 and 5:
+A minimal builder/binding/activation smoke test follows. A connector test must
+separately assert observed processing completion; sleeping is not proof of
+downstream delivery.
 
 ```rust
 #[cfg(test)]
@@ -2656,55 +2803,58 @@ mod tests {
     use chrono::Utc;
     use tokio::sync::mpsc;
 
-    use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
-    use drasi_lib::component_graph::ComponentUpdate;
+    use drasi_lib::channels::{ComponentStatus, ComponentUpdate, QueryResult, ResultDiff};
     use drasi_lib::context::ReactionRuntimeContext;
+
+    const REACTION_ID: &str = "33333333-3333-4333-8333-333333333333";
+    const QUERY_ID: &str = "22222222-2222-4222-8222-222222222222";
+    const INSTANCE_ID: &str = "44444444-4444-4444-8444-444444444444";
 
     #[tokio::test]
     async fn builder_returns_valid_reaction() {
-        let r = MyReaction::builder("test")
-            .from_query("q1")
+        let r = MyReaction::builder(REACTION_ID)
+            .from_query(QUERY_ID)
             .with_endpoint("https://example.test/webhook")
             .build()
             .expect("should build");
-        assert_eq!(r.id(), "test");
-        assert_eq!(r.query_ids(), vec!["q1"]);
+        assert_eq!(r.id(), REACTION_ID);
+        assert_eq!(r.query_ids(), vec![QUERY_ID]);
         assert_eq!(r.status().await, ComponentStatus::Stopped);
+        r.dispose().await.unwrap();
     }
 
     #[tokio::test]
     async fn full_lifecycle() {
         // Build the reaction.
-        let r = MyReaction::builder("test")
-            .from_query("q1")
+        let r = MyReaction::builder(REACTION_ID)
+            .from_query(QUERY_ID)
             .with_endpoint("https://example.test/webhook")
             .build()
             .unwrap();
 
         // Wire up a runtime context. The mpsc channel carries
         // ComponentUpdate values; we don't observe them in this test.
-        let (update_tx, _rx) = mpsc::channel::<ComponentUpdate>(16);
-        let ctx = ReactionRuntimeContext::new("inst", "test", None, update_tx, None);
-        r.initialize(ctx).await;
+        let (update_tx, _rx) = mpsc::channel::<ComponentUpdate>(32);
+        let ctx = ReactionRuntimeContext::new(INSTANCE_ID, REACTION_ID, None, update_tx, None);
+        r.bind_runtime_context(ctx).await;
+        r.initialize().await.unwrap();
 
-        // Start, push an event, then stop.
-        r.start().await.unwrap();
-        assert_eq!(r.status().await, ComponentStatus::Running);
-
-        let qr = QueryResult::new(
-            "q1".to_string(),
-            1,
-            Utc::now(),
-            vec![ResultDiff::Add { data: serde_json::json!({"id":"x"}), row_signature: 0 }],
-            Default::default(),
-        );
-        r.enqueue_query_result(qr).await.unwrap();
-
-        // Give the processing task a moment to drain.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        r.stop().await.unwrap();
-        assert_eq!(r.status().await, ComponentStatus::Stopped);
+        for sequence in 1..=2 {
+            r.start().await.unwrap();
+            assert_eq!(r.status().await, ComponentStatus::Running);
+            let qr = QueryResult::new(
+                QUERY_ID.to_string(),
+                sequence,
+                Utc::now(),
+                vec![ResultDiff::Add { data: serde_json::json!({"id":"x"}), row_signature: 0 }],
+                Default::default(),
+            );
+            r.enqueue_query_result(qr).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            r.stop().await.unwrap();
+            assert_eq!(r.status().await, ComponentStatus::Stopped);
+        }
+        r.dispose().await.unwrap();
     }
 }
 ```
@@ -2712,7 +2862,7 @@ mod tests {
 ### Integration tests
 
 > 🟡 **SHOULD** — Add an integration test that exercises your reaction
-> end-to-end through `DrasiLib::builder().with_reaction(...).build()`
+> end-to-end through `DrasiLib::builder().with_reaction_factory(...).build()`
 > for at least one happy path. Use `cargo test` defaults. When a test
 > needs an external service, provision it with the Rust `testcontainers`
 > crate instead of manually starting Docker containers, shell scripts, or
@@ -2731,22 +2881,33 @@ Walk this list before publishing your reaction.
 
 #### Cargo
 
-- [ ] `Cargo.toml` depends on `drasi-lib` (and, if packaging as a
-      dynamic plugin, `drasi-plugin-sdk` and `utoipa`) from crates.io
-      with a single pinned version.
+- [ ] `Cargo.toml` selects matching runtime/SDK builds via path dependencies
+      or released APIs; dynamic plugins also declare `drasi-plugin-sdk` and `utoipa`.
 - [ ] `crate-type = ["lib", "cdylib"]` if you intend to ship as a
       dynamic plugin.
-- [ ] If shipping as a dynamic plugin, the dynamic plugin loader you
-      target was built against the **same** `drasi-plugin-sdk` version.
+- [ ] Dynamic host/plugin ordinary ABI is 0.18.x on the same target/toolchain;
+      old 0.16/0.17 component layouts are rejected.
 
 #### Reaction trait
 
 - [ ] `id`, `type_name`, `properties`, `query_ids` are implemented.
-- [ ] `initialize` delegates to `ReactionBase::initialize`.
+- [ ] Required `bind_runtime_context` delegates to `ReactionBase`, independent
+      of any optional `initialize` override.
+- [ ] `id` and `query_ids` preserve framework-supplied UUIDs, not graph names.
+- [ ] `initialize` runs once per actual object, not once per activation/query.
 - [ ] `start` returns promptly and registers its future with
       `context::workers::spawn_owned_worker`.
 - [ ] `stop` delegates to `ReactionBase::stop_common` or
       `stop_common_gracefully` when in-flight effects must finish.
+- [ ] Failed start still receives stop; failed initialization and never-started
+      initialized objects receive dispose.
+- [ ] Disposal is awaited final cleanup, not persistent-state deletion.
+- [ ] Failed/interrupted cleanup retains its owner/handles for retry and blocks
+      conflicting restart or final release.
+- [ ] Explicit `delete_owned_resources` propagates failures and is retry-safe;
+      the unsupported default is not claimed as completed deletion.
+- [ ] Pause/resume is implemented before relying on an actual processing pause;
+      no-op hooks are not update-capability evidence.
 - [ ] `status` delegates to `ReactionBase::get_status`.
 - [ ] `enqueue_query_result` accepts events for processing. Most
       reactions do this by delegating to
@@ -2826,6 +2987,8 @@ Walk this list before publishing your reaction.
 - [ ] `kind()` matches `Reaction::type_name()`.
 - [ ] Optional descriptor display methods are implemented if the plugin
       will appear in a UI or catalog.
+- [ ] Creation descriptors are not treated as managed-update authorization;
+      ordinary ABI 0.18 has no planner/application update bridge.
 
 #### Testing
 
@@ -2860,10 +3023,11 @@ the required semantics.
 
 ### "I'll do all the work in `start()`"
 
-`start()` is called by the `drasi-lib` instance as part of a sequenced
-startup. If you block, you stall the entire runtime startup including
-every other reaction and source. Always spawn a tokio task and return
-immediately.
+`initialize()` is for instance setup; `start()` acquires activation resources
+and reaches startup readiness. Long-running processing belongs in a registered,
+owned worker, not inside either hook. Return from start after readiness, not
+before required setup finishes. A cancelled wait does not stop that worker;
+stop/dispose must still join the appropriate work.
 
 ### "I'll filter secrets out of `properties()`"
 

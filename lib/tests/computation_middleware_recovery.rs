@@ -37,16 +37,15 @@ use drasi_core::{
         InMemoryComputationProvider, TransactionDomain,
     },
     interface::{
-        CheckpointStore, ElementIndex, ElementStream, IndexError, IndexSet, MiddlewareError,
-        MiddlewareSetupError, OutboxWriter, SessionControl, SourceCheckpoint, SourceMiddleware,
-        SourceMiddlewareFactory,
+        CheckpointStore, ElementIndex, ElementStream, IndexError, IndexJoin, IndexSet,
+        MiddlewareError, MiddlewareSetupError, OutboxWriter, SessionControl, SourceCheckpoint,
+        SourceMiddleware, SourceMiddlewareFactory,
     },
     middleware::MiddlewareTypeRegistry,
     models::{
-        Element, ElementMetadata, ElementPropertyMap, ElementReference, QueryJoin, SourceChange,
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
         SourceMiddlewareConfig,
     },
-    path_solver::match_path::MatchPath,
 };
 use drasi_index_rocksdb::{
     computation::RocksDbComputationProvider, RocksDbMemoryBudget, RocksIndexOptions,
@@ -1147,8 +1146,8 @@ impl ElementIndex for Elements {
     async fn clear(&self) -> Result<(), IndexError> {
         self.inner.clear().await
     }
-    async fn set_joins(&self, path: &MatchPath, joins: &Vec<Arc<QueryJoin>>) {
-        self.inner.set_joins(path, joins).await;
+    async fn set_joins(&self, joins: &[IndexJoin]) -> Result<(), IndexError> {
+        self.inner.set_joins(joins).await
     }
 }
 struct Checkpoints {
@@ -2348,7 +2347,7 @@ async fn declared_graph_confirms_wakeup_continuation_and_live_fanout_only_after_
                 ResourceHandle::new(ResourceRole::StateStore, store.clone()).with_cleanup(store),
             )
             .unwrap()
-            .query(Box::new(query))
+            .transformer(Box::new(query))
             .sink(Box::new(SignalSink {
                 descriptor: ComponentDescriptor::try_new(
                     id(&sink_id),

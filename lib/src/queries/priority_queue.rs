@@ -18,7 +18,9 @@
 //! The generic implementation is located in channels::priority_queue.
 
 use crate::channels::events::SourceEventWrapper;
+#[cfg(test)]
 use crate::channels::{SourceControl, SourceEvent, Timestamped};
+#[cfg(test)]
 use std::{collections::HashMap, sync::Arc};
 
 /// Priority queue specialized for SourceEvents
@@ -28,6 +30,7 @@ pub type PriorityQueue = crate::channels::priority_queue::PriorityQueue<SourceEv
 /// Re-export metrics type for compatibility
 pub use crate::channels::priority_queue::PriorityQueueMetrics;
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct RankedSourceEvent {
     event: Arc<SourceEventWrapper>,
@@ -35,6 +38,7 @@ struct RankedSourceEvent {
     sequence: u64,
 }
 
+#[cfg(test)]
 impl Timestamped for RankedSourceEvent {
     fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
         self.event.timestamp
@@ -46,6 +50,8 @@ impl Timestamped for RankedSourceEvent {
 }
 
 /// One bounded query inbox. Source ranks belong to this query, never to a shared source.
+/// Retained only as an independent ordering oracle for the graph's ranked pipes.
+#[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct QueryEventQueue {
     queue: crate::channels::priority_queue::PriorityQueue<RankedSourceEvent>,
@@ -53,6 +59,7 @@ pub(crate) struct QueryEventQueue {
     scheduled_rank: usize,
 }
 
+#[cfg(test)]
 impl QueryEventQueue {
     pub(crate) fn new<'a>(
         capacity: usize,
@@ -118,15 +125,6 @@ impl QueryEventQueue {
 
     pub(crate) async fn dequeue(&self) -> Arc<SourceEventWrapper> {
         self.queue.dequeue().await.event.clone()
-    }
-
-    pub(crate) async fn drain(&self) -> Vec<Arc<SourceEventWrapper>> {
-        self.queue
-            .drain()
-            .await
-            .into_iter()
-            .map(|event| event.event.clone())
-            .collect()
     }
 }
 

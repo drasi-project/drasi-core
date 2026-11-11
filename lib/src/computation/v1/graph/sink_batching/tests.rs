@@ -44,7 +44,7 @@ fn completed(fail: bool) -> (SinkBatchState, Arc<FlowProgress>, Arc<Probe>) {
     state.inputs.push_back(RetainedInput {
         edge: 0,
         queue_id: Arc::from("test-queue"),
-        producer_role: crate::computation::v1::ComponentRole::Source,
+        producer: crate::computation::v1::ProducerBoundary::Origin,
         input,
         acknowledgement: Some(Box::new(Ack {
             probe: probe.clone(),
@@ -111,7 +111,7 @@ fn incoming(edge: usize, seconds: Option<i64>) -> Incoming {
     Incoming {
         edge,
         queue_id: format!("test-queue-{edge}").into(),
-        producer_role: crate::computation::v1::ComponentRole::Source,
+        producer: crate::computation::v1::ProducerBoundary::Origin,
         port: PortId::try_new("in").unwrap(),
         receiver: Box::new(ClosedReceiver),
         acknowledgement_required: false,

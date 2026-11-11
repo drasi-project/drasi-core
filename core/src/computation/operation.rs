@@ -115,7 +115,9 @@ pub(crate) async fn in_operation<T>(
 
 /// Serialized, cancellation-safe index transactions without a query evaluator.
 ///
-/// Requires a complete atomic bundle. An interrupted operation or uncertain
+/// [`Self::try_new`] requires a complete atomic bundle;
+/// [`Self::for_processing`] also accepts the existing non-atomic modes without
+/// claiming rollback or atomic output. An interrupted operation or uncertain
 /// commit fences this owner. After dropping/awaiting the operation, call
 /// [`Self::shutdown`] to join provider I/O before opening a replacement.
 pub struct ComputationTransaction {
@@ -130,10 +132,12 @@ pub struct ComputationTransaction {
 impl ComputationTransaction {
     pub fn try_new(resources: ComputationIndexes) -> Result<Self> {
         resources.atomic_result_transaction()?;
-        Ok(Self::for_query(resources))
+        Ok(Self::for_processing(resources))
     }
 
-    pub(crate) fn for_query(resources: ComputationIndexes) -> Self {
+    /// Own the actual provider bundle without upgrading its durability or
+    /// transaction guarantees. Failed non-atomic operations fence the owner.
+    pub fn for_processing(resources: ComputationIndexes) -> Self {
         Self::for_query_with_observer(resources, None)
     }
 
@@ -216,6 +220,16 @@ impl ComputationTransaction {
                 .is_some_and(|group| group.recovery_required())
     }
 
+    /// Fence this owner when work has changed state outside the session's
+    /// rollback boundary. When called during an active shared session, cleanup
+    /// cancellation also fences the group.
+    pub fn fence(&self) {
+        self.recovery_required.store(true, Ordering::Release);
+        if let Some(cleanup) = self.resources.cleanup() {
+            cleanup.cancel();
+        }
+    }
+
     pub fn shares_transaction_group(&self, other: &Self) -> bool {
         match (
             &self.resources.group_session,
@@ -224,8 +238,13 @@ impl ComputationTransaction {
             (Some(left), Some(right)) => {
                 left.same_group(right) && !self.recovery_required() && !other.recovery_required()
             }
+
             _ => false,
         }
+    }
+
+    pub fn is_transaction_group_member(&self) -> bool {
+        self.resources.group_session.is_some()
     }
 
     /// Wake shared-service waiters when their member or group is fenced.

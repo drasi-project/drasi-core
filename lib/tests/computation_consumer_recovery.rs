@@ -16,7 +16,7 @@
 
 use async_trait::async_trait;
 use drasi_core::{
-    computation::{ComputationIndexProvider, InMemoryComputationProvider},
+    computation::InMemoryComputationProvider,
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
 };
 use drasi_lib::{
@@ -861,6 +861,18 @@ mod construction_scopes {
         )?;
         let before = provider.captured.lock().unwrap().len();
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id(instance)
             .with_index_provider("rocks", provider.clone())
             .with_wal_provider(Arc::new(drasi_wal_redb::RedbWalProvider::new(
@@ -1137,6 +1149,7 @@ async fn live_query_reset_wakes_recovery_and_replaces_with_an_empty_snapshot() {
 #[cfg(feature = "computation-rocksdb-tests")]
 #[tokio::test]
 async fn persistent_reopen_keeps_identity_and_rejects_unidentified_output_without_rewriting() {
+    use drasi_core::computation::ComputationIndexProvider;
     use drasi_index_rocksdb::{
         computation::RocksDbComputationProvider, RocksDbMemoryBudget, RocksIndexOptions,
     };

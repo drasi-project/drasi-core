@@ -58,12 +58,13 @@ pub(super) fn bind_positions(
         return Ok(());
     };
     let policy = contract.consumer_positions.clone();
-    let role = snapshot
-        .nodes
-        .iter()
-        .find(|node| node.descriptor.id() == progress.producer_id())
-        .ok_or_else(|| topology("input replay producer is not declared"))?
-        .role;
+    let boundary = super::super::ProducerBoundary::of(
+        snapshot
+            .nodes
+            .iter()
+            .find(|node| node.descriptor.id() == progress.producer_id())
+            .ok_or_else(|| topology("input replay producer is not declared"))?,
+    );
     let mut reached = BTreeSet::new();
     let mut visited = BTreeSet::from([progress.producer_id().clone()]);
     let mut pending = VecDeque::from([(progress.producer_id().clone(), Vec::new())]);
@@ -90,7 +91,7 @@ pub(super) fn bind_positions(
                     return Err(topology("input replay owner has multiple producer paths"));
                 }
                 owner
-                    .bind_input_boundary(progress.producer_id(), role, policy.clone(), next)
+                    .bind_input_boundary(progress.producer_id(), boundary, policy.clone(), next)
                     .map_err(|error| {
                         topology(format!("invalid input replay position binding: {error:#}"))
                     })?;
@@ -158,7 +159,7 @@ fn validate_paths(
         .ok_or_else(|| topology("consumer progress producer is not declared"))?;
     if !matches!(
         producer.role,
-        ComponentRole::Source | ComponentRole::Transformer | ComponentRole::Query
+        ComponentRole::Source | ComponentRole::Transformer
     ) {
         return Err(topology(
             "consumer progress requires a source or transformer producer",
@@ -219,7 +220,7 @@ fn validate_paths(
             }
             continue;
         }
-        if node.role != ComponentRole::Transformer {
+        if super::super::ProducerBoundary::of(node) != super::super::ProducerBoundary::Relay {
             return Err(topology(format!(
                 "consumer progress does not cover required branch {id}"
             )));

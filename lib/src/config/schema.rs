@@ -17,9 +17,14 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+use super::QueryInputConfig;
 use crate::channels::DispatchMode;
 use crate::indexes::{StorageBackendConfig, StorageBackendRef};
 use crate::recovery::RecoveryPolicy;
+pub use drasi_computation_contracts::{
+    ComponentId, ComponentName, ComponentReference, QueryJoinConfig, QueryJoinKeyConfig,
+    QueryResultConfig,
+};
 use drasi_core::models::SourceMiddlewareConfig;
 
 /// Query language for continuous queries
@@ -73,206 +78,6 @@ pub enum QueryLanguage {
     #[default]
     Cypher,
     GQL,
-}
-
-/// Input binding for a query
-///
-/// `QueryInputConfig` names an upstream component (a source, another query or a
-/// transformer) and, optionally, one of its output ports. It also carries the
-/// label interests and middleware pipeline that apply to that input.
-///
-/// # Fields
-///
-/// - **component**: ID of the upstream component to consume
-/// - **port**: Optional output port. When omitted, the component's declared
-///   primary output (or its only output) is used. A multi-port component without
-///   a primary output requires an explicit port.
-/// - **nodes**: Optional list of node labels to subscribe to from this input
-/// - **relations**: Optional list of relation labels to subscribe to from this input
-/// - **pipeline**: Optional list of middleware IDs to apply to changes from this input
-///
-/// # Serialized forms
-///
-/// A bare string is shorthand for an input with only a component. The expanded
-/// object accepts exactly `component`, `port`, `nodes`, `relations` and `pipeline`;
-/// any other field is rejected.
-///
-/// ## Shorthand
-///
-/// ```yaml
-/// inputs: [orders_db, room-comfort]
-/// ```
-///
-/// ## Expanded
-///
-/// ```yaml
-/// inputs:
-///   - component: orders_db
-///     port: out
-///     nodes: [Order, Customer]
-///     relations: [PLACED_BY]
-///     pipeline: [decoder, mapper]
-/// ```
-///
-/// ## Same-Timestamp Ordering
-///
-/// Among events already buffered with the same timestamp, all events from an
-/// earlier input in the query's `inputs` list are evaluated before those from
-/// a later input. Within each input, events are ordered by sequence. For
-/// inputs listed as A then B, buffered arrivals `A, B, A, B` become `A, A, B, B`.
-/// This is the query's merge policy, not arrival order, and can affect intermediate
-/// join results. The queue does not wait for other inputs or reorder events
-/// already processed, so this does not guarantee a global cross-input order
-/// independent of arrival timing.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct QueryInputConfig {
-    pub component: String,
-    pub port: Option<String>,
-    pub nodes: Vec<String>,
-    pub relations: Vec<String>,
-    pub pipeline: Vec<String>,
-}
-
-impl QueryInputConfig {
-    /// An input that consumes the named component's primary output.
-    pub fn new(component: impl Into<String>) -> Self {
-        Self {
-            component: component.into(),
-            ..Self::default()
-        }
-    }
-
-    pub fn with_port(mut self, port: impl Into<String>) -> Self {
-        self.port = Some(port.into());
-        self
-    }
-
-    pub fn with_pipeline(mut self, pipeline: Vec<String>) -> Self {
-        self.pipeline = pipeline;
-        self
-    }
-
-    /// Reject malformed component and port names before any component is created.
-    pub fn validate(&self) -> Result<()> {
-        drasi_computation_contracts::validate_identifier("query input component", &self.component)?;
-        if let Some(port) = &self.port {
-            drasi_computation_contracts::validate_identifier("query input port", port)?;
-        }
-        for (kind, labels) in [("node", &self.nodes), ("relation", &self.relations)] {
-            if labels.iter().any(|label| label.is_empty()) {
-                anyhow::bail!("query input '{}' has an empty {kind} label", self.component);
-            }
-        }
-        if self.pipeline.iter().any(|name| name.is_empty()) {
-            anyhow::bail!(
-                "query input '{}' has an empty pipeline name",
-                self.component
-            );
-        }
-        Ok(())
-    }
-
-    fn is_shorthand(&self) -> bool {
-        self.port.is_none()
-            && self.nodes.is_empty()
-            && self.relations.is_empty()
-            && self.pipeline.is_empty()
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExpandedQueryInput {
-    component: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    port: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    nodes: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    relations: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pipeline: Vec<String>,
-}
-
-impl Serialize for QueryInputConfig {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if self.is_shorthand() {
-            return serializer.serialize_str(&self.component);
-        }
-        ExpandedQueryInput {
-            component: self.component.clone(),
-            port: self.port.clone(),
-            nodes: self.nodes.clone(),
-            relations: self.relations.clone(),
-            pipeline: self.pipeline.clone(),
-        }
-        .serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for QueryInputConfig {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct InputVisitor;
-
-        impl<'de> serde::de::Visitor<'de> for InputVisitor {
-            type Value = QueryInputConfig;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a component name or an input object")
-            }
-
-            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
-                Ok(QueryInputConfig::new(value))
-            }
-
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                map: A,
-            ) -> Result<Self::Value, A::Error> {
-                let expanded = ExpandedQueryInput::deserialize(
-                    serde::de::value::MapAccessDeserializer::new(map),
-                )?;
-                Ok(QueryInputConfig {
-                    component: expanded.component,
-                    port: expanded.port,
-                    nodes: expanded.nodes,
-                    relations: expanded.relations,
-                    pipeline: expanded.pipeline,
-                })
-            }
-        }
-
-        deserializer.deserialize_any(InputVisitor)
-    }
-}
-
-/// Result publication options for a query.
-///
-/// The label names the graph node label of each published result row. It never
-/// changes the output port's schema, which is graph-change regardless.
-///
-/// ```yaml
-/// result:
-///   label: RoomComfort
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct QueryResultConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-}
-
-impl QueryResultConfig {
-    pub fn is_default(&self) -> bool {
-        self.label.is_none()
-    }
-
-    pub fn validate(&self) -> Result<()> {
-        if self.label.as_deref().is_some_and(str::is_empty) {
-            anyhow::bail!("query result label must not be empty");
-        }
-        Ok(())
-    }
 }
 
 /// Settings passed to a source when subscribing
@@ -416,6 +221,9 @@ pub struct DrasiLibConfig {
     /// Unique identifier for this DrasiLib instance (defaults to UUID)
     #[serde(default = "default_id")]
     pub id: String,
+    /// Permit caller-assigned UUIDs and preconstructed objects. Immutable after construction.
+    #[serde(default, rename = "allowExternalComponentIds")]
+    pub allow_external_component_ids: bool,
     /// Default priority queue capacity for queries and reactions (default: 10000 if not specified)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority_queue_capacity: Option<usize>,
@@ -452,6 +260,7 @@ impl Default for DrasiLibConfig {
     fn default() -> Self {
         Self {
             id: default_id(),
+            allow_external_component_ids: false,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             activation_timeout_secs: None,
@@ -471,6 +280,12 @@ impl Default for DrasiLibConfig {
 /// `QueryConfig` defines a continuous query that processes data changes from sources
 /// and emits incremental result updates. Queries subscribe to one or more sources and
 /// maintain materialized views that update automatically as data changes.
+///
+/// This is authoring input: `name` is required and `id` is optional. Only instances
+/// constructed with `allowExternalComponentIds` accept a supplied UUID. Accepted
+/// configurations use [`AssignedQueryConfig`]. Input strings select names, even
+/// when UUID-shaped; `{"id":"UUID"}` selects an identity. Resolution replaces a
+/// name with the selected UUID once, so rename cannot retarget a connection.
 ///
 /// # Query Languages
 ///
@@ -585,9 +400,12 @@ impl Default for DrasiLibConfig {
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct QueryConfig {
-    /// Unique identifier for the query
-    pub id: String,
+pub struct QueryConfig<I = Option<ComponentId>> {
+    /// Omit for DrasiLib-owned creation. Explicit UUIDs require instance opt-in.
+    #[serde(default)]
+    pub id: I,
+    /// Unique graph-owned name, independent of the immutable UUID.
+    pub name: String,
     /// Query string (Cypher or GQL depending on query_language)
     pub query: String,
     /// Query language to use (default: Cypher)
@@ -648,105 +466,78 @@ pub struct QueryConfig {
     pub bootstrap_timeout_secs: u64,
 }
 
-impl QueryConfig {
+/// Fully assigned query definition used for execution and configuration snapshots.
+/// Only DrasiLib's creation path turns an authoring request into this definition.
+pub type AssignedQueryConfig = QueryConfig<String>;
+
+impl<I> QueryConfig<I> {
+    /// Build fully assigned configuration data for an explicit native pipeline.
+    /// This does not grant admission authority: DrasiLib still enforces its
+    /// creation policy independently of fields in a configuration object.
+    pub fn with_assigned_id(self, id: ComponentId) -> AssignedQueryConfig {
+        self.map_id(id.to_string())
+    }
+
+    pub(crate) fn map_id<J>(self, id: J) -> QueryConfig<J> {
+        QueryConfig {
+            id,
+            name: self.name,
+            query: self.query,
+            query_language: self.query_language,
+            middleware: self.middleware,
+            inputs: self.inputs,
+            result: self.result,
+            auto_start: self.auto_start,
+            joins: self.joins,
+            enable_bootstrap: self.enable_bootstrap,
+            priority_queue_capacity: self.priority_queue_capacity,
+            dispatch_buffer_capacity: self.dispatch_buffer_capacity,
+            dispatch_mode: self.dispatch_mode,
+            storage_backend: self.storage_backend,
+            recovery_policy: self.recovery_policy,
+            outbox_capacity: self.outbox_capacity,
+            bootstrap_timeout_secs: self.bootstrap_timeout_secs,
+        }
+    }
+
     /// Reject malformed input and result declarations before any component is created.
     pub fn validate_declarations(&self) -> Result<()> {
         let mut components = HashSet::new();
         for input in &self.inputs {
             input
                 .validate()
-                .map_err(|error| anyhow::anyhow!("Query '{}': {error}", self.id))?;
-            if input.component == self.id {
+                .map_err(|error| anyhow::anyhow!("Query '{}': {error}", self.name))?;
+            if input
+                .component
+                .as_name()
+                .is_some_and(|name| name.as_str() == self.name)
+            {
                 anyhow::bail!(
                     "Query '{}' cannot consume its own output as input '{}'",
-                    self.id,
+                    self.name,
                     input.component
                 );
             }
-            if !components.insert(input.component.as_str()) {
+            if !components.insert(serde_json::to_string(&input.component)?) {
                 anyhow::bail!(
                     "Query '{}' declares input '{}' more than once",
-                    self.id,
+                    self.name,
                     input.component
                 );
             }
         }
         self.result
             .validate()
-            .map_err(|error| anyhow::anyhow!("Query '{}': {error}", self.id))
+            .map_err(|error| anyhow::anyhow!("Query '{}': {error}", self.name))
     }
 }
 
-/// Synthetic join configuration for queries
-///
-/// `QueryJoinConfig` defines a virtual relationship between node types from different
-/// sources. This allows queries to join data without requiring physical relationships
-/// in the source systems.
-///
-/// # Join Semantics
-///
-/// Joins create synthetic edges by matching property values across nodes. The `id`
-/// field specifies the relationship type used in the query's MATCH pattern, and `keys`
-/// define which properties to match.
-///
-/// # Examples
-///
-/// ## Simple Join on Single Property
-///
-/// ```yaml
-/// joins:
-///   - id: CUSTOMER              # Use in query: MATCH (o:Order)-[:CUSTOMER]->(c:Customer)
-///     keys:
-///       - label: Order
-///         property: customer_id  # Order.customer_id
-///       - label: Customer
-///         property: id           # Customer.id
-///       # Creates edge when Order.customer_id == Customer.id
-/// ```
-///
-/// ## Multi-Source Join
-///
-/// ```yaml
-/// joins:
-///   - id: ASSIGNED_TO
-///     keys:
-///       - label: Task
-///         property: assignee_id
-///       - label: User
-///         property: user_id
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueryJoinConfig {
-    /// Unique identifier for the join (should match relationship type in query)
-    pub id: String,
-    /// Keys defining the join relationship
-    pub keys: Vec<QueryJoinKeyConfig>,
-}
-
-/// Join key specification for synthetic joins
-///
-/// `QueryJoinKeyConfig` specifies one side of a join condition by identifying
-/// a node label and the property to use for matching.
-///
-/// # Example
-///
-/// For joining orders to customers:
-///
-/// ```yaml
-/// keys:
-///   - label: Order
-///     property: customer_id
-///   - label: Customer
-///     property: id
-/// ```
-///
-/// This creates an edge when `Order.customer_id == Customer.id`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueryJoinKeyConfig {
-    /// Node label to match
-    pub label: String,
-    /// Property to use for joining
-    pub property: String,
+impl AssignedQueryConfig {
+    /// Retain the current UUID when preparing an explicit update request.
+    pub fn into_authoring(self) -> Result<QueryConfig> {
+        let id = ComponentId::try_new(self.id.as_str())?;
+        Ok(self.map_id(Some(id)))
+    }
 }
 
 impl DrasiLibConfig {
@@ -786,9 +577,16 @@ impl DrasiLibConfig {
         }
         // Validate unique query ids
         let mut query_ids = std::collections::HashSet::new();
+        let mut query_names = std::collections::HashSet::new();
         for query in &self.queries {
-            if !query_ids.insert(&query.id) {
-                return Err(anyhow::anyhow!("Duplicate query id: '{}'", query.id));
+            ComponentName::try_new(query.name.as_str())?;
+            if let Some(id) = &query.id {
+                if !query_ids.insert(id) {
+                    return Err(anyhow::anyhow!("Duplicate query id: '{id}'"));
+                }
+            }
+            if !query_names.insert(&query.name) {
+                return Err(anyhow::anyhow!("Duplicate query name: '{}'", query.name));
             }
         }
 
@@ -831,7 +629,7 @@ impl DrasiLibConfig {
                         spec.validate().map_err(|e| {
                             anyhow::anyhow!(
                                 "Query '{}' has invalid inline storage backend configuration: {}",
-                                query.id,
+                                query.name,
                                 e
                             )
                         })?;
@@ -862,25 +660,6 @@ fn default_outbox_capacity() -> usize {
 
 fn default_bootstrap_timeout_secs() -> u64 {
     300
-}
-
-// Conversion implementations for QueryJoin types
-impl From<QueryJoinKeyConfig> for drasi_core::models::QueryJoinKey {
-    fn from(config: QueryJoinKeyConfig) -> Self {
-        drasi_core::models::QueryJoinKey {
-            label: config.label,
-            property: config.property,
-        }
-    }
-}
-
-impl From<QueryJoinConfig> for drasi_core::models::QueryJoin {
-    fn from(config: QueryJoinConfig) -> Self {
-        drasi_core::models::QueryJoin {
-            id: config.id,
-            keys: config.keys.into_iter().map(|k| k.into()).collect(),
-        }
-    }
 }
 
 #[cfg(test)]

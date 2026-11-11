@@ -206,8 +206,13 @@ impl GraphTelemetry {
         generation: u64,
         logging: Option<super::ComponentLogRuntime>,
     ) -> Result<(Arc<super::ComponentObservations>, PluginTelemetry)> {
+        use drasi_computation_contracts::ComponentId;
+        // A separate stable namespace identifies resource telemetry, not graph nodes.
+        let namespace = ComponentId::from_uuid(uuid::Uuid::from_u128(
+            0x4995fdd4_34d3_4adb_b9c9_14484e4d6e20,
+        ));
         let scope = TelemetryScope::graph(instance, graph)?.component(
-            drasi_computation_contracts::ComponentId::try_new(format!("resource/{resource}"))
+            ComponentId::derive_owned(&namespace, resource)
                 .map_err(|error| TelemetryError::Invalid(error.to_string()))?,
             drasi_computation_contracts::ComponentRole::Service,
             drasi_computation_contracts::ComponentSemanticKind::Service,

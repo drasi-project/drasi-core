@@ -439,4 +439,16 @@ transactional-registry and configuration-resolver recipes. Applications supply
 additional `ManagementResourceResolver` implementations for their providers.
 No opaque provider object is inferred from its type or serialized as a pointer.
 Existing descriptor-backed plugin factories and adapters remain available through
-Host SDK / Plugin SDK; legacy plugin loading and ABI 0.15 are unchanged.
+Host SDK / Plugin SDK; ordinary loading remains independent (ABI 0.18;
+older layouts are rejected).
+
+Native source/reaction recipe declarations use `add_source_from_factory` and
+`add_reaction_from_factory`; the existing legacy object APIs remain available.
+`GraphConfigurationSnapshot::reconstructible_topology()` exports explicit
+component/resource/pipe recipes and preserves secret references, rejecting opaque
+external objects rather than inventing configuration. Host's
+`with_versioned_index_provider` binds actual implementation/configuration versions
+for pinned index recipes; an unversioned registration cannot satisfy them.
+Host and Server share the [source-time merger storage recipe](computation-graph-time-merge.md),
+including its real provider dependency, owner scope and retained acquisition/
+cleanup leases. Configuration reconstruction never rewinds that processing state.

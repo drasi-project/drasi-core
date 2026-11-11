@@ -31,9 +31,11 @@ mod addition;
 mod configuration;
 mod controller;
 mod execution;
+mod identity;
 pub(crate) use addition::RejectedResources;
 pub use addition::{ComponentAddition, ComponentHandle, RejectedAddition};
 pub use configuration::{CapturedComponentConfiguration, GraphConfigurationSnapshot};
+pub use identity::ComponentConflict;
 mod consumer_progress;
 mod input_progress;
 mod recovery;
@@ -53,12 +55,12 @@ pub use topology::*;
 use super::{
     data::{validate_identifier, validate_schema},
     validate_connection, validate_sink_completion, ComponentDescriptor, ComponentGeneration,
-    ComponentId, ContractError, Delivery, EnvelopeId, EnvelopeMessage, EnvelopeReceiver,
+    ComponentId, ComponentName, ContractError, Delivery, EnvelopeMessage, EnvelopeReceiver,
     EnvelopeSender, EnvelopeSink, EnvelopeSource, ExecutionContext, GraphRevision, InputEnvelope,
-    InputMergePolicy, LifecyclePolicy, ObservedGraph, OutputEnvelope, PipeCapabilities,
-    PipeCapability, PipeControl, PipeError, PipeProvider, PipeRequirements, PortDescriptor,
-    PortDirection, PortId, RelationshipPolicy, ResourceId, SendFailure, SinkCompletion, StreamId,
-    Transformer,
+    InputMergePolicy, LifecyclePolicy, ObservedGraph, OutputEnvelope, OutputProgress,
+    PipeCapabilities, PipeCapability, PipeControl, PipeError, PipeProvider, PipeRequirements,
+    PortDescriptor, PortDirection, PortId, RelationshipPolicy, ResourceId, SendFailure,
+    SinkCompletion, StreamId, Transformer,
 };
 
 pub type GraphResult<T> = std::result::Result<T, GraphError>;
@@ -87,6 +89,14 @@ pub enum GraphError {
         cause: Box<GraphError>,
         addition: Arc<addition::RejectedAddition>,
     },
+    #[error("component UUID already belongs to {existing}")]
+    DuplicateComponentId { existing: Box<ComponentConflict> },
+    #[error("component name already belongs to {existing}")]
+    DuplicateComponentName { existing: Box<ComponentConflict> },
+    #[error("externally assigned component UUID {component} is not permitted; create the component through DrasiLib or enable allowExternalComponentIds when constructing the instance")]
+    ExternalComponentId { component: ComponentId },
+    #[error("resolving graph-owned component references failed: {source}")]
+    ReferenceResolution { source: anyhow::Error },
     #[error("invalid graph topology: {reason}")]
     Topology { reason: String },
     #[error("cannot start graph in state {state:?}")]
@@ -200,7 +210,7 @@ fn validate_role(
     let outputs = descriptor.ports().len() - inputs;
     let valid = match role {
         ComponentRole::Source => inputs == 0 && outputs > 0,
-        ComponentRole::Transformer | ComponentRole::Query => inputs > 0 && outputs > 0,
+        ComponentRole::Transformer => inputs > 0 && outputs > 0,
         ComponentRole::Sink => inputs > 0 && outputs == 0,
         ComponentRole::Service => inputs == 0 && outputs == 0,
     };
@@ -209,6 +219,14 @@ fn validate_role(
             "invalid role/ports/completion for {}",
             descriptor.id()
         )));
+    }
+    if let Some(progress) = descriptor.output_progress() {
+        if outputs == 0 || (role == ComponentRole::Source && progress == OutputProgress::Relay) {
+            return Err(topology(format!(
+                "invalid output progress for {}",
+                descriptor.id()
+            )));
+        }
     }
     Ok(())
 }
@@ -367,6 +385,8 @@ impl EdgeDefinition {
 /// Descriptive data only: no providers, resolved secrets, or live endpoints.
 #[derive(Debug, Clone)]
 pub struct NodeSnapshot {
+    /// Mutable graph metadata, independent of the plugin's execution descriptor.
+    pub name: ComponentName,
     pub descriptor: ComponentDescriptor,
     pub role: ComponentRole,
     pub completion: Option<SinkCompletion>,
@@ -443,7 +463,6 @@ impl GraphSnapshot {
 enum Component {
     Source(Box<dyn EnvelopeSource>),
     Transformer(Box<dyn Transformer>),
-    Query(Box<dyn Transformer>),
     Sink(Box<dyn EnvelopeSink>),
     Service(Box<dyn super::ComputationService>),
     Deferred {
@@ -454,6 +473,56 @@ enum Component {
 }
 
 impl Component {
+    fn is_constructed(&self) -> bool {
+        !matches!(self, Self::Deferred { .. } | Self::Unresolved(_))
+    }
+
+    async fn initialize(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::Source(component) => component.initialize().await,
+            Self::Transformer(component) => component.initialize().await,
+            Self::Sink(component) => component.initialize().await,
+            Self::Service(component) => component.initialize().await,
+            Self::Deferred { .. } | Self::Unresolved(_) => {
+                anyhow::bail!("component has not been constructed")
+            }
+        }
+    }
+
+    async fn dispose(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::Source(component) => component.dispose().await,
+            Self::Transformer(component) => component.dispose().await,
+            Self::Sink(component) => component.dispose().await,
+            Self::Service(component) => component.dispose().await,
+            Self::Deferred { .. } | Self::Unresolved(_) => Ok(()),
+        }
+    }
+
+    async fn pause_processing(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::Source(component) => component.pause_processing().await,
+            Self::Transformer(component) => component.pause_processing().await,
+            Self::Sink(component) => component.pause_processing().await,
+            Self::Service(component) => component.pause_processing().await,
+            Self::Deferred { .. } | Self::Unresolved(_) => {
+                anyhow::bail!("component has not been constructed")
+            }
+        }
+    }
+
+    async fn resume_processing(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::Source(component) => component.resume_processing().await,
+            Self::Transformer(component) => component.resume_processing().await,
+            Self::Sink(component) => component.resume_processing().await,
+            Self::Service(component) => component.resume_processing().await,
+            Self::Deferred { .. } | Self::Unresolved(_) => {
+                anyhow::bail!("component has not been constructed")
+            }
+        }
+    }
+
     fn recovery_contract(&self) -> super::ComponentRecovery {
         match self {
             Self::Source(component) => {
@@ -469,7 +538,7 @@ impl Component {
                 contract.replay_progress = component.recovery_progress();
                 contract
             }
-            Self::Transformer(component) | Self::Query(component) => {
+            Self::Transformer(component) => {
                 let mut contract = component.recovery_contract();
                 if matches!(
                     contract.processing,
@@ -489,7 +558,7 @@ impl Component {
     fn query_api(&self) -> Option<Arc<super::QueryApi>> {
         match self {
             Self::Source(component) => component.query_api(),
-            Self::Transformer(component) | Self::Query(component) => component.query_api(),
+            Self::Transformer(component) => component.query_api(),
             Self::Sink(component) => component.query_api(),
             Self::Service(component) => component.query_api(),
             Self::Deferred { .. } | Self::Unresolved(_) => None,
@@ -499,9 +568,7 @@ impl Component {
     fn source_schema_reader(&self) -> Option<Arc<dyn super::SourceSchemaReader>> {
         match self {
             Self::Source(component) => component.source_schema_reader(),
-            Self::Transformer(component) | Self::Query(component) => {
-                component.source_schema_reader()
-            }
+            Self::Transformer(component) => component.source_schema_reader(),
             Self::Sink(component) => component.source_schema_reader(),
             Self::Service(component) => component.source_schema_reader(),
             Self::Deferred { .. } | Self::Unresolved(_) => None,
@@ -511,7 +578,7 @@ impl Component {
     fn output_readers(&self) -> super::OutputReaders {
         match self {
             Self::Source(component) => component.output_readers(),
-            Self::Transformer(component) | Self::Query(component) => component.output_readers(),
+            Self::Transformer(component) => component.output_readers(),
             Self::Sink(component) => component.output_readers(),
             Self::Service(component) => component.output_readers(),
             Self::Deferred { .. } | Self::Unresolved(_) => super::OutputReaders::default(),
@@ -522,7 +589,6 @@ impl Component {
         match self {
             Self::Source(component) => component.descriptor(),
             Self::Transformer(component) => component.descriptor(),
-            Self::Query(component) => component.descriptor(),
             Self::Sink(component) => component.descriptor(),
             Self::Service(component) => component.descriptor(),
             Self::Deferred { specification, .. } => &specification.descriptor,
@@ -534,7 +600,6 @@ impl Component {
         match self {
             Self::Source(_) => ComponentRole::Source,
             Self::Transformer(_) => ComponentRole::Transformer,
-            Self::Query(_) => ComponentRole::Query,
             Self::Sink(_) => ComponentRole::Sink,
             Self::Service(_) => ComponentRole::Service,
             Self::Deferred { specification, .. } => specification.role,
@@ -555,7 +620,6 @@ impl Component {
         match self {
             Self::Source(component) => component.start().await,
             Self::Transformer(component) => component.start().await,
-            Self::Query(component) => component.start().await,
             Self::Sink(component) => component.start().await,
             Self::Service(component) => component.start().await,
             Self::Deferred { .. } | Self::Unresolved(_) => {
@@ -567,7 +631,7 @@ impl Component {
     fn binds_inputs(&self) -> bool {
         match self {
             Self::Source(_) | Self::Deferred { .. } | Self::Unresolved(_) => false,
-            Self::Transformer(component) | Self::Query(component) => component.binds_inputs(),
+            Self::Transformer(component) => component.binds_inputs(),
             Self::Sink(component) => component.binds_inputs(),
             Self::Service(component) => component.binds_inputs(),
         }
@@ -576,9 +640,7 @@ impl Component {
     async fn bind_inputs(&mut self, bindings: &[super::InputBinding]) -> anyhow::Result<()> {
         match self {
             Self::Source(_) | Self::Deferred { .. } | Self::Unresolved(_) => Ok(()),
-            Self::Transformer(component) | Self::Query(component) => {
-                component.bind_inputs(bindings).await
-            }
+            Self::Transformer(component) => component.bind_inputs(bindings).await,
             Self::Sink(component) => component.bind_inputs(bindings).await,
             Self::Service(component) => component.bind_inputs(bindings).await,
         }
@@ -588,7 +650,6 @@ impl Component {
         match self {
             Self::Source(component) => component.stop().await,
             Self::Transformer(component) => component.stop().await,
-            Self::Query(component) => component.stop().await,
             Self::Sink(component) => component.stop().await,
             Self::Service(component) => component.stop().await,
             Self::Deferred { .. } | Self::Unresolved(_) => {
@@ -597,26 +658,24 @@ impl Component {
         }
     }
 
-    async fn deprovision(&mut self) -> anyhow::Result<()> {
+    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
         match self {
-            Self::Source(component) => component.deprovision().await,
-            Self::Transformer(component) | Self::Query(component) => component.deprovision().await,
-            Self::Sink(component) => component.deprovision().await,
-            Self::Service(component) => component.deprovision().await,
+            Self::Source(component) => component.delete_owned_resources().await,
+            Self::Transformer(component) => component.delete_owned_resources().await,
+            Self::Sink(component) => component.delete_owned_resources().await,
+            Self::Service(component) => component.delete_owned_resources().await,
             Self::Deferred { .. } | Self::Unresolved(_) => {
                 anyhow::bail!("component has not been constructed")
             }
         }
     }
 
-    async fn reconfigure(&mut self, context: ConstructionContext) -> anyhow::Result<()> {
+    async fn apply_update(&mut self, context: ComponentUpdateContext) -> anyhow::Result<()> {
         match self {
-            Self::Source(component) => component.reconfigure(context).await,
-            Self::Transformer(component) | Self::Query(component) => {
-                component.reconfigure(context).await
-            }
-            Self::Sink(component) => component.reconfigure(context).await,
-            Self::Service(component) => component.reconfigure(context).await,
+            Self::Source(component) => component.apply_update(context).await,
+            Self::Transformer(component) => component.apply_update(context).await,
+            Self::Sink(component) => component.apply_update(context).await,
+            Self::Service(component) => component.apply_update(context).await,
             Self::Deferred { .. } | Self::Unresolved(_) => {
                 Err(anyhow::anyhow!("component has not been constructed"))
             }
@@ -626,9 +685,7 @@ impl Component {
     fn bind_control(&mut self, control: super::ComponentControl) {
         match self {
             Self::Source(component) => component.bind_control(control),
-            Self::Transformer(component) | Self::Query(component) => {
-                component.bind_control(control)
-            }
+            Self::Transformer(component) => component.bind_control(control),
             Self::Sink(component) => component.bind_control(control),
             Self::Service(component) => component.bind_control(control),
             Self::Deferred { .. } | Self::Unresolved(_) => {}
@@ -641,7 +698,7 @@ impl Component {
         inspector: &super::ComputationInspector,
         generation: super::ComponentGeneration,
     ) {
-        if let Self::Transformer(component) | Self::Query(component) = self {
+        if let Self::Transformer(component) = self {
             component.bind_query_test_support(inspector, generation);
         }
     }
@@ -649,7 +706,7 @@ impl Component {
     fn control_handler(&self) -> Option<Arc<dyn super::ControlHandler>> {
         match self {
             Self::Source(component) => component.control_handler(),
-            Self::Transformer(component) | Self::Query(component) => component.control_handler(),
+            Self::Transformer(component) => component.control_handler(),
             Self::Sink(component) => component.control_handler(),
             Self::Service(component) => component.control_handler(),
             Self::Deferred { .. } | Self::Unresolved(_) => None,
@@ -659,9 +716,7 @@ impl Component {
     fn requires_readiness_confirmation(&self) -> bool {
         match self {
             Self::Source(component) => component.requires_readiness_confirmation(),
-            Self::Transformer(component) | Self::Query(component) => {
-                component.requires_readiness_confirmation()
-            }
+            Self::Transformer(component) => component.requires_readiness_confirmation(),
             Self::Sink(component) => component.requires_readiness_confirmation(),
             Self::Service(component) => component.requires_readiness_confirmation(),
             Self::Deferred { .. } | Self::Unresolved(_) => false,
@@ -671,7 +726,7 @@ impl Component {
 
 /// Entire topology is validated by `build` before any provider creation or start.
 ///
-/// Policy: DAG; unique component IDs within this graph, port IDs within each
+/// Policy: DAG; unique component IDs and names within this graph, port IDs within each
 /// component, edges and output stream IDs within the graph. Unconnected ports
 /// and required reconstructible connections to undeclared components wait for
 /// their bindings. Outputs require a stream before connection. Sources have
@@ -684,7 +739,7 @@ pub struct ComputationGraphBuilder {
     telemetry: crate::observability::TelemetryOptions,
     resolved_telemetry: Option<crate::observability::GraphTelemetry>,
     logging: Option<crate::observability::ComponentLogRuntime>,
-    components: Vec<Component>,
+    components: Vec<(ComponentName, Component)>,
     edges: Vec<(EdgeDefinition, Box<dyn PipeProvider>)>,
     streams: Vec<(Endpoint, StreamId)>,
     requirements: PipeRequirements,
@@ -756,13 +811,17 @@ impl ComputationGraphBuilder {
 
     pub fn component(
         mut self,
+        name: ComponentName,
         specification: ComponentSpecification,
         factory: Arc<dyn ComponentFactory>,
     ) -> Self {
-        self.components.push(Component::Deferred {
-            specification: Arc::new(specification),
-            factory,
-        });
+        self.components.push((
+            name,
+            Component::Deferred {
+                specification: Arc::new(specification),
+                factory,
+            },
+        ));
         self
     }
 
@@ -838,28 +897,28 @@ impl ComputationGraphBuilder {
         Ok(self)
     }
 
-    pub fn source(mut self, source: Box<dyn EnvelopeSource>) -> Self {
-        self.components.push(Component::Source(source));
+    pub fn source(mut self, name: ComponentName, source: Box<dyn EnvelopeSource>) -> Self {
+        self.components.push((name, Component::Source(source)));
         self
     }
 
-    pub fn transformer(mut self, transformer: Box<dyn Transformer>) -> Self {
-        self.components.push(Component::Transformer(transformer));
+    pub fn transformer(mut self, name: ComponentName, transformer: Box<dyn Transformer>) -> Self {
+        self.components
+            .push((name, Component::Transformer(transformer)));
         self
     }
 
-    pub fn query(mut self, query: Box<dyn Transformer>) -> Self {
-        self.components.push(Component::Query(query));
+    pub fn sink(mut self, name: ComponentName, sink: Box<dyn EnvelopeSink>) -> Self {
+        self.components.push((name, Component::Sink(sink)));
         self
     }
 
-    pub fn sink(mut self, sink: Box<dyn EnvelopeSink>) -> Self {
-        self.components.push(Component::Sink(sink));
-        self
-    }
-
-    pub fn service(mut self, service: Box<dyn super::ComputationService>) -> Self {
-        self.components.push(Component::Service(service));
+    pub fn service(
+        mut self,
+        name: ComponentName,
+        service: Box<dyn super::ComputationService>,
+    ) -> Self {
+        self.components.push((name, Component::Service(service)));
         self
     }
     pub(crate) fn unbound(mut self, relationship: DesiredRelationship) -> Self {
@@ -1002,6 +1061,7 @@ impl ComputationGraphBuilder {
             ));
         }
         let mut ids = BTreeMap::new();
+        let mut names = BTreeMap::new();
         let mut nodes = Vec::new();
         let mut transitive_sources = Vec::new();
         for (id, handle) in &self.resource_handles {
@@ -1013,7 +1073,34 @@ impl ComputationGraphBuilder {
                 return Err(topology(format!("resource {id} has an incompatible role")));
             }
         }
-        for (index, component) in self.components.iter().enumerate() {
+        for (index, (name, component)) in self.components.iter().enumerate() {
+            let descriptor = component.descriptor();
+            let conflict = |prior: usize| {
+                let (name, component) = &self.components[prior];
+                ComponentConflict::new(
+                    component.descriptor(),
+                    name,
+                    component.role(),
+                    match component {
+                        Component::Deferred { specification, .. } => Some(specification),
+                        Component::Unresolved(definition) => match &definition.construction {
+                            ComponentConstruction::Factory(specification) => Some(specification),
+                            ComponentConstruction::External { .. } => None,
+                        },
+                        _ => None,
+                    },
+                )
+            };
+            if let Some(prior) = ids.insert(descriptor.id().clone(), index) {
+                return Err(GraphError::DuplicateComponentId {
+                    existing: Box::new(conflict(prior)),
+                });
+            }
+            if let Some(prior) = names.insert(name.clone(), index) {
+                return Err(GraphError::DuplicateComponentName {
+                    existing: Box::new(conflict(prior)),
+                });
+            }
             let downstream: Vec<_> = self
                 .edges
                 .iter()
@@ -1047,16 +1134,13 @@ impl ComputationGraphBuilder {
                     &self.resource_handles,
                 )?;
             }
-            let descriptor = component.descriptor();
-            if ids.insert(descriptor.id().clone(), index).is_some() {
-                return Err(topology(format!("duplicate component {}", descriptor.id())));
-            }
             validate_role(descriptor, component.role(), component.completion())?;
             component
                 .output_readers()
                 .validate(descriptor)
                 .map_err(|error| topology(error.to_string()))?;
             nodes.push(NodeSnapshot {
+                name: name.clone(),
                 descriptor: descriptor.clone(),
                 role: component.role(),
                 completion: component.completion(),
@@ -1303,7 +1387,7 @@ impl ComputationGraphBuilder {
             specifications: self
                 .components
                 .iter()
-                .filter_map(|component| match component {
+                .filter_map(|(_, component)| match component {
                     Component::Deferred { specification, .. } => Some((
                         specification.descriptor.id().clone(),
                         specification.as_ref().clone(),
@@ -1320,7 +1404,7 @@ impl ComputationGraphBuilder {
             external_bindings: self
                 .components
                 .iter()
-                .filter_map(|component| {
+                .filter_map(|(_, component)| {
                     if matches!(component, Component::Deferred { .. })
                         || matches!(component, Component::Unresolved(definition)
                             if matches!(definition.construction, ComponentConstruction::Factory(_)))
@@ -1344,7 +1428,7 @@ impl ComputationGraphBuilder {
             component_resources: BTreeMap::new(),
             component_plugins: BTreeMap::new(),
         };
-        for (component, node) in self.components.iter().zip(&nodes) {
+        for ((_, component), node) in self.components.iter().zip(&nodes) {
             if let Some(admission) = component.recovery_contract().source_admission {
                 validate_admission(&admission, node, &snapshot, &self.resource_handles, None)?;
             }
@@ -1353,7 +1437,7 @@ impl ComputationGraphBuilder {
         let factories = self
             .components
             .iter()
-            .filter_map(|component| {
+            .filter_map(|(_, component)| {
                 if let Component::Deferred {
                     specification,
                     factory,
@@ -1370,7 +1454,7 @@ impl ComputationGraphBuilder {
             .components
             .into_iter()
             .enumerate()
-            .map(|(index, component)| {
+            .map(|(index, (_, component))| {
                 controller::InstanceSlot::new(
                     component,
                     ComponentGeneration(index as u64 + 1),
@@ -1464,6 +1548,7 @@ impl ComputationGraphBuilder {
             reported_resources: BTreeMap::new(),
             observation_resources: BTreeSet::new(),
             management_protected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            allow_external_component_ids: true,
             retirement: None,
             tasks: Arc::default(),
         };
@@ -1566,6 +1651,20 @@ pub struct GraphControl {
     rejected_additions: Arc<std::sync::Mutex<Vec<Arc<addition::RejectedAddition>>>>,
     management_protected: Arc<std::sync::atomic::AtomicBool>,
     management_access: bool,
+    allow_external_component_ids: bool,
+    dependency_refresh:
+        Option<Arc<dyn Fn() -> futures::future::BoxFuture<'static, GraphResult<()>> + Send + Sync>>,
+    name_editor: Option<
+        Arc<
+            dyn Fn(
+                    ComponentId,
+                    ComponentGeneration,
+                    ComponentName,
+                ) -> futures::future::BoxFuture<'static, GraphResult<()>>
+                + Send
+                + Sync,
+        >,
+    >,
 }
 
 impl GraphControl {
@@ -1584,6 +1683,44 @@ impl GraphControl {
             .map_err(|error| topology(format!("cannot observe control operation: {error}")))?;
         observation.record("operation", operation);
         Ok(observation)
+    }
+
+    pub(crate) fn with_name_editor(
+        mut self,
+        edit: impl Fn(
+                ComponentId,
+                ComponentGeneration,
+                ComponentName,
+            ) -> futures::future::BoxFuture<'static, GraphResult<()>>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.name_editor = Some(Arc::new(edit));
+        self
+    }
+
+    pub(crate) fn with_dependency_refresh(
+        mut self,
+        refresh: impl Fn() -> futures::future::BoxFuture<'static, GraphResult<()>>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.dependency_refresh = Some(Arc::new(refresh));
+        self
+    }
+
+    pub(super) async fn refresh_dependencies(&self) -> GraphResult<()> {
+        if let Some(refresh) = &self.dependency_refresh {
+            refresh().await?;
+        }
+        Ok(())
+    }
+
+    /// The immutable identity-admission policy selected by the graph's owner.
+    pub fn allows_external_component_ids(&self) -> bool {
+        self.allow_external_component_ids
     }
 
     pub(crate) fn output_catalogue(&self) -> super::OutputCatalogue {
@@ -1694,11 +1831,16 @@ pub struct ComputationGraph {
     // Declaration origin is independent of the provider's cleanup ownership or name.
     observation_resources: BTreeSet<ResourceId>,
     management_protected: Arc<std::sync::atomic::AtomicBool>,
+    allow_external_component_ids: bool,
     retirement: Option<Arc<retirement::RetirementState>>,
     tasks: Arc<controller::ExecutionTasks>,
 }
 
 impl ComputationGraph {
+    pub(crate) fn set_component_identity_policy(&mut self, allow_external: bool) {
+        self.allow_external_component_ids = allow_external;
+    }
+
     pub(crate) fn into_component_batch(self) -> GraphResult<super::ComponentBatch> {
         assert_eq!(
             self.state(),
@@ -2093,6 +2235,9 @@ impl ComputationGraph {
             rejected_additions: self.rejected_additions.clone(),
             management_protected: self.management_protected.clone(),
             management_access: false,
+            allow_external_component_ids: self.allow_external_component_ids,
+            dependency_refresh: None,
+            name_editor: None,
         };
         let state = self.state.clone();
         let observed = self.observed.clone();
@@ -2415,7 +2560,7 @@ async fn cancelled(cancel: &mut watch::Receiver<bool>) {
 struct Incoming {
     edge: usize,
     queue_id: Arc<str>,
-    producer_role: super::ComponentRole,
+    producer: super::ProducerBoundary,
     port: PortId,
     receiver: Box<dyn EnvelopeReceiver>,
     acknowledgement_required: bool,
@@ -2581,7 +2726,7 @@ async fn bind_output_destinations(
         ));
     }
     match component {
-        Component::Transformer(transformer) | Component::Query(transformer) => transformer
+        Component::Transformer(transformer) => transformer
             .bind_output_destinations(&bindings)
             .await
             .map_err(|error| component_error(node, "bind output destinations", error)),
@@ -2971,15 +3116,10 @@ async fn run_node(
             _ = cancelled(quiesce) => {}
             result = observe(node, crate::observability::ObservedOperation::Run, execution_scope.context(), Default::default())?.run(service.run()) => return result.map_err(|error| component_error(node, "run service", error)),
         }
-        return service
-            .quiesce()
-            .await
-            .map_err(|error| component_error(node, "quiesce service", error));
+        return Ok(());
     }
     let wakeup = match &*component {
-        Component::Transformer(transformer) | Component::Query(transformer) => {
-            transformer.wakeup_source()
-        }
+        Component::Transformer(transformer) => transformer.wakeup_source(),
         _ => None,
     };
     if inputs.is_empty() && !matches!(component, Component::Source(_)) && wakeup.is_none() {
@@ -3027,9 +3167,7 @@ async fn run_node(
                 }
             }
             _ => 'input_work: {
-                if let Component::Transformer(transformer) | Component::Query(transformer) =
-                    component
-                {
+                if let Component::Transformer(transformer) = component {
                     if transformer.has_pending_emissions() {
                         break 'input_work process_transformer(
                             transformer.as_mut(),
@@ -3074,7 +3212,7 @@ async fn run_node(
                     };
                     if scheduled {
                         match component {
-                            Component::Transformer(transformer) | Component::Query(transformer) => {
+                            Component::Transformer(transformer) => {
                                 break 'input_work process_transformer(
                                     transformer.as_mut(),
                                     node,
@@ -3159,13 +3297,13 @@ async fn run_node(
                     port: incoming.port.clone(),
                     envelope,
                 };
-                let producer_role = incoming.producer_role;
+                let producer = incoming.producer;
                 // At most one pending receive per edge, no forwarding tasks or hidden queues.
                 receivers.push(receive(incoming));
                 if let Some(progress) = input_progress {
                     let prepared =
                         progress
-                            .prepare(&input.envelope, producer_role)
+                            .prepare(&input.envelope, producer)
                             .map_err(|source| {
                                 component_error(node, "prepare input progress", source)
                             })?;
@@ -3176,7 +3314,7 @@ async fn run_node(
                     }
                 }
                 match component {
-                    Component::Transformer(transformer) | Component::Query(transformer) => {
+                    Component::Transformer(transformer) => {
                         if transformer.observes_input(&input) {
                             let observation =
                                 crate::observability::ComponentObservations::current_or_disabled()
@@ -3299,7 +3437,7 @@ async fn run_node(
                 forward_emissions(node, sequences, &emissions, outputs, budget, None).await?;
             }
             match component {
-                Component::Transformer(transformer) | Component::Query(transformer) => {
+                Component::Transformer(transformer) => {
                     observe(
                         node,
                         crate::observability::ObservedOperation::Confirm,
@@ -3316,9 +3454,7 @@ async fn run_node(
                 _ => {}
             }
             let continuation = match component {
-                Component::Transformer(transformer) | Component::Query(transformer)
-                    if transformer.has_pending_emissions() =>
-                {
+                Component::Transformer(transformer) if transformer.has_pending_emissions() => {
                     if let Some(yield_node) = budget.checkpoint() {
                         yield_node.await;
                     }

@@ -19,7 +19,7 @@ mod mock_source;
 use anyhow::Result;
 use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_lib::channels::ComponentStatus;
-use drasi_lib::queries::{FetchError, Query as QueryInstance};
+use drasi_lib::queries::FetchError;
 use drasi_lib::{DrasiLib, IndexBackendPlugin, Query, StorageBackendRef};
 use mock_source::{MockSource, MockSourceHandle, PropertyMapBuilder};
 use std::sync::Arc;
@@ -90,6 +90,18 @@ async fn build_core(tmp: &TempDir, query_text: &str) -> Result<(DrasiLib, MockSo
     let rocks: Arc<dyn IndexBackendPlugin> =
         Arc::new(RocksDbIndexProvider::new(tmp.path(), false, false));
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("query-output-wipe-e2e")
         .with_source(mock_source)
         .with_query(persistent_query(query_text))
@@ -311,6 +323,18 @@ fn volatile_query(text: &str) -> drasi_lib::config::QueryConfig {
 async fn volatile_reconfigure_and_remove_succeed() -> Result<()> {
     let (mock_source, handle) = MockSource::new(SOURCE_ID)?;
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("query-output-wipe-volatile")
         .with_source(mock_source)
         .with_query(volatile_query(QUERY_V1))

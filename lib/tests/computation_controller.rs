@@ -14,7 +14,6 @@
 
 #![cfg(test)]
 
-#[allow(dead_code)]
 mod computation_support;
 
 use std::{

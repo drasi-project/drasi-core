@@ -46,8 +46,7 @@ pub struct BootstrapFactoryMetadata {
 }
 impl BootstrapFactoryMetadata {
     pub fn validate(&self, plugin: &PluginIdentity) -> anyhow::Result<()> {
-        ComponentId::try_new(self.implementation.name.as_ref())?;
-        ComponentId::try_new(self.implementation.version.as_ref())?;
+        self.implementation.validate()?;
         anyhow::ensure!(
             self.implementation.plugin.as_ref() == Some(plugin),
             "bootstrap factory plugin provenance mismatch"
@@ -57,7 +56,7 @@ impl BootstrapFactoryMetadata {
             "invalid bootstrap configuration version"
         );
         for name in self.configuration.fields.keys() {
-            ComponentId::try_new(name.as_str())?;
+            drasi_computation_contracts::validate_identifier("configuration field", name)?;
         }
         Ok(())
     }
@@ -68,8 +67,8 @@ impl BootstrapFactoryMetadata {
             "bootstrap implementation/configuration version mismatch"
         );
         if let Some(scope) = &request.scope {
-            ComponentId::try_new(scope.graph_id.as_str())?;
-            ComponentId::try_new(scope.instance_id.as_str())?;
+            drasi_computation_contracts::validate_identifier("graph", &scope.graph_id)?;
+            drasi_computation_contracts::validate_identifier("instance", &scope.instance_id)?;
         }
         self.configuration.validate(&request.configuration)
     }
@@ -224,6 +223,31 @@ impl From<Watermark> for BootstrapWatermark {
 pub struct Completed {
     pub watermarks: Vec<Watermark>,
     pub state: Option<serde_bytes::ByteBuf>,
+}
+impl From<drasi_computation_contracts::BootstrapCompletion> for Completed {
+    fn from(value: drasi_computation_contracts::BootstrapCompletion) -> Self {
+        Self {
+            watermarks: value.watermarks.into_iter().map(Into::into).collect(),
+            state: value.state.map(|state| state.to_vec().into()),
+        }
+    }
+}
+impl TryFrom<Completed> for drasi_computation_contracts::BootstrapCompletion {
+    type Error = anyhow::Error;
+    fn try_from(value: Completed) -> anyhow::Result<Self> {
+        validate_watermarks(&value.watermarks)?;
+        if let Some(state) = &value.state {
+            anyhow::ensure!(
+                !state.is_empty()
+                    && state.len() <= drasi_computation_contracts::MAX_BOOTSTRAP_STATE_BYTES,
+                "bootstrap completion state exceeds its nonempty byte bound"
+            );
+        }
+        Ok(Self {
+            watermarks: value.watermarks.into_iter().map(Into::into).collect(),
+            state: value.state.map(|state| state.into_vec().into()),
+        })
+    }
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -732,7 +756,7 @@ mod tests {
         let producer = GraphProducerIdentity::volatile(
             "scope".into(),
             "graph".into(),
-            ComponentId::try_new("producer")?,
+            ComponentId::try_new("0b751a8f-0746-486a-b991-73ba3c255ca1")?,
             StreamId::try_new("producer/out")?,
         )?;
         let cursor = OutputCursor::try_new(producer.clone(), 0)?;

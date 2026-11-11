@@ -12,7 +12,8 @@ use tokio::sync::{Notify, Semaphore};
 
 #[allow(dead_code)]
 mod computation_support;
-use computation_support::{component, edge, endpoint, port, stream};
+pub(crate) use computation_support::component;
+use computation_support::{edge, endpoint, name, port, stream};
 #[path = "computation_support/metrics.rs"]
 mod recording;
 use recording::RecordingMetrics;
@@ -189,17 +190,20 @@ async fn exact_fan_out_duration_is_per_envelope_and_sink_without_tracing() {
     let (two, b) = sink("b", SinkCompletion::Handled, false);
     let mut graph = ComputationGraph::builder("handled-latency")
         .with_telemetry(options(&metrics, true, false))
-        .source(Box::new(Source {
-            descriptor: descriptor(
-                "source",
-                PortDirection::Output,
-                GraphChangeCodec::schema().descriptor(),
-            ),
-            inputs: [input()].into(),
-        }))
-        .query(Box::new(query().await))
-        .sink(Box::new(one))
-        .sink(Box::new(two))
+        .source(
+            name("source"),
+            Box::new(Source {
+                descriptor: descriptor(
+                    "source",
+                    PortDirection::Output,
+                    GraphChangeCodec::schema().descriptor(),
+                ),
+                inputs: [input()].into(),
+            }),
+        )
+        .transformer(name("query"), Box::new(query().await))
+        .sink(name("a"), Box::new(one))
+        .sink(name("b"), Box::new(two))
         .bind_stream(endpoint("source", "out"), stream("source"))
         .bind_stream(endpoint("query", "out"), stream("query"))
         .connect(
@@ -224,26 +228,37 @@ async fn exact_fan_out_duration_is_per_envelope_and_sink_without_tracing() {
         tokio::time::advance(Duration::from_millis(100)).await;
         a.1.add_permits(1);
         metrics
-            .wait_for(|| metrics.histogram(LATENCY, &[("component_id", "a")]).len() == 1)
+            .wait_for(|| {
+                metrics
+                    .histogram(LATENCY, &[("component_id", component("a").as_str())])
+                    .len()
+                    == 1
+            })
             .await;
-        let query_label = ("query_id", "query");
+        let query = component("query");
+        let query_label = ("query_id", query.as_str());
         assert_eq!(
             metrics.histogram(
                 LATENCY,
-                &[("component_id", "a"), query_label, ("phase", "steady")]
+                &[("component_id", component("a").as_str()), query_label, ("phase", "steady")]
             ),
             [0.100]
         );
         assert!(metrics
-            .histogram(LATENCY, &[("component_id", "b")])
+            .histogram(LATENCY, &[("component_id", component("b").as_str())])
             .is_empty());
         tokio::time::advance(Duration::from_millis(150)).await;
         b.1.add_permits(1);
         metrics
-            .wait_for(|| metrics.histogram(LATENCY, &[("component_id", "b")]).len() == 1)
+            .wait_for(|| {
+                metrics
+                    .histogram(LATENCY, &[("component_id", component("b").as_str())])
+                    .len()
+                    == 1
+            })
             .await;
         assert_eq!(
-            metrics.histogram(LATENCY, &[("component_id", "b")]),
+            metrics.histogram(LATENCY, &[("component_id", component("b").as_str())]),
             [0.250]
         );
         control.cancel();
@@ -264,16 +279,19 @@ async fn disabled_excluded_and_acceptance_only_paths_never_record_success_latenc
         let (sink, gate) = sink("sink", completion, false);
         let mut graph = ComputationGraph::builder("handled-latency")
             .with_telemetry(options(&metrics, enabled, excluded))
-            .source(Box::new(Source {
-                descriptor: descriptor(
-                    "source",
-                    PortDirection::Output,
-                    GraphChangeCodec::schema().descriptor(),
-                ),
-                inputs: [input()].into(),
-            }))
-            .query(Box::new(query().await))
-            .sink(Box::new(sink))
+            .source(
+                name("source"),
+                Box::new(Source {
+                    descriptor: descriptor(
+                        "source",
+                        PortDirection::Output,
+                        GraphChangeCodec::schema().descriptor(),
+                    ),
+                    inputs: [input()].into(),
+                }),
+            )
+            .transformer(name("query"), Box::new(query().await))
+            .sink(name("sink"), Box::new(sink))
             .bind_stream(endpoint("source", "out"), stream("source"))
             .bind_stream(endpoint("query", "out"), stream("query"))
             .connect(
@@ -303,7 +321,7 @@ async fn disabled_excluded_and_acceptance_only_paths_never_record_success_latenc
                 .wait_for(|| {
                     metrics.count(
                         "drasi.component.inputs_processed",
-                        &[("component_id", "sink")],
+                        &[("component_id", component("sink").as_str())],
                     ) == 1
                 })
                 .await;
@@ -321,16 +339,19 @@ async fn failed_handler_never_records_success_latency() {
     let (sink, gate) = sink("sink", SinkCompletion::Handled, true);
     let mut graph = ComputationGraph::builder("handled-latency")
         .with_telemetry(options(&metrics, true, false))
-        .source(Box::new(Source {
-            descriptor: descriptor(
-                "source",
-                PortDirection::Output,
-                GraphChangeCodec::schema().descriptor(),
-            ),
-            inputs: [input()].into(),
-        }))
-        .query(Box::new(query().await))
-        .sink(Box::new(sink))
+        .source(
+            name("source"),
+            Box::new(Source {
+                descriptor: descriptor(
+                    "source",
+                    PortDirection::Output,
+                    GraphChangeCodec::schema().descriptor(),
+                ),
+                inputs: [input()].into(),
+            }),
+        )
+        .transformer(name("query"), Box::new(query().await))
+        .sink(name("sink"), Box::new(sink))
         .bind_stream(endpoint("source", "out"), stream("source"))
         .bind_stream(endpoint("query", "out"), stream("query"))
         .connect(
@@ -349,7 +370,12 @@ async fn failed_handler_never_records_success_latency() {
         gate.0.notified().await;
         gate.1.add_permits(1);
         metrics
-            .wait_for(|| metrics.count("drasi.errors", &[("component_id", "sink")]) == 1)
+            .wait_for(|| {
+                metrics.count(
+                    "drasi.errors",
+                    &[("component_id", component("sink").as_str())],
+                ) == 1
+            })
             .await;
         control.cancel();
     });
@@ -367,17 +393,20 @@ pub(crate) async fn native_transformer_pipeline(
     let (sink, gate) = sink("sink", SinkCompletion::Handled, false);
     let mut graph = ComputationGraph::builder("handled-latency")
         .with_telemetry(options(&metrics, true, false))
-        .source(Box::new(Source {
-            descriptor: descriptor(
-                "source",
-                PortDirection::Output,
-                GraphChangeCodec::schema().descriptor(),
-            ),
-            inputs: [input()].into(),
-        }))
-        .query(Box::new(query().await))
-        .transformer(transformer)
-        .sink(Box::new(sink))
+        .source(
+            name("source"),
+            Box::new(Source {
+                descriptor: descriptor(
+                    "source",
+                    PortDirection::Output,
+                    GraphChangeCodec::schema().descriptor(),
+                ),
+                inputs: [input()].into(),
+            }),
+        )
+        .transformer(name("query"), Box::new(query().await))
+        .transformer(name("native"), transformer)
+        .sink(name("sink"), Box::new(sink))
         .bind_stream(endpoint("source", "out"), stream("source"))
         .bind_stream(endpoint("query", "out"), stream("query"))
         .bind_stream(endpoint("native", "out"), stream("native"))
@@ -420,7 +449,7 @@ pub(crate) async fn native_transformer_pipeline(
                 .wait_for(|| !metrics.histogram(LATENCY, &[]).is_empty())
                 .await;
             assert_eq!(
-                metrics.histogram(LATENCY, &[("query_id", "query")]),
+                metrics.histogram(LATENCY, &[("query_id", component("query").as_str())]),
                 [0.123]
             );
         } else {
@@ -428,7 +457,7 @@ pub(crate) async fn native_transformer_pipeline(
                 .wait_for(|| {
                     metrics.count(
                         "drasi.component.inputs_processed",
-                        &[("component_id", "sink")],
+                        &[("component_id", component("sink").as_str())],
                     ) == 1
                 })
                 .await;
@@ -511,16 +540,19 @@ async fn combined_batch_preserves_distinct_ingress_starts_and_excludes_source_wa
     let (send, receive) = tokio::sync::mpsc::channel(2);
     let mut graph = ComputationGraph::builder("handled-latency")
         .with_telemetry(options(&metrics, true, false))
-        .source(Box::new(DrivenSource {
-            descriptor: descriptor(
-                "source",
-                PortDirection::Output,
-                GraphChangeCodec::schema().descriptor(),
-            ),
-            receive,
-        }))
-        .query(Box::new(query().await))
-        .sink(Box::new(BatchSink(sink)))
+        .source(
+            name("source"),
+            Box::new(DrivenSource {
+                descriptor: descriptor(
+                    "source",
+                    PortDirection::Output,
+                    GraphChangeCodec::schema().descriptor(),
+                ),
+                receive,
+            }),
+        )
+        .transformer(name("query"), Box::new(query().await))
+        .sink(name("sink"), Box::new(BatchSink(sink)))
         .bind_stream(endpoint("source", "out"), stream("source"))
         .bind_stream(endpoint("query", "out"), stream("query"))
         .connect(

@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 mod component;
+mod output;
 
 use drasi_computation_contracts::{
     ComponentRole, GraphChangeCodec, ImplementationIdentity, PipeRequirements, PortDescriptor,
@@ -33,6 +34,12 @@ fn configuration_definition() -> drasi_computation_plugin_sdk::ConfigDefinition 
             Array,
             true,
             "Ordered middleware names to apply; every name must refer to a declared configuration.",
+        ),
+        Field::new(
+            "bootstrap",
+            Boolean,
+            false,
+            "Initialize from a quiescent provider and expose the transformed current snapshot.",
         ),
     ])
     .expect("constant middleware configuration")
@@ -73,7 +80,12 @@ impl Factory for MiddlewareFactory {
                 })
                 .collect(),
             completion: None,
-            capabilities: Capabilities::default(),
+            capabilities: Capabilities {
+                quiescent_bootstrap: Some(PortId::try_new("in").expect("constant port")),
+                bootstrap_optional: true,
+                output_snapshots: vec![PortId::try_new("out").expect("constant port")],
+                ..Capabilities::default()
+            },
         }
     }
 
@@ -85,6 +97,7 @@ impl Factory for MiddlewareFactory {
         Ok(Component::Transformer(Box::new(component::Middleware::new(
             self.metadata().descriptor(request.id.clone())?,
             request.configuration.clone(),
+            request.scope.as_ref(),
         )?))
         .into())
     }

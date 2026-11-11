@@ -541,7 +541,7 @@ mod reconnect {
         .unwrap();
         let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(16);
         source
-            .initialize(SourceRuntimeContext::new(
+            .bind_runtime_context(SourceRuntimeContext::new(
                 "websocket-test-instance",
                 "websocket-rate-limit-test",
                 None,
@@ -613,7 +613,7 @@ mod reconnect {
         .unwrap();
         let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(16);
         source
-            .initialize(SourceRuntimeContext::new(
+            .bind_runtime_context(SourceRuntimeContext::new(
                 "websocket-test-instance",
                 "websocket-initial-retry-test",
                 None,
@@ -760,7 +760,7 @@ mod reconnect {
         .unwrap();
         let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(16);
         source
-            .initialize(SourceRuntimeContext::new(
+            .bind_runtime_context(SourceRuntimeContext::new(
                 "websocket-test-instance",
                 "websocket-not-found-test",
                 None,

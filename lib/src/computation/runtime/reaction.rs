@@ -27,8 +27,8 @@ use tokio::sync::{watch, Mutex};
 
 pub(super) struct ReactionInstance {
     pub reaction: Arc<dyn Reaction>,
-    pub query_ids: Vec<String>,
-    pub metrics: BTreeMap<String, Arc<ReactionMetrics>>,
+    pending: Option<Arc<super::reaction_creation::DeferredReaction>>,
+    metrics: StdMutex<BTreeMap<String, Arc<ReactionMetrics>>>,
     host: StdMutex<Option<Arc<ReactionPluginHost>>>,
     initializing: Mutex<()>,
     initialized: AtomicBool,
@@ -40,6 +40,21 @@ pub(super) struct ReactionInstance {
 impl ReactionInstance {
     pub(super) fn new(reaction: Box<dyn Reaction>, owner: &Arc<super::Runtime>) -> Arc<Self> {
         let reaction: Arc<dyn Reaction> = reaction.into();
+        Self::new_inner(reaction, None, owner)
+    }
+
+    pub(super) fn deferred(
+        pending: Arc<super::reaction_creation::DeferredReaction>,
+        owner: &Arc<super::Runtime>,
+    ) -> Arc<Self> {
+        Self::new_inner(pending.clone(), Some(pending), owner)
+    }
+
+    fn new_inner(
+        reaction: Arc<dyn Reaction>,
+        pending: Option<Arc<super::reaction_creation::DeferredReaction>>,
+        owner: &Arc<super::Runtime>,
+    ) -> Arc<Self> {
         let query_ids = reaction.query_ids();
         let metrics: BTreeMap<_, _> = query_ids
             .iter()
@@ -48,8 +63,8 @@ impl ReactionInstance {
             .collect();
         Arc::new(Self {
             reaction,
-            query_ids,
-            metrics,
+            pending,
+            metrics: StdMutex::new(metrics),
             host: StdMutex::new(None),
             initializing: Mutex::new(()),
             initialized: AtomicBool::new(false),
@@ -58,6 +73,46 @@ impl ReactionInstance {
             inputs: Mutex::new(Vec::new()),
             changed: owner.changed.clone(),
         })
+    }
+    pub(super) fn query_ids(&self) -> Vec<String> {
+        self.reaction.query_ids()
+    }
+
+    pub(super) fn references(&self) -> anyhow::Result<Vec<crate::config::ComponentReference>> {
+        if let Some(pending) = &self.pending {
+            return Ok(pending.references());
+        }
+        self.query_ids()
+            .into_iter()
+            .map(|id| {
+                Ok(crate::config::ComponentReference::by_id(
+                    ComponentId::try_new(id)?,
+                ))
+            })
+            .collect()
+    }
+
+    pub(super) fn bind_committed(
+        &self,
+        inputs: &[crate::config::ComponentReference],
+    ) -> anyhow::Result<()> {
+        if let Some(pending) = &self.pending {
+            pending.bind_committed(inputs)?;
+        } else {
+            anyhow::ensure!(
+                self.references()? == inputs,
+                "reaction object inputs differ from its declaration"
+            );
+        }
+        Ok(())
+    }
+
+    pub(super) fn metrics(&self) -> anyhow::Result<BTreeMap<String, Arc<ReactionMetrics>>> {
+        Ok(self
+            .metrics
+            .lock()
+            .map_err(|_| anyhow::anyhow!("reaction metrics ownership poisoned"))?
+            .clone())
     }
     fn current_host(&self) -> anyhow::Result<Option<Arc<ReactionPluginHost>>> {
         Ok(self
@@ -75,9 +130,9 @@ impl ReactionInstance {
         self.changed
             .send_modify(|value| *value = value.wrapping_add(1));
     }
-    pub(super) async fn deprovision(&self) -> anyhow::Result<()> {
-        RuntimeComponent::shutdown(self).await?;
-        self.reaction.deprovision().await
+    pub(super) async fn delete_owned_resources(&self) -> anyhow::Result<()> {
+        RuntimeComponent::stop(self).await?;
+        self.reaction.delete_owned_resources().await
     }
 }
 #[async_trait]
@@ -87,6 +142,42 @@ impl RuntimeComponent for ReactionInstance {
     }
     fn kind(&self) -> &'static str {
         "reaction"
+    }
+    fn metadata(&self) -> Option<std::collections::HashMap<String, String>> {
+        self.pending
+            .as_ref()
+            .and_then(|pending| pending.metadata().cloned())
+    }
+    fn configuration_available(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_none_or(|pending| pending.configuration_available())
+    }
+    async fn construct(&self, generation: ComponentGeneration) -> anyhow::Result<()> {
+        if let Some(pending) = &self.pending {
+            let owner = self
+                .owner
+                .upgrade()
+                .ok_or_else(|| anyhow::anyhow!("native runtime was dropped"))?;
+            let control = owner.control()?;
+            pending.construct(&control).await?;
+            super::construction::publish_metadata(
+                pending.metadata(),
+                &control,
+                &ComponentId::try_new(self.reaction.id())?,
+                generation,
+            )?;
+        }
+        Ok(())
+    }
+    fn dependency_waits(
+        &self,
+        desired: &GraphSnapshot,
+        observed: &ObservedGraph,
+    ) -> Vec<DependencyWait> {
+        self.pending
+            .as_ref()
+            .map_or_else(Vec::new, |pending| pending.waiting(desired, observed))
     }
     async fn wait_ready(&self) -> anyhow::Result<()> {
         let host = self.host()?;
@@ -128,20 +219,33 @@ impl RuntimeComponent for ReactionInstance {
             .owner
             .upgrade()
             .ok_or_else(|| anyhow::anyhow!("native runtime was dropped"))?;
-        owner.reaction_queries(&self.query_ids).await?;
-        for id in &self.query_ids {
+        let query_ids = self.query_ids();
+        {
+            let mut metrics = self
+                .metrics
+                .lock()
+                .map_err(|_| anyhow::anyhow!("reaction metrics ownership poisoned"))?;
+            for id in &query_ids {
+                metrics
+                    .entry(id.clone())
+                    .or_insert_with(|| Arc::new(ReactionMetrics::new()));
+            }
+        }
+        owner.reaction_queries(&query_ids).await?;
+        for id in &query_ids {
             owner.link_query_output(id).await?;
         }
-        if let Some(previous) = self.current_host()? {
-            previous.shutdown().await?;
-        }
+        anyhow::ensure!(
+            self.current_host()?.is_none(),
+            "failed reaction initialization requires a newly constructed object"
+        );
         let host = ReactionPluginHost::for_runtime(
             self.reaction.clone(),
             owner.services.clone(),
             owner.catalog.clone(),
             ReactionPluginOptions::default(),
             RuntimeReactionMetrics {
-                queries: self.metrics.clone(),
+                queries: self.metrics()?,
                 lifecycle: owner.lifecycle_metrics.clone(),
             },
         )?;
@@ -176,13 +280,14 @@ impl RuntimeComponent for ReactionInstance {
             .ok_or_else(|| anyhow::anyhow!("native runtime was dropped"))?;
         let mut inputs = self.inputs.lock().await;
         inputs.clear();
-        for id in &self.query_ids {
+        let query_ids = self.query_ids();
+        for id in &query_ids {
             owner.link_query_output(id).await?;
         }
         host.validate_startup_configuration().await?;
         let mut subscriptions = Vec::new();
         let mut heads = BTreeMap::new();
-        for id in &self.query_ids {
+        for id in &query_ids {
             host.wait_query_ready(id).await?;
             let subscription = owner.query_subscription(id).await?;
             heads.insert(id.clone(), subscription.head()?);
@@ -286,14 +391,25 @@ impl RuntimeComponent for ReactionInstance {
         self.inputs.lock().await.clear();
         if let Some(host) = self.current_host()? {
             host.shutdown().await?;
+        } else {
+            self.reaction.dispose().await?;
         }
         self.notify();
         Ok(())
     }
-    async fn deprovision(&self) -> anyhow::Result<()> {
-        self.deprovision().await
+    async fn delete_owned_resources(&self) -> anyhow::Result<()> {
+        self.delete_owned_resources().await
     }
-    async fn status(&self) -> ComponentStatus {
-        self.reaction.status().await
+    async fn pause_processing(&self) -> anyhow::Result<()> {
+        self.host()?.pause_processing().await
+    }
+    async fn resume_processing(&self) -> anyhow::Result<()> {
+        self.host()?.resume_processing().await
+    }
+    async fn apply_update(
+        &self,
+        context: crate::management::OrdinaryComponentUpdateContext,
+    ) -> anyhow::Result<()> {
+        self.reaction.apply_update(context).await
     }
 }

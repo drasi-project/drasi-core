@@ -87,6 +87,18 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
         .build()?;
 
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("dashboard-test-core")
         .with_source(mock_source)
         .with_query(query)
@@ -267,6 +279,18 @@ async fn test_dashboard_server_shuts_down_on_stop() -> Result<()> {
         .build()?;
 
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("dashboard-shutdown-core")
         .with_source(mock_source)
         .with_query(query)

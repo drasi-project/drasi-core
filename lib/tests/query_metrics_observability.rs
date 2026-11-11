@@ -24,7 +24,7 @@ use std::{
 
 #[allow(dead_code)]
 mod computation_support;
-use computation_support::{component, edge, endpoint, port, stream};
+use computation_support::{component, edge, endpoint, name, port, stream};
 #[path = "computation_support/metrics.rs"]
 mod recording;
 use recording::RecordingMetrics;
@@ -159,35 +159,41 @@ async fn run(
                     .unwrap(),
             ),
         )
-        .source(Box::new(Source {
-            descriptor: ComponentDescriptor::try_new(
-                component("source"),
-                vec![PortDescriptor::new(
-                    port("out"),
-                    PortDirection::Output,
-                    GraphChangeCodec::schema().descriptor().clone(),
-                    Default::default(),
-                )],
-            )
-            .unwrap(),
-            inputs: inputs.into(),
-        }))
-        .query(Box::new(query))
-        .sink(Box::new(Sink {
-            descriptor: ComponentDescriptor::try_new(
-                component("sink"),
-                vec![PortDescriptor::new(
-                    port("in"),
-                    PortDirection::Input,
-                    QueryChangeCodec::schema().descriptor().clone(),
-                    Default::default(),
-                )],
-            )
-            .unwrap(),
-            received: received.clone(),
-            expected,
-            done: done.clone(),
-        }))
+        .source(
+            name("source"),
+            Box::new(Source {
+                descriptor: ComponentDescriptor::try_new(
+                    component("source"),
+                    vec![PortDescriptor::new(
+                        port("out"),
+                        PortDirection::Output,
+                        GraphChangeCodec::schema().descriptor().clone(),
+                        Default::default(),
+                    )],
+                )
+                .unwrap(),
+                inputs: inputs.into(),
+            }),
+        )
+        .transformer(name("query"), Box::new(query))
+        .sink(
+            name("sink"),
+            Box::new(Sink {
+                descriptor: ComponentDescriptor::try_new(
+                    component("sink"),
+                    vec![PortDescriptor::new(
+                        port("in"),
+                        PortDirection::Input,
+                        QueryChangeCodec::schema().descriptor().clone(),
+                        Default::default(),
+                    )],
+                )
+                .unwrap(),
+                received: received.clone(),
+                expected,
+                done: done.clone(),
+            }),
+        )
         .bind_stream(endpoint("source", "out"), stream("source"))
         .bind_stream(endpoint("query", "out"), stream("query"))
         .connect(

@@ -18,12 +18,11 @@ use drasi_core::{
     computation::ComputationQuery,
     interface::{IndexError, StorageDurability},
 };
-use futures::Stream;
-use std::{pin::Pin, sync::Arc};
+use std::sync::Arc;
 
 use super::{ChangeEnvelope, StreamId};
 
-pub(super) const BOOTSTRAP_STATE: &str = "\0computation:query-bootstrap-state:v1";
+pub(super) const BOOTSTRAP_STATE: &str = drasi_computation_contracts::BOOTSTRAP_STATE_CHECKPOINT;
 
 pub use drasi_computation_contracts::{
     BootstrapPreparation, BootstrapState, BootstrapWatermark, ComputationBootstrapSnapshot,
@@ -180,42 +179,6 @@ pub trait ComputationBootstrapProvider: Send + Sync {
 
 pub struct QueryBootstrapResource(pub Arc<dyn ComputationBootstrapProvider>);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum QueryRecoveryPolicy {
-    #[default]
-    Strict,
-    AutoReset,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum QueryPublicationMode {
-    #[default]
-    Atomic,
-    /// Explicit compatibility mode: checkpoint/core commit precedes publication.
-    /// A durable pending marker fences uncertain output until reset/recovery.
-    NonAtomic,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct QueryOptions {
-    pub recovery: QueryRecoveryPolicy,
-    pub publication: QueryPublicationMode,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum QueryRecoveryError {
-    #[error("durable query output belongs to a different producer; automatic reset is forbidden")]
-    OwnershipMismatch,
-    #[error("source subscription requires reset/rebootstrap before this query can resume")]
-    SourceResetRequired,
-    #[error("query configuration changed; explicit reset/rebootstrap is required")]
-    ConfigurationChanged,
-    #[error("query bootstrap did not complete; explicit reset/rebootstrap is required")]
-    IncompleteBootstrap,
-    #[error("non-atomic query output publication is incomplete")]
-    PendingPublication,
-    #[error("query reset did not complete")]
-    IncompleteReset,
-    #[error("inconsistent durable query output: {0}")]
-    Inconsistent(String),
-}
+pub use drasi_computation_contracts::{
+    QueryOptions, QueryPublicationMode, QueryRecoveryError, QueryRecoveryPolicy,
+};

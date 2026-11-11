@@ -19,6 +19,14 @@ use serde_json::{json, Value};
 struct Service {
     descriptor: ComponentDescriptor,
     config: Value,
+    start_gate: Option<Arc<StartGate>>,
+}
+
+#[derive(Default)]
+struct StartGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    starts: AtomicUsize,
 }
 
 #[async_trait]
@@ -30,6 +38,11 @@ impl ComputationComponent for Service {
         Ok(self.config.clone())
     }
     async fn start(&mut self) -> Result<()> {
+        if let Some(gate) = &self.start_gate {
+            gate.starts.fetch_add(1, Ordering::SeqCst);
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
         Ok(())
     }
     async fn stop(&mut self) -> Result<()> {
@@ -47,6 +60,7 @@ struct Factory {
     descriptor: FactoryDescriptor,
     created: Arc<AtomicUsize>,
     create_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+    start_gate: Option<Arc<StartGate>>,
 }
 
 impl Factory {
@@ -54,6 +68,7 @@ impl Factory {
         Self {
             created,
             create_gate: None,
+            start_gate: None,
             descriptor: FactoryDescriptor {
                 implementation: ImplementationIdentity::try_new("test/managed-service", "1")
                     .expect("implementation"),
@@ -97,6 +112,7 @@ impl ComponentFactory for Factory {
         Ok(ConstructedComponent::service(Box::new(Service {
             descriptor: context.specification.descriptor.clone(),
             config: serde_json::to_value(context.configuration()).expect("factory configuration"),
+            start_gate: self.start_gate.clone(),
         })))
     }
 }
@@ -152,7 +168,7 @@ async fn open(
     name: &str,
     count: Arc<AtomicUsize>,
 ) -> Result<DrasiLib> {
-    Ok(DrasiLib::builder()
+    Ok(lib_integration_tests::query_builder()
         .with_id(name)
         .with_component_factories(registry(count))
         .with_configuration_store(store)
@@ -177,7 +193,7 @@ async fn managed_housekeeping_preserves_nonexpiring_defaults_and_rejects_expired
         } else {
             None
         };
-        let mut builder = DrasiLib::builder()
+        let mut builder = lib_integration_tests::query_builder()
             .with_id("housekeeping")
             .with_component_factories(registry(count.clone()));
         if let Some(store) = &store {
@@ -279,13 +295,14 @@ async fn managed_housekeeping_preserves_nonexpiring_defaults_and_rejects_expired
 
 #[tokio::test]
 async fn persistence_is_optional_and_object_injection_remains_lightweight() -> Result<()> {
-    let core = DrasiLib::builder().build().await?;
+    let core = lib_integration_tests::query_builder().build().await?;
     assert!(core.desired_configuration().is_err());
     let descriptor = ComponentDescriptor::try_new(ComponentId::try_new("injected")?, vec![])?;
     core.add_computation_component(ComponentAddition::new(ConstructedComponent::service(
         Box::new(Service {
             descriptor,
             config: json!({}),
+            start_gate: None,
         }),
     )))
     .await?
@@ -299,7 +316,7 @@ async fn persistence_is_optional_and_object_injection_remains_lightweight() -> R
 async fn desired_diff_retains_healthy_instances_and_replaces_changed_or_removes_absent(
 ) -> Result<()> {
     let count = Arc::new(AtomicUsize::new(0));
-    let core = DrasiLib::builder()
+    let core = lib_integration_tests::query_builder()
         .with_component_factories(registry(count.clone()))
         .build()
         .await?;
@@ -358,14 +375,7 @@ async fn desired_diff_retains_healthy_instances_and_replaces_changed_or_removes_
         .await?;
     assert!(core.reconcile_desired_state().await?.converged());
     let remaining = core.computation_control()?.desired_snapshot();
-    assert!(!remaining
-        .nodes
-        .iter()
-        .any(|node| ["a", "b", "c"].contains(&node.descriptor.id().as_str())));
-    assert!(remaining
-        .nodes
-        .iter()
-        .any(|node| node.descriptor.id().as_str() == "__component_graph__"));
+    assert!(remaining.nodes.is_empty());
     core.shutdown().await?;
     Ok(())
 }
@@ -448,7 +458,7 @@ async fn unavailable_factory_is_visible_and_can_be_registered_after_restart() ->
         directory.path().join("config.redb"),
         [7; 32],
     )?);
-    let core = DrasiLib::builder()
+    let core = lib_integration_tests::query_builder()
         .with_configuration_store(store.clone())
         .build()
         .await?;
@@ -578,7 +588,7 @@ async fn restoration_preserves_intent_when_secret_provider_or_factory_versions_a
         }
         let mut factories = FactoryRegistry::standard();
         factories.register(Arc::new(factory))?;
-        let core = DrasiLib::builder()
+        let core = lib_integration_tests::query_builder()
             .with_id("restore")
             .with_configuration_store(store.clone())
             .with_component_factories(factories)
@@ -608,7 +618,7 @@ async fn restoration_preserves_intent_when_secret_provider_or_factory_versions_a
             1
         );
         core.shutdown().await?;
-        let recovered = DrasiLib::builder()
+        let recovered = lib_integration_tests::query_builder()
             .with_id("restore")
             .with_configuration_store(store.clone())
             .with_component_factories(registry(created.clone()))
@@ -656,7 +666,7 @@ async fn cancelled_restore_retains_lease_until_reconciliation_and_cleanup_finish
     let restoring = tokio::spawn({
         let store = store.clone();
         async move {
-            DrasiLib::builder()
+            lib_integration_tests::query_builder()
                 .with_id("restore")
                 .with_configuration_store(store)
                 .with_component_factories(factories)
@@ -705,7 +715,7 @@ async fn instance_stop_retains_pending_managed_construction(
     factory.create_gate = Some((entered.clone(), release.clone()));
     let mut factories = FactoryRegistry::standard();
     factories.register(Arc::new(factory))?;
-    let core = DrasiLib::builder()
+    let core = lib_integration_tests::query_builder()
         .with_component_factories(factories)
         .with_construction_timeout_secs(60)
         .with_shutdown_timeout_secs(2)
@@ -753,6 +763,67 @@ async fn instance_stop_interrupts_managed_construction_multi_thread() -> Result<
         instance_stop_retains_pending_managed_construction(reconcile).await?;
     }
     Ok(())
+}
+
+async fn instance_start_joins_managed_activation() -> Result<()> {
+    let gate = Arc::new(StartGate::default());
+    let created = Arc::new(AtomicUsize::new(0));
+    let mut factory = Factory::new(created.clone());
+    factory.start_gate = Some(gate.clone());
+    let mut factories = FactoryRegistry::standard();
+    factories.register(Arc::new(factory))?;
+    let core = lib_integration_tests::query_builder()
+        .with_component_factories(factories)
+        .with_startup_timeout_secs(3)
+        .build()
+        .await?;
+    core.apply_desired_state(0, "create", desired(&[("held", false)]))
+        .await?;
+    assert!(core.reconcile_desired_state().await?.converged());
+    let control = core.computation_control()?;
+    let revision = control.desired_snapshot().revision;
+    let activation = tokio::spawn(async move {
+        control
+            .start_components(
+                revision,
+                GraphSelection::Exact(vec![ComponentId::try_new("held")?]),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(3), gate.entered.notified()).await?;
+    let mut startup = Box::pin(core.start());
+    let early = tokio::time::timeout(Duration::from_millis(50), &mut startup).await;
+    let waited = early.is_err();
+    gate.release.notify_one();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), activation)
+            .await???
+            .summary,
+        OperationSummary::Completed
+    );
+    let result = match early {
+        Ok(result) => result,
+        Err(_) => tokio::time::timeout(Duration::from_secs(3), startup).await?,
+    };
+    core.shutdown().await?;
+    result?;
+    assert!(
+        waited,
+        "instance startup must wait for the existing activation"
+    );
+    assert_eq!(gate.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(created.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn instance_start_joins_managed_activation_current_thread() -> Result<()> {
+    instance_start_joins_managed_activation().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn instance_start_joins_managed_activation_multi_thread() -> Result<()> {
+    instance_start_joins_managed_activation().await
 }
 
 #[tokio::test]
@@ -808,7 +879,7 @@ async fn factory_objects_in_persistent_builder_are_explicitly_rejected() -> Resu
         directory.path().join("config.redb"),
         [1; 32],
     )?);
-    let result = DrasiLib::builder()
+    let result = lib_integration_tests::query_builder()
         .with_configuration_store(store)
         .with_query(
             drasi_lib::Query::cypher("not-a-recipe")
@@ -922,7 +993,7 @@ mod close_cancellation {
                 fail_first,
             });
             let core = Arc::new(
-                DrasiLib::builder()
+                lib_integration_tests::query_builder()
                     .with_id("closing")
                     .with_configuration_store(Arc::new(Store {
                         inner: inner.clone(),
@@ -1093,7 +1164,7 @@ mod restore_errors {
                     loads: AtomicUsize::new(0),
                     closes: AtomicUsize::new(0),
                 });
-                let error = DrasiLib::builder()
+                let error = lib_integration_tests::query_builder()
                     .with_id("restore-failure")
                     .with_configuration_store(Arc::new(RestoreStore(session.clone())))
                     .build()
@@ -1266,7 +1337,7 @@ async fn inconsistent_store_receipts_do_not_report_acceptance_or_start_construct
         let directory = tempfile::tempdir()?;
         let count = Arc::new(AtomicUsize::new(0));
         let fault = Arc::new(AtomicUsize::new(0));
-        let core = DrasiLib::builder()
+        let core = lib_integration_tests::query_builder()
             .with_component_factories(registry(count.clone()))
             .with_configuration_store(Arc::new(FaultStore {
                 inner: Arc::new(RedbConfigurationStore::new(
@@ -1310,7 +1381,7 @@ async fn regressed_changed_and_invalid_store_reads_cannot_replace_confirmed_stat
         let directory = tempfile::tempdir()?;
         let count = Arc::new(AtomicUsize::new(0));
         let fault = Arc::new(AtomicUsize::new(0));
-        let core = DrasiLib::builder()
+        let core = lib_integration_tests::query_builder()
             .with_component_factories(registry(count.clone()))
             .with_configuration_store(Arc::new(FaultStore {
                 inner: Arc::new(RedbConfigurationStore::new(
@@ -1353,7 +1424,7 @@ async fn commit_failure_prevents_construction_and_lost_response_is_resolved_by_r
     )?);
     let count = Arc::new(AtomicUsize::new(0));
     let fault = Arc::new(AtomicUsize::new(1));
-    let core = DrasiLib::builder()
+    let core = lib_integration_tests::query_builder()
         .with_id("fault")
         .with_component_factories(registry(count.clone()))
         .with_configuration_store(Arc::new(FaultStore {
@@ -1407,7 +1478,7 @@ async fn unavailable_commit_confirmation_is_explicit_and_reconcile_reloads_autho
     )?);
     let count = Arc::new(AtomicUsize::new(0));
     let fault = Arc::new(AtomicUsize::new(0));
-    let core = DrasiLib::builder()
+    let core = lib_integration_tests::query_builder()
         .with_id("uncertain")
         .with_component_factories(registry(count.clone()))
         .with_configuration_store(Arc::new(FaultStore {
@@ -1459,7 +1530,7 @@ async fn management_crash_worker() -> Result<()> {
     let path = std::env::var_os("DRASI_MANAGEMENT_CRASH_PATH").expect("worker path");
     let phase: usize = std::env::var("DRASI_MANAGEMENT_CRASH_PHASE")?.parse()?;
     let store = Arc::new(RedbConfigurationStore::new(path, [31; 32])?);
-    let core = DrasiLib::builder()
+    let core = lib_integration_tests::query_builder()
         .with_id("crash")
         .with_component_factories(registry(Arc::new(AtomicUsize::new(0))))
         .with_configuration_store(Arc::new(FaultStore {
@@ -1574,7 +1645,7 @@ async fn blocked_creation_does_not_delay_durable_acceptance_and_cancelled_waits_
         entered: entered.clone(),
         release: release.clone(),
     }))?;
-    let core = DrasiLib::builder()
+    let core = lib_integration_tests::query_builder()
         .with_component_factories(factories)
         .with_configuration_store(store)
         .build()
@@ -1664,7 +1735,7 @@ async fn resource_recipe_changes_preserve_cleanup_ownership_and_retry_the_commit
         directory.path().join("resources.redb"),
         [11; 32],
     )?);
-    let core = DrasiLib::builder()
+    let core = lib_integration_tests::query_builder()
         .with_component_factories(factories)
         .with_configuration_store(store)
         .with_management_resources(Arc::new(Resources {
@@ -1720,9 +1791,10 @@ async fn desired_changes_preserve_direct_components_and_reject_implicit_adoption
         .service(Box::new(Service {
             descriptor: ComponentDescriptor::try_new(ComponentId::try_new("new")?, Vec::new())?,
             config: json!({"direct":true}),
+            start_gate: None,
         }))
         .build()?;
-    let core = DrasiLib::builder()
+    let core = lib_integration_tests::query_builder()
         .with_component_factories(registry(Arc::new(AtomicUsize::new(0))))
         .with_components(batch)
         .build()
@@ -1779,7 +1851,7 @@ async fn pending_managed_construction_allows_unrelated_admission_and_component_s
         entered: entered.clone(),
         release: Arc::new(tokio::sync::Notify::new()),
     }))?;
-    let core = DrasiLib::builder()
+    let core = lib_integration_tests::query_builder()
         .with_component_factories(factories)
         .build()
         .await?;
@@ -1796,6 +1868,7 @@ async fn pending_managed_construction_allows_unrelated_admission_and_component_s
                     Vec::new(),
                 )?,
                 config: json!({"unrelated":true}),
+                start_gate: None,
             }),
         ))),
     )

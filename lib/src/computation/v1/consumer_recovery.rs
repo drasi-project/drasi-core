@@ -21,6 +21,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use drasi_computation_contracts::{OutputReadError, QueryRecoveryHead, QueryRecoveryReader};
 use tokio::sync::Mutex;
 
 use super::{
@@ -104,10 +105,22 @@ impl ConsumerCheckpoint {
     }
 
     fn from_view(view: &QueryRecoveryView) -> Self {
+        Self::from_head(&view.head())
+    }
+
+    fn from_head(head: &QueryRecoveryHead) -> Self {
         Self {
-            sequence: view.snapshot.as_of_sequence,
-            generation: view.snapshot.generation,
-            identity: view.identity.clone(),
+            sequence: head.sequence,
+            generation: head.generation,
+            identity: head.identity.clone(),
+        }
+    }
+
+    fn head(&self) -> QueryRecoveryHead {
+        QueryRecoveryHead {
+            identity: self.identity.clone(),
+            sequence: self.sequence,
+            generation: self.generation,
         }
     }
 }
@@ -355,7 +368,13 @@ impl ConsumerProgressStore for StateStoreConsumerProgress {
 }
 
 pub struct ConsumerProgressResource(pub Arc<dyn ConsumerProgressStore>);
-pub struct QueryResultsResource(pub QueryResults);
+pub struct QueryResultsResource(pub Arc<dyn QueryRecoveryReader>);
+
+impl QueryResultsResource {
+    pub fn new(results: QueryResults) -> Self {
+        Self(Arc::new(results))
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsumerRecoveryPolicy {
@@ -438,7 +457,7 @@ fn read_cursor(
 }
 
 struct ReplayWakeup {
-    results: QueryResults,
+    results: Arc<dyn QueryRecoveryReader>,
     pending: Arc<AtomicBool>,
     cursor: Arc<RwLock<Option<ConsumerCheckpoint>>>,
 }
@@ -446,29 +465,27 @@ struct ReplayWakeup {
 impl WakeupSource for ReplayWakeup {
     async fn wait(&self) -> anyhow::Result<()> {
         loop {
-            let changed = self.results.notify.notified();
-            tokio::pin!(changed);
-            changed.as_mut().enable();
-            if self.pending.load(Ordering::Acquire) {
-                self.results.wait_recovery_ready().await?;
+            let after = if self.pending.load(Ordering::Acquire) {
+                None
+            } else {
+                read_cursor(&self.cursor)?.map(|cursor| cursor.head())
+            };
+            self.results.wait_recovery(after.as_ref()).await?;
+            if self.pending.load(Ordering::Acquire) || self.has_pending().await? {
                 return Ok(());
             }
-            if self.has_pending().await? {
-                return Ok(());
-            }
-            changed.await;
         }
     }
     async fn has_pending(&self) -> anyhow::Result<bool> {
         if self.pending.load(Ordering::Acquire) {
             return Ok(true);
         }
-        let view = match self.results.recovery_view(None) {
+        let head = match self.results.recovery_head().await {
             Ok(view) => view,
-            Err(QueryHistoryError::NotReady) => return Ok(false),
+            Err(OutputReadError::NotReady(_)) => return Ok(false),
             Err(error) => return Err(error.into()),
         };
-        Ok(read_cursor(&self.cursor)?.as_ref() != Some(&ConsumerCheckpoint::from_view(&view)))
+        Ok(read_cursor(&self.cursor)?.as_ref() != Some(&ConsumerCheckpoint::from_head(&head)))
     }
 }
 
@@ -477,7 +494,7 @@ impl WakeupSource for ReplayWakeup {
 pub struct QueryReplayTransformer {
     descriptor: ComponentDescriptor,
     query_id: String,
-    results: QueryResults,
+    results: Arc<dyn QueryRecoveryReader>,
     progress: Arc<dyn ConsumerProgressStore>,
     policy: ConsumerRecoveryPolicy,
     stream: StreamId,
@@ -491,6 +508,17 @@ impl QueryReplayTransformer {
         query_id: String,
         stream: StreamId,
         results: QueryResults,
+        progress: Arc<dyn ConsumerProgressStore>,
+        policy: ConsumerRecoveryPolicy,
+    ) -> Self {
+        Self::with_reader(id, query_id, stream, Arc::new(results), progress, policy)
+    }
+
+    pub fn with_reader(
+        id: ComponentId,
+        query_id: String,
+        stream: StreamId,
+        results: Arc<dyn QueryRecoveryReader>,
         progress: Arc<dyn ConsumerProgressStore>,
         policy: ConsumerRecoveryPolicy,
     ) -> Self {
@@ -547,19 +575,19 @@ impl QueryReplayTransformer {
     fn validate_envelope(
         &self,
         envelope: &super::ChangeEnvelope,
-        view: &QueryRecoveryView,
+        head: &QueryRecoveryHead,
     ) -> anyhow::Result<u64> {
         let identity = QueryRecoveryIdentity::from_envelope(envelope)?;
-        if identity != view.identity
+        if identity != head.identity
             || identity.query_id() != self.query_id
             || QueryChangeCodec::metadata(envelope)?.query_id != self.query_id
         {
             return Err(QueryIdentityError::Mismatch.into());
         }
         let generation = QueryChangeCodec::query_generation(envelope)?;
-        if generation != view.snapshot.generation {
+        if generation != head.generation {
             return Err(ConsumerRecoveryError::GenerationMismatch {
-                expected: view.snapshot.generation,
+                expected: head.generation,
                 actual: generation,
             }
             .into());
@@ -574,7 +602,7 @@ impl QueryReplayTransformer {
             .into());
         }
         let sequence = QueryChangeCodec::query_sequence(envelope)?;
-        if sequence == 0 || sequence > view.snapshot.as_of_sequence {
+        if sequence == 0 || sequence > head.sequence {
             return Err(ConsumerRecoveryError::InvalidInput(
                 "sequence lies outside committed producer output".into(),
             )
@@ -638,7 +666,7 @@ impl QueryReplayTransformer {
         &mut self,
         input: Option<&super::ChangeEnvelope>,
     ) -> anyhow::Result<Vec<OutputEnvelope>> {
-        self.results.wait_recovery_ready().await?;
+        let ready = self.results.wait_recovery(None).await?;
         let initial = self.pending.load(Ordering::Acquire);
         let previous = if initial {
             self.progress.load(&self.query_id).await?
@@ -649,6 +677,26 @@ impl QueryReplayTransformer {
             previous.validate(&self.query_id)?;
         }
         let input_sequence = input.map(QueryChangeCodec::query_sequence).transpose()?;
+        if !initial {
+            if let (Some(previous), Some(input)) = (&previous, input) {
+                if previous.identity == ready.identity
+                    && previous.generation == ready.generation
+                    && previous.sequence <= ready.sequence
+                {
+                    let sequence = self.validate_envelope(input, &ready)?;
+                    if sequence <= previous.sequence {
+                        return Ok(Vec::new());
+                    }
+                    if previous.sequence.checked_add(1) == Some(sequence) {
+                        let output = self.forward(input).await?;
+                        let mut next = previous.clone();
+                        next.sequence = sequence;
+                        self.publish_cursor(&ready, next).await?;
+                        return Ok(vec![output]);
+                    }
+                }
+            }
+        }
         let replay_after = previous.as_ref().and_then(|previous| {
             (initial
                 || input_sequence.is_none()
@@ -658,12 +706,13 @@ impl QueryReplayTransformer {
                 }))
             .then_some(previous.sequence)
         });
-        let view = self.results.recovery_view(replay_after)?;
+        let view = self.results.recovery_view(replay_after).await?;
+        let head = view.head();
         if view.identity.query_id() != self.query_id {
             return Err(QueryIdentityError::Mismatch.into());
         }
         if let Some(input) = input {
-            self.validate_envelope(input, &view)?;
+            self.validate_envelope(input, &head)?;
         }
         let target = ConsumerCheckpoint::from_view(&view);
         let mut next = target.clone();
@@ -732,7 +781,7 @@ impl QueryReplayTransformer {
                     if let Some(history) = &view.retained {
                         let mut last = None;
                         for envelope in history {
-                            let sequence = self.validate_envelope(envelope, &view)?;
+                            let sequence = self.validate_envelope(envelope, &head)?;
                             if last.is_some_and(|last: u64| last.checked_add(1) != Some(sequence)) {
                                 return Err(ConsumerRecoveryError::InvalidInput(
                                     "retained suffix has an interior gap".into(),
@@ -800,7 +849,7 @@ impl QueryReplayTransformer {
                             }
                         }
                     } else if let Some(input) = input {
-                        let sequence = self.validate_envelope(input, &view)?;
+                        let sequence = self.validate_envelope(input, &head)?;
                         if previous.sequence.checked_add(1) != Some(sequence) {
                             return Err(ConsumerRecoveryError::Gap {
                                 handled: previous.sequence,
@@ -814,10 +863,17 @@ impl QueryReplayTransformer {
                 }
             }
         }
-        let current = self.results.recovery_view(None)?;
-        if current.identity != view.identity
-            || current.snapshot.generation != view.snapshot.generation
-        {
+        self.publish_cursor(&head, next).await?;
+        Ok(output)
+    }
+
+    async fn publish_cursor(
+        &self,
+        head: &QueryRecoveryHead,
+        next: ConsumerCheckpoint,
+    ) -> anyhow::Result<()> {
+        let current = self.results.recovery_head().await?;
+        if current.identity != head.identity || current.generation != head.generation {
             return Err(QueryIdentityError::Mismatch.into());
         }
         *self
@@ -825,7 +881,7 @@ impl QueryReplayTransformer {
             .write()
             .map_err(|_| anyhow::anyhow!("consumer replay cursor poisoned"))? = Some(next);
         self.pending.store(false, Ordering::Release);
-        Ok(output)
+        Ok(())
     }
 }
 
@@ -936,21 +992,33 @@ impl ComputationComponent for CheckpointedSink {
     fn requires_readiness_confirmation(&self) -> bool {
         self.inner.requires_readiness_confirmation()
     }
+    async fn initialize(&mut self) -> anyhow::Result<()> {
+        self.inner.initialize().await
+    }
+    async fn dispose(&mut self) -> anyhow::Result<()> {
+        self.inner.dispose().await
+    }
+    async fn pause_processing(&mut self) -> anyhow::Result<()> {
+        self.inner.pause_processing().await
+    }
+    async fn resume_processing(&mut self) -> anyhow::Result<()> {
+        self.inner.resume_processing().await
+    }
     async fn start(&mut self) -> anyhow::Result<()> {
         self.inner.start().await
     }
     async fn stop(&mut self) -> anyhow::Result<()> {
         self.inner.stop().await
     }
-    async fn reconfigure(&mut self, context: super::ConstructionContext) -> anyhow::Result<()> {
-        self.inner.reconfigure(context).await?;
+    async fn apply_update(&mut self, context: super::ComponentUpdateContext) -> anyhow::Result<()> {
+        self.inner.apply_update(context).await?;
         anyhow::ensure!(
             self.inner.recovery_contract().delivery.is_none(),
             "checkpointed sink cannot forward retirement proof that excludes its progress store"
         );
         Ok(())
     }
-    async fn deprovision(&mut self) -> anyhow::Result<()> {
+    async fn delete_owned_resources(&mut self) -> anyhow::Result<()> {
         anyhow::bail!("checkpointed sink cannot delete its inner state without scoped progress-store deletion")
     }
 }
@@ -1225,7 +1293,7 @@ impl super::ComponentFactory for QueryReplayFactory {
                 )))
             }
         };
-        let instance = QueryReplayTransformer::new(
+        let instance = QueryReplayTransformer::with_reader(
             context.component_id.clone(),
             query.to_owned(),
             StreamId::try_new(stream).map_err(super::ComponentCreationError::terminal)?,
@@ -1332,7 +1400,7 @@ mod capability_tests {
         assert!(plane.is_ready(&id, generation));
         assert!(wrapped.handle_batch(Vec::new()).await.is_err());
         assert!(wrapped
-            .deprovision()
+            .delete_owned_resources()
             .await
             .unwrap_err()
             .to_string()

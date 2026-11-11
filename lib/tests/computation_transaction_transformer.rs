@@ -16,7 +16,7 @@
 #![cfg(feature = "computation-rocksdb-tests")]
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::VecDeque,
     num::NonZeroUsize,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -2482,7 +2482,10 @@ async fn query_inputs_use_query_identity_and_position_and_can_feed_another_trans
     gap.stop().await.expect("stop");
 
     query.stop().await.expect("stop before reset");
-    query.deprovision().await.expect("reset query state");
+    query
+        .delete_owned_resources()
+        .await
+        .expect("explicitly delete query state");
     query.start().await.expect("restart reset query");
     let reset = query.transform(input(1, 3)).await.expect("reset output");
     assert_ne!(

@@ -25,10 +25,11 @@
 //! 6. Integration with `DtoMapper` and `ValueResolver`
 //! 7. Clean drop of plugin and provider instances
 //!
-//! **Prerequisites**: Build the file secret store cdylib before running:
+//! **Prerequisites**: Build and copy the file secret store cdylib before running.
+//! The fixtures honor `CARGO_TARGET_DIR` and `DRASI_HOST_TEST_PLUGINS_DIR`.
 //!
 //! ```sh
-//! cargo build --lib -p drasi-secret-store-file --features drasi-secret-store-file/dynamic-plugin
+//! make build-test-plugins
 //! ```
 //!
 //! Then run with:
@@ -47,15 +48,9 @@ use drasi_plugin_sdk::mapper::DtoMapper;
 use drasi_plugin_sdk::resolver::{register_secret_resolver, ValueResolver};
 use drasi_plugin_sdk::ConfigValue;
 
-/// Locate the workspace target/debug/plugins directory.
-fn plugin_dir() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("Cannot find workspace root");
-    workspace_root.join("target").join("debug").join("plugins")
-}
+#[path = "fixtures/plugin_directory.rs"]
+mod plugin_directory;
+use plugin_directory::plugin_dir;
 
 /// Get the platform-specific plugin filename.
 fn plugin_filename(crate_name: &str) -> String {

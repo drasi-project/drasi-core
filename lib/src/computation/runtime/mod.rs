@@ -13,15 +13,22 @@
 // limitations under the License.
 
 mod component;
+mod construction;
 mod events;
 #[cfg(test)]
 mod group_lifecycle_tests;
 mod inspection;
+mod local;
+pub(crate) mod managed;
+pub(crate) use local::{LocalConstructor, LocalDefinition};
 pub(crate) mod native_query;
 mod query_assembly;
 mod reaction;
+mod reaction_creation;
 mod snapshot;
 mod source;
+mod source_creation;
+pub(crate) use reaction_creation::ReactionConstructor;
 #[cfg(test)]
 mod tests;
 
@@ -31,11 +38,12 @@ mod tests;
 use super::instance::ComputationHandle;
 use super::v1::*;
 use crate::{
-    config::{QueryConfig, RuntimeConfig},
+    config::{AssignedQueryConfig as QueryConfig, RuntimeConfig},
     metrics::{LifecycleMetrics, ReactionMetricsSnapshot},
     queries::Query as QueryTrait,
     ComponentStatus, DrasiLib, Reaction, Source,
 };
+pub(crate) use component::RuntimeInstance as RuntimeDeclaration;
 use component::{RuntimeComponent, RuntimeFactory, RuntimeInstance};
 pub(crate) use native_query::NativeQuery;
 use reaction::ReactionInstance;
@@ -47,11 +55,34 @@ use std::{
         Arc, OnceLock, Weak,
     },
 };
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::{watch, Mutex};
 
-type SourceRegistration = (Box<dyn Source>, HashMap<String, String>);
-type ReactionRegistration = (Box<dyn Reaction>, HashMap<String, String>);
+type SourceRegistration = (String, Box<dyn Source>, HashMap<String, String>);
+type ReactionRegistration = (String, Box<dyn Reaction>, HashMap<String, String>);
+pub(crate) type NamedReactionRegistration = (
+    String,
+    Option<ComponentId>,
+    Vec<crate::config::ComponentReference>,
+    bool,
+    reaction_creation::ReactionConstructor,
+);
+pub(crate) type AsyncSourceRegistration = (
+    String,
+    Option<ComponentId>,
+    bool,
+    source_creation::SourceConstructor,
+);
 type BootstrapRegistration = (String, String, HashMap<String, serde_json::Value>);
+
+pub(crate) struct OrdinaryDeclarations {
+    pub(crate) sources: Vec<SourceRegistration>,
+    pub(crate) async_sources: Vec<AsyncSourceRegistration>,
+    pub(crate) reactions: Vec<ReactionRegistration>,
+    pub(crate) reaction_factories: Vec<NamedReactionRegistration>,
+    pub(crate) bootstraps: Vec<BootstrapRegistration>,
+    pub(crate) native: Vec<Arc<super::instance::PendingComponents>>,
+    pub(crate) native_factories: Vec<super::components::ComponentBatchDeclaration>,
+}
 
 pub(crate) fn map_addition_error(kind: &str, id: &str, error: anyhow::Error) -> crate::DrasiError {
     let context = crate::DrasiError::operation_failed(kind, id, "add", format!("{error:#}"));
@@ -60,22 +91,37 @@ pub(crate) fn map_addition_error(kind: &str, id: &str, error: anyhow::Error) -> 
 
 pub(crate) async fn build(
     config: Arc<RuntimeConfig>,
-    sources: Vec<SourceRegistration>,
-    reactions: Vec<ReactionRegistration>,
-    bootstraps: Vec<BootstrapRegistration>,
+    declarations: OrdinaryDeclarations,
     wal: Option<Arc<dyn crate::wal::WalProvider>>,
     observability: crate::observability::RuntimeObservability,
+    query_factory: Option<Arc<dyn ComponentFactory>>,
+    management: crate::management::ManagementOptions,
     #[cfg(feature = "test-support")] test_controls: BTreeMap<
         String,
         crate::test_support::QueryTestControl,
     >,
 ) -> crate::Result<DrasiLib> {
+    let OrdinaryDeclarations {
+        sources,
+        async_sources,
+        reactions,
+        reaction_factories,
+        bootstraps,
+        native,
+        native_factories,
+    } = declarations;
     let mut core = DrasiLib::new_with_observability(
         config.clone(),
         DrasiLib::default_middleware_registry(),
         wal,
         observability,
     );
+    for batch in &native {
+        core.instance_graph.retain_pending(batch.clone());
+    }
+    if let Some(factory) = query_factory {
+        core.register_query_factory(factory)?;
+    }
     #[cfg(feature = "test-support")]
     core.computation_runtime
         .test_controls
@@ -85,8 +131,8 @@ pub(crate) async fn build(
         let mut recipes = BTreeMap::new();
         for (source, kind, properties) in bootstraps {
             anyhow::ensure!(
-                source == crate::sources::COMPONENT_GRAPH_SOURCE_ID
-                    || sources.iter().any(|(instance, _)| instance.id() == source),
+                sources.iter().any(|(name, _, _)| name == &source)
+                    || async_sources.iter().any(|(name, _, _, _)| name == &source),
                 "bootstrap recipe references unknown source '{source}'"
             );
             anyhow::ensure!(
@@ -99,32 +145,108 @@ pub(crate) async fn build(
                 "duplicate bootstrap recipe for source '{source}'"
             );
         }
-        core.initialize().await?;
-        let runtime = core.computation_runtime.clone();
-        let source = crate::sources::component_graph_source::ComponentGraphSource::new(
-            core.component_event_broadcast_tx.clone(),
-            config.id.clone(),
-            core.component_graph(),
-        )?;
-        runtime
-            .add_source_with_recipe(
-                Box::new(source),
-                HashMap::new(),
-                recipes.remove(crate::sources::COMPONENT_GRAPH_SOURCE_ID),
-                false,
-            )
-            .await?;
-        for (source, metadata) in sources {
-            let recipe = recipes.remove(source.id());
-            runtime
-                .add_source_with_recipe(source, metadata, recipe, false)
+        core.initialize_with_management(management).await?;
+        for batch in &native {
+            batch.attach_control(core.instance_graph.get().await?.control());
+        }
+        let mut definitions = Vec::new();
+        for (name, source, metadata) in sources {
+            let recipe = recipes.remove(&name);
+            definitions.push(LocalDefinition {
+                name: ComponentName::try_new(name)?,
+                id: Some(ComponentId::try_new(source.id())?),
+                auto_start: source.auto_start(),
+                inputs: Vec::new(),
+                constructor: LocalConstructor::SourceObject(source),
+                metadata,
+                bootstrap: recipe,
+            });
+        }
+        for (name, requested_id, auto_start, constructor) in async_sources {
+            let bootstrap = recipes.remove(&name);
+            definitions.push(LocalDefinition {
+                name: ComponentName::try_new(name)?,
+                id: requested_id,
+                auto_start,
+                inputs: Vec::new(),
+                constructor: LocalConstructor::Source(constructor),
+                metadata: HashMap::new(),
+                bootstrap,
+            });
+        }
+        for (name, reaction, metadata) in reactions {
+            let inputs = reaction
+                .query_ids()
+                .into_iter()
+                .map(|id| {
+                    Ok(crate::config::ComponentReference::by_id(
+                        ComponentId::try_new(id)?,
+                    ))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            definitions.push(LocalDefinition {
+                name: ComponentName::try_new(name)?,
+                id: Some(ComponentId::try_new(reaction.id())?),
+                auto_start: reaction.auto_start(),
+                inputs,
+                constructor: LocalConstructor::ReactionObject(reaction),
+                metadata,
+                bootstrap: None,
+            });
+        }
+        for (name, requested_id, inputs, auto_start, factory) in reaction_factories {
+            definitions.push(LocalDefinition {
+                name: ComponentName::try_new(name)?,
+                id: requested_id,
+                auto_start,
+                inputs,
+                constructor: LocalConstructor::Reaction(factory),
+                metadata: HashMap::new(),
+                bootstrap: None,
+            });
+        }
+        if !definitions.is_empty()
+            || !config.queries.is_empty()
+            || !native.is_empty()
+            || !native_factories.is_empty()
+        {
+            let owner = core
+                .management
+                .get()
+                .ok_or_else(|| anyhow::anyhow!("configuration owner is unavailable"))?;
+            let receipt = owner
+                .accept_auto(crate::management::AuthoringOperation::Local {
+                    definitions,
+                    queries: config.queries.clone(),
+                    native,
+                    native_factories,
+                })
                 .await?;
-        }
-        for query in &config.queries {
-            runtime.add_query(query.clone(), false).await?;
-        }
-        for (reaction, metadata) in reactions {
-            runtime.add_reaction(reaction, metadata, false).await?;
+            if let Some(creation) = receipt.creation {
+                for component in creation.components {
+                    owner.wait_declared(&component.id).await?;
+                }
+            }
+            for record in &owner.configuration()?.desired.ordinary {
+                if matches!(
+                    record.component,
+                    crate::management::OrdinaryComponent::Query { .. }
+                ) {
+                    for input in record.references()? {
+                        if let Some(id) = input.as_id() {
+                            if let Ok(source) =
+                                core.computation_runtime.source_host(id.as_str()).await
+                            {
+                                if let Err(error) = source.wait_prepared().await {
+                                    log::warn!(
+                                        "Initial source {id} construction failed: {error:#}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         core.state_guard.mark_initialized();
         Ok::<_, anyhow::Error>(())
@@ -147,30 +269,6 @@ impl Value {
             Self::Source(value) => value.clone(),
             Self::Reaction(value) => value.clone(),
         }
-    }
-    fn auto_start(&self) -> bool {
-        match self {
-            Self::Source(value) => value.source.auto_start(),
-            Self::Reaction(value) => value.reaction.auto_start(),
-        }
-    }
-
-    fn subscription_inputs(&self) -> anyhow::Result<Vec<ComponentId>> {
-        let inputs = match self {
-            Self::Source(_) => Vec::new(),
-            Self::Reaction(reaction) => reaction.query_ids.clone(),
-        };
-        let own_id = self.instance().id().to_owned();
-        inputs
-            .into_iter()
-            .map(|input| {
-                anyhow::ensure!(
-                    input != own_id,
-                    "component '{own_id}' cannot subscribe to itself"
-                );
-                ComponentId::try_new(input).map_err(anyhow::Error::from)
-            })
-            .collect()
     }
 }
 #[derive(Clone)]
@@ -325,12 +423,11 @@ pub(crate) struct Runtime {
     config: Arc<RuntimeConfig>,
     services: LegacyPluginServices,
     middleware: Arc<drasi_core::middleware::MiddlewareTypeRegistry>,
+    query_factory: OnceLock<Arc<dyn ComponentFactory>>,
     events: Arc<events::Events>,
     parent: OnceLock<ComputationHandle>,
     instance_owner: OnceLock<Weak<super::instance::InstanceGraph>>,
-    // Retain interrupted/unsubmitted additions until awaited cleanup. This is
-    // never consulted for membership, status, or installed resource lookup.
-    cleanup_candidates: RwLock<BTreeMap<u64, Record>>,
+    configuration_owner: OnceLock<Weak<OnceLock<crate::management::Management>>>,
     mutations: Mutex<()>,
     next_instance: AtomicU64,
     changed: watch::Sender<u64>,
@@ -341,6 +438,41 @@ pub(crate) struct Runtime {
 }
 
 impl Runtime {
+    pub(crate) fn public_control(self: &Arc<Self>) -> anyhow::Result<GraphControl> {
+        let owner = Arc::downgrade(self);
+        let rename_owner = owner.clone();
+        Ok(self
+            .control()?
+            .with_dependency_refresh(move || {
+                let owner = owner.clone();
+                Box::pin(async move {
+                    let owner = owner.upgrade().ok_or(GraphError::ControllerClosed)?;
+                    owner
+                        .refresh_pending_query_inputs()
+                        .await
+                        .map_err(|source| GraphError::ReferenceResolution { source })
+                })
+            })
+            .with_name_editor(move |id, generation, name| {
+                let owner = rename_owner.clone();
+                Box::pin(async move {
+                    owner
+                        .upgrade()
+                        .ok_or(GraphError::ControllerClosed)?
+                        .rename_owned_at(id, generation, name)
+                        .await
+                        .map_err(|source| GraphError::ReferenceResolution { source })
+                })
+            }))
+    }
+
+    pub(crate) fn public_handle(
+        self: &Arc<Self>,
+        handle: ComponentHandle,
+    ) -> anyhow::Result<ComponentHandle> {
+        Ok(handle.with_control(self.public_control()?))
+    }
+
     pub(crate) fn new(
         config: Arc<RuntimeConfig>,
         middleware: Arc<drasi_core::middleware::MiddlewareTypeRegistry>,
@@ -363,10 +495,11 @@ impl Runtime {
             config,
             services,
             middleware,
+            query_factory: OnceLock::new(),
             events: events::Events::new(),
             parent: OnceLock::new(),
             instance_owner: OnceLock::new(),
-            cleanup_candidates: RwLock::new(BTreeMap::new()),
+            configuration_owner: OnceLock::new(),
             mutations: Mutex::new(()),
             next_instance: AtomicU64::new(1),
             changed: watch::channel(0).0,
@@ -435,6 +568,7 @@ impl Runtime {
                 )?;
         }
         let mut graph = builder.build()?;
+        graph.set_component_identity_policy(self.config.allow_external_component_ids);
         let observer: Arc<dyn PublicationObserver> = self.events.clone();
         graph.inspector().observe(&observer);
         graph.reserve_component_id(&self.config.id);
@@ -458,21 +592,44 @@ impl Runtime {
         self.services.clone()
     }
 
+    pub(crate) fn query_factory(&self) -> Option<Arc<dyn ComponentFactory>> {
+        self.query_factory.get().cloned()
+    }
+
+    pub(crate) fn register_query_factory(
+        &self,
+        factory: Arc<dyn ComponentFactory>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            factory.descriptor().role == ComponentRole::Transformer
+                && factory.query_authoring().is_some(),
+            "selected factory does not support ordinary query authoring"
+        );
+        if let Err(requested) = self.query_factory.set(factory) {
+            anyhow::ensure!(self.query_factory.get().is_some_and(|current| Arc::ptr_eq(current, &requested)),
+                "query factory is already registered; create a new instance to select another implementation");
+        }
+        Ok(())
+    }
+
     pub(crate) async fn bind_batch_source_dependencies(
         &self,
         batch: &mut ComponentBatch,
     ) -> anyhow::Result<()> {
         let mut subscriptions = BTreeSet::new();
         let mut records = None;
+        let publication = self.control()?.registry_snapshot();
         for node in &batch.definition.components {
             let ComponentConstruction::Factory(spec) = &node.construction else {
                 continue;
             };
-            if spec.implementation
-                != ContinuousQueryFactory::default()
-                    .descriptor()
-                    .implementation
-            {
+            let factory = batch
+                .bindings
+                .factories
+                .get(&spec.implementation)
+                .cloned()
+                .or_else(|| publication.factory(&spec.implementation));
+            if factory.is_none_or(|factory| factory.query_authoring().is_none()) {
                 continue;
             }
             let config = match spec.configuration.get("query_config") {
@@ -491,13 +648,16 @@ impl Runtime {
                 _ => continue,
             };
             for source in config.inputs {
+                let Some(producer) = source.component.as_id() else {
+                    continue;
+                };
                 if batch
                     .definition
                     .relationships
                     .iter()
                     .chain(batch.definition.boundary_relationships.iter())
                     .any(|relationship| {
-                        relationship.definition.from.component.as_str() == source.component
+                        &relationship.definition.from.component == producer
                             && relationship.definition.to.component == *node.descriptor.id()
                     })
                 {
@@ -505,7 +665,7 @@ impl Runtime {
                 }
                 if !spec.dependencies.contains_key("declaration") {
                     let resource =
-                        ComputationPipelineBuilder::source_resource_id(&source.component)?;
+                        ComputationPipelineBuilder::source_resource_id(producer.as_str())?;
                     let Some(binding) = batch.bindings.resources.get(&resource) else {
                         continue;
                     };
@@ -519,7 +679,7 @@ impl Runtime {
                     let Some(record) = records
                         .as_ref()
                         .expect("source records were loaded")
-                        .get(&source.component)
+                        .get(producer.as_str())
                     else {
                         continue;
                     };
@@ -527,15 +687,17 @@ impl Runtime {
                         continue;
                     };
                     // A resource-owned or external host has no independent source node.
-                    if !Arc::ptr_eq(&host.source()?, &owner.borrowed.source()?) {
+                    if !Arc::ptr_eq(&host, &owner.borrowed)
+                        && !Arc::ptr_eq(&host.source()?, &owner.borrowed.source()?)
+                    {
                         continue;
                     }
                 }
-                let producer = ComponentId::try_new(source.component.as_str())?;
+                let producer = producer.clone();
                 subscriptions.insert((producer.clone(), node.descriptor.id().clone()));
                 let reader = ComputationPipelineBuilder::source_component_id(
                     node.descriptor.id().as_str(),
-                    &source.component,
+                    producer.as_str(),
                 )?;
                 if batch
                     .definition
@@ -635,14 +797,16 @@ impl Runtime {
                     anyhow::anyhow!("native component {node} has no unique instance binding")
                 })?;
             let owner = publication.resource(resource)?.get::<RuntimeInstance>()?;
-            let record = owner.record()?;
+            let mut record = owner.record()?;
+            if let Some(metadata) = record.value.instance().metadata() {
+                record.metadata.extend(metadata);
+            }
             anyhow::ensure!(
                 &record.node == node
                     && &record.resource == resource
                     && record_token(&publication.desired, node) == Some(record.token),
                 "native component {node} does not match its graph-owned instance"
             );
-            record.owner.installed.store(true, Ordering::Release);
             records.insert(record.value.instance().id().to_owned(), record);
         }
         Ok(records)
@@ -651,16 +815,6 @@ impl Runtime {
     async fn current_records(&self) -> anyhow::Result<BTreeMap<String, Record>> {
         self.records_at(&self.parent()?.control().registry_snapshot())
             .await
-    }
-
-    async fn discard_uninstalled(&self, record: &Record) -> anyhow::Result<()> {
-        if record_token(&self.parent()?.control().desired_snapshot(), &record.node)
-            != Some(record.token)
-        {
-            record.owner.shutdown().await?;
-            self.cleanup_candidates.write().await.remove(&record.token);
-        }
-        Ok(())
     }
 
     async fn reaction_queries(&self, ids: &[String]) -> anyhow::Result<()> {
@@ -689,7 +843,9 @@ impl Runtime {
         let api = publication
             .query_api(&ComponentId::try_new(id)?)
             .ok_or_else(|| anyhow::anyhow!("query '{id}' has no result subscription capability"))?;
-        Self::native_result_catalog(&publication, id, &api)?.subscribe_query(id)
+        Self::native_result_catalog(&publication, id, &api)?
+            .subscribe_query(id)
+            .await
     }
 
     async fn link_query_output(&self, id: &str) -> anyhow::Result<()> {
@@ -743,337 +899,191 @@ impl Runtime {
         anyhow::bail!("Query '{id}' has no configured result subscription outlet");
     }
 
-    async fn register(
-        &self,
-        value: Value,
-        definition: serde_json::Value,
-        metadata: HashMap<String, String>,
-        bootstrap_recipe: Option<crate::config::BootstrapSnapshot>,
-        activate: bool,
-    ) -> anyhow::Result<ComponentHandle> {
-        let component = value.instance();
-        let id = component.id().to_owned();
-        let number = self.next_token()?;
-        let node = ComponentId::try_new(id.as_str())?;
-        let resource = ResourceId::try_new(format!("instance/{number}"))?;
-        let instance = Arc::new(RuntimeInstance::new(
-            component.clone(),
-            number,
-            &self.config.id,
-        ));
-        let control = self.parent()?.control();
-        let factory = self.factory.clone();
-        let mut descriptor = ComponentDescriptor::try_new(node.clone(), vec![])?
-            .with_semantic_kind(match &value {
-                Value::Source(_) => ComponentSemanticKind::Source,
-                Value::Reaction(_) => ComponentSemanticKind::Reaction,
-            });
-        let mut validation_error = None;
-        if matches!(&value, Value::Source(_) | Value::Reaction(_)) {
-            if let (Some(id), Some(version)) =
-                (metadata.get("pluginId"), metadata.get("pluginVersion"))
-            {
-                match descriptor.clone().with_plugin_identity(PluginIdentity {
-                    id: Arc::from(id.as_str()),
-                    version: Arc::from(version.as_str()),
-                }) {
-                    Ok(declaration) => descriptor = declaration,
-                    Err(error) => {
-                        validation_error = Some(Arc::new(GraphError::Validation {
-                            component: node.clone(),
-                            source: error.into(),
-                        }));
-                    }
-                }
-            }
-        }
-        let dependencies: BTreeMap<_, _> = [(Arc::from("instance"), vec![resource.clone()])]
-            .into_iter()
-            .chain(self.services.dependencies())
-            .collect();
-        let spec = ComponentSpecification {
-            descriptor,
-            role: ComponentRole::Service,
-            completion: None,
-            implementation: factory.descriptor().implementation.clone(),
-            configuration_version: 1,
-            configuration: BTreeMap::from([
-                (
-                    Arc::from("id"),
-                    ConfigurationValue::Literal(id.clone().into()),
-                ),
-                (
-                    Arc::from("kind"),
-                    ConfigurationValue::Literal(component.kind().into()),
-                ),
-                (
-                    Arc::from("definition"),
-                    ConfigurationValue::Literal(definition),
-                ),
-                (
-                    Arc::from("record_token"),
-                    ConfigurationValue::Literal(number.into()),
-                ),
-            ]),
-            dependencies,
-        };
-        let desired = DesiredComponent {
-            descriptor: spec.descriptor.clone(),
-            role: ComponentRole::Service,
-            completion: None,
-            streams: BTreeMap::new(),
-            lifecycle: LifecyclePolicy {
-                auto_start: value.auto_start(),
-            },
-            input_merge: InputMergePolicy::default(),
-            construction: ComponentConstruction::Factory(spec),
-        };
-        let activation_requested = activate && value.auto_start();
-        let record = Record {
-            token: number,
-            node,
-            resource: resource.clone(),
-            value,
-            owner: instance.clone(),
-            metadata,
-            bootstrap_recipe,
-            initial_status: ComponentStatus::Added,
-            activation_requested,
-        };
-        record.owner.bind_record(record.data())?;
-        self.cleanup_candidates
-            .write()
-            .await
-            .insert(number, record.clone());
-        let result = async {
-            let mut bindings = TopologyBindings {
-                defer_activation: !activate,
-                validation_error,
-                ..Default::default()
-            };
-            match record.value.subscription_inputs() {
-                Ok(inputs) => {
-                    bindings.subscriptions = inputs
-                        .into_iter()
-                        .map(|from| (from, record.node.clone()))
-                        .collect();
-                }
-                Err(error) => {
-                    bindings.validation_error = Some(Arc::new(GraphError::Validation {
-                        component: record.node.clone(),
-                        source: error,
-                    }));
-                }
-            }
-            bindings.factories.register(factory)?;
-            bindings.resources.insert(
-                resource.clone(),
-                ResourceHandle::new(ResourceRole::Component, instance.clone())
-                    .with_cleanup(instance),
-            );
-            if let Value::Source(source) = &record.value {
-                let source_resource =
-                    ComputationPipelineBuilder::source_resource_id(source.source.id())?;
-                let publication = control.registry_snapshot();
-                if publication
-                    .desired
-                    .resources
-                    .get(&source_resource)
-                    .is_some_and(|specification| {
-                        specification.role == ResourceRole::LegacySource
-                            && specification.ownership == ResourceOwnership::Borrowed
-                    })
-                    && publication
-                        .observed
-                        .resources
-                        .get(&source_resource)
-                        .is_some_and(|state| {
-                            state.realization == ResourceRealization::Pending
-                                && state.failure.is_none()
-                        })
-                {
-                    bindings
-                        .resources
-                        .insert(source_resource, source.borrowed.resource());
-                }
-            }
-            let handle = control
-                .add_component(ComponentAddition {
-                    definition: desired,
-                    resources: vec![ResourceSpecification {
-                        id: resource.clone(),
-                        role: ResourceRole::Component,
-                        ownership: ResourceOwnership::Graph,
-                        binding: Arc::from(format!("{}:{id}", component.kind())),
-                    }],
-                    bindings,
-                })
-                .await?;
-            record.owner.installed.store(true, Ordering::Release);
-            Ok::<_, anyhow::Error>(handle)
-        }
-        .await;
-        self.notify();
-        match result {
-            Ok(handle) => Ok(handle),
-            Err(error) => {
-                if matches!(
-                    error.downcast_ref::<GraphError>(),
-                    Some(GraphError::AdditionRejected { .. })
-                ) {
-                    record.owner.rejection_owned.store(true, Ordering::Release);
-                } else if let Err(cleanup) = self.discard_uninstalled(&record).await {
-                    return Err(error.context(crate::error::OperationFailures::new(
-                        "addition cleanup also failed",
-                        vec![cleanup],
-                    )));
-                }
-                Err(error)
-            }
-        }
-    }
-
     pub(crate) async fn add_source(
         self: &Arc<Self>,
+        name: ComponentName,
         source: Box<dyn Source>,
         metadata: HashMap<String, String>,
         start: bool,
     ) -> anyhow::Result<ComponentHandle> {
-        self.add_source_with_recipe(source, metadata, None, start)
+        self.add_source_with_recipe(name, source, metadata, None, start, false)
             .await
+    }
+
+    pub(crate) async fn create_source(
+        self: &Arc<Self>,
+        name: ComponentName,
+        auto_start: bool,
+        factory: impl FnOnce(ComponentId) -> anyhow::Result<Box<dyn Source>> + Send + 'static,
+    ) -> anyhow::Result<ComponentHandle> {
+        self.create_source_async(
+            name,
+            None,
+            auto_start,
+            Box::new(move |id| Box::pin(async move { Ok((factory(id)?, HashMap::new())) })),
+            false,
+        )
+        .await
+    }
+
+    pub(crate) async fn create_source_async(
+        self: &Arc<Self>,
+        name: ComponentName,
+        requested_id: Option<ComponentId>,
+        auto_start: bool,
+        constructor: source_creation::SourceConstructor,
+        _start: bool,
+    ) -> anyhow::Result<ComponentHandle> {
+        self.accept_local(LocalDefinition {
+            name,
+            id: requested_id,
+            auto_start,
+            inputs: Vec::new(),
+            constructor: LocalConstructor::Source(constructor),
+            metadata: HashMap::new(),
+            bootstrap: None,
+        })
+        .await
     }
 
     async fn add_source_with_recipe(
         self: &Arc<Self>,
+        name: ComponentName,
         source: Box<dyn Source>,
         metadata: HashMap<String, String>,
         bootstrap_recipe: Option<crate::config::BootstrapSnapshot>,
-        start: bool,
+        _start: bool,
+        created: bool,
     ) -> anyhow::Result<ComponentHandle> {
-        self.control()?.require_configuration_write()?;
-        let mutation = self.mutations.lock().await;
-        let id = source.id().to_owned();
+        anyhow::ensure!(
+            !created,
+            "eager library-owned source construction is not supported"
+        );
+        let id = ComponentId::try_new(source.id())?;
         let mut meta = metadata;
         meta.entry("kind".into())
             .or_insert_with(|| source.type_name().to_owned());
         meta.entry("autoStart".into())
             .or_insert_with(|| source.auto_start().to_string());
-        ComponentId::try_new(id)?;
-        let source = SourceInstance::new(
-            source,
-            self.services.clone(),
-            self.changed.clone(),
-            self.control()?,
-            Arc::downgrade(self),
-        );
-        let handle = self
-            .register(
-                Value::Source(source.clone()),
-                serde_json::json!({"auto_start":source.source.auto_start()}),
-                meta,
-                bootstrap_recipe,
-                start,
-            )
-            .await?;
-        drop(mutation);
-        self.notify();
-        Ok(handle)
+        let auto_start = source.auto_start();
+        self.accept_local(LocalDefinition {
+            name,
+            id: Some(id),
+            auto_start,
+            inputs: Vec::new(),
+            constructor: LocalConstructor::SourceObject(source),
+            metadata: meta,
+            bootstrap: bootstrap_recipe,
+        })
+        .await
     }
 
     pub(crate) async fn add_query(
         self: &Arc<Self>,
-        config: QueryConfig,
-        start: bool,
+        config: crate::config::QueryConfig,
+        _start: bool,
     ) -> anyhow::Result<ComponentHandle> {
-        self.add_query_definition(config, start).await
+        let owner = self.configuration_owner()?;
+        let owner = owner
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("configuration owner is not initialized"))?;
+        let definition = crate::management::OrdinaryComponentDefinition::query(config)?;
+        let receipt = owner
+            .accept_auto(crate::management::AuthoringOperation::Definitions(
+                crate::management::ConfigurationRequest::adding([
+                    crate::management::NewComponentDefinition::Ordinary(definition),
+                ]),
+            ))
+            .await?;
+        let id = receipt
+            .creation
+            .as_ref()
+            .and_then(|creation| creation.components.first())
+            .ok_or_else(|| anyhow::anyhow!("accepted query has no identity assignment"))?
+            .id
+            .clone();
+        owner.wait_declared(&id).await?;
+        self.component_handle(&id)
     }
-    pub(crate) async fn declare_query(self: &Arc<Self>, config: QueryConfig) -> anyhow::Result<()> {
-        self.add_query_definition(config, false).await.map(|_| ())
-    }
-    async fn add_query_definition(
+    pub(crate) async fn declare_query(
         self: &Arc<Self>,
-        config: QueryConfig,
-        start: bool,
-    ) -> anyhow::Result<ComponentHandle> {
-        self.control()?.require_configuration_write()?;
-        let _mutation = self.mutations.lock().await;
-        let id = ComponentId::try_new(config.id.as_str())?;
-        if config.id == self.config.id
-            || self
-                .control()?
-                .desired_snapshot()
-                .nodes
-                .iter()
-                .any(|node| node.descriptor.id() == &id)
-        {
-            let implementation = ContinuousQueryFactory::default()
-                .descriptor()
-                .implementation
-                .clone();
-            let factory = FactoryRegistry::standard()
-                .get(&implementation)
-                .expect("standard query factory")
-                .clone();
-            let specification = factory.specification_from_config(
-                id.clone(),
-                serde_json::json!({
-                    "query": config.query,
-                    "query_config": config,
-                }),
-            )?;
-            let mut bindings = TopologyBindings::default();
-            bindings.factories.register(factory)?;
-            return self
-                .control()?
-                .add_component(ComponentAddition {
-                    definition: DesiredComponent {
-                        descriptor: specification.descriptor.clone(),
-                        role: ComponentRole::Query,
-                        completion: None,
-                        streams: BTreeMap::new(),
-                        lifecycle: LifecyclePolicy { auto_start: false },
-                        input_merge: InputMergePolicy::default(),
-                        construction: ComponentConstruction::Factory(specification),
-                    },
-                    resources: Vec::new(),
-                    bindings,
-                })
-                .await
-                .map_err(Into::into);
-        }
-        let batch = self.ordinary_query_batch(&config, None).await?;
-        let handle = self.install_ordinary_query(batch, id, start).await?;
-        self.refresh_pending_query_inputs_locked().await?;
-        self.notify();
-        Ok(handle)
+        config: crate::config::QueryConfig,
+    ) -> anyhow::Result<()> {
+        self.add_query(config, false).await.map(|_| ())
     }
-
     pub(crate) async fn add_reaction(
         self: &Arc<Self>,
+        name: ComponentName,
         reaction: Box<dyn Reaction>,
         metadata: HashMap<String, String>,
         start: bool,
     ) -> anyhow::Result<ComponentHandle> {
-        self.add_reaction_definition(reaction, metadata, start)
+        self.add_reaction_definition(name, reaction, metadata, start, false)
             .await
+    }
+
+    pub(crate) async fn create_reaction(
+        self: &Arc<Self>,
+        name: ComponentName,
+        references: Vec<crate::config::ComponentReference>,
+        auto_start: bool,
+        factory: impl FnOnce(ComponentId, Vec<ComponentId>) -> anyhow::Result<Box<dyn Reaction>>
+            + Send
+            + 'static,
+    ) -> anyhow::Result<ComponentHandle> {
+        self.create_reaction_with_inputs(
+            name,
+            None,
+            references,
+            auto_start,
+            ReactionConstructor::Sync(Box::new(factory)),
+            false,
+        )
+        .await
+    }
+
+    pub(crate) async fn create_reaction_with_inputs(
+        self: &Arc<Self>,
+        name: ComponentName,
+        requested_id: Option<ComponentId>,
+        references: Vec<crate::config::ComponentReference>,
+        auto_start: bool,
+        constructor: reaction_creation::ReactionConstructor,
+        _start: bool,
+    ) -> anyhow::Result<ComponentHandle> {
+        self.accept_local(LocalDefinition {
+            name,
+            id: requested_id,
+            auto_start,
+            inputs: references,
+            constructor: LocalConstructor::Reaction(constructor),
+            metadata: HashMap::new(),
+            bootstrap: None,
+        })
+        .await
     }
     pub(crate) async fn declare_reaction(
         self: &Arc<Self>,
+        name: ComponentName,
         reaction: Box<dyn Reaction>,
     ) -> anyhow::Result<()> {
-        self.add_reaction_definition(reaction, HashMap::new(), false)
+        self.add_reaction_definition(name, reaction, HashMap::new(), false, false)
             .await
             .map(|_| ())
     }
     async fn add_reaction_definition(
         self: &Arc<Self>,
+        name: ComponentName,
         reaction: Box<dyn Reaction>,
         metadata: HashMap<String, String>,
-        start: bool,
+        _start: bool,
+        created: bool,
     ) -> anyhow::Result<ComponentHandle> {
-        self.control()?.require_configuration_write()?;
-        let mutation = self.mutations.lock().await;
-        let id = reaction.id().to_owned();
+        anyhow::ensure!(
+            !created,
+            "eager library-owned reaction construction is not supported"
+        );
+        let id = ComponentId::try_new(reaction.id())?;
         let ids = reaction.query_ids();
         let mut metadata = metadata;
         metadata
@@ -1082,21 +1092,25 @@ impl Runtime {
         metadata
             .entry("autoStart".into())
             .or_insert_with(|| reaction.auto_start().to_string());
-        ComponentId::try_new(id)?;
-        let reaction = ReactionInstance::new(reaction, self);
-        let auto_start = reaction.reaction.auto_start();
-        let handle = self
-            .register(
-                Value::Reaction(reaction.clone()),
-                serde_json::json!({"queries":ids,"auto_start":auto_start}),
-                metadata,
-                None,
-                start,
-            )
-            .await?;
-        drop(mutation);
-        self.notify();
-        Ok(handle)
+        let auto_start = reaction.auto_start();
+        let inputs = ids
+            .into_iter()
+            .map(|id| {
+                Ok(crate::config::ComponentReference::by_id(
+                    ComponentId::try_new(id)?,
+                ))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        self.accept_local(LocalDefinition {
+            name,
+            id: Some(id),
+            auto_start,
+            inputs,
+            constructor: LocalConstructor::ReactionObject(reaction),
+            metadata,
+            bootstrap: None,
+        })
+        .await
     }
 
     async fn record(&self, id: &str, kind: &str) -> anyhow::Result<Record> {
@@ -1140,20 +1154,6 @@ impl Runtime {
         Ok(is_active(&observed))
     }
 
-    fn needs_resume(&self, record: &Record) -> anyhow::Result<bool> {
-        let (control, _, observed) = self.control_for(record)?;
-        Ok(self.active(record)?
-            || matches!(
-                observed.realization,
-                RealizationState::Pending | RealizationState::Creating
-            ) && record.activation_requested
-                && control
-                    .desired_snapshot()
-                    .lifecycle_policies
-                    .get(&record.node)
-                    .is_some_and(|policy| policy.auto_start))
-    }
-
     fn handle_for(&self, record: &Record) -> anyhow::Result<ComponentHandle> {
         let (control, _, observed) = self.control_for(record)?;
         let handle = control.component_handle(&record.node)?;
@@ -1166,21 +1166,8 @@ impl Runtime {
     async fn start_record(&self, record: &Record) -> anyhow::Result<()> {
         let (control, revision, observed) = self.control_for(record)?;
         if observed.realization == RealizationState::CreationFailed {
-            let preview = control
-                .preview(
-                    revision,
-                    vec![DesiredMutation::Retry(GraphSelection::Exact(vec![record.node.clone()]))],
-                )
+            self.retry_creation(&control, revision, &record.node)
                 .await?;
-            let report = control
-                .reconcile(preview, TopologyBindings::default())
-                .await?;
-            if !report.committed || report.summary != OperationSummary::Completed {
-                return Err(
-                    anyhow::Error::new(LifecycleReportError::Reconciliation(report))
-                        .context("native creation retry failed"),
-                );
-            }
         } else if observed.failure.is_some() || observed.lifecycle == ComponentLifecycle::Failed {
             self.stop_record(record).await?;
         }
@@ -1192,7 +1179,9 @@ impl Runtime {
         }
         // Instance startup must reach the source subscription fence before a
         // query's bootstrap can confirm readiness. Handles wait for that later.
-        let result = handle.start_requested().await;
+        let result = control
+            .start_members(BTreeMap::from([(record.node.clone(), handle.generation())]))
+            .await;
         let report = result?;
         handle.observed()?;
         if report.summary != OperationSummary::Completed
@@ -1205,6 +1194,38 @@ impl Runtime {
         }
         Ok(())
     }
+
+    async fn retry_creation(
+        &self,
+        control: &GraphControl,
+        revision: GraphRevision,
+        node: &ComponentId,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            control.desired_snapshot().revision == revision,
+            GraphError::StaleGeneration
+        );
+        let generation = control.component_handle(node)?.generation();
+        let stopped = control
+            .stop_members(BTreeMap::from([(node.clone(), generation)]))
+            .await?;
+        anyhow::ensure!(
+            stopped.summary == OperationSummary::Completed,
+            LifecycleReportError::Stop(stopped)
+        );
+        let owner = self.configuration_owner()?;
+        let owner = owner
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("configuration owner is unavailable"))?;
+        let status = owner.reconcile().await?;
+        anyhow::ensure!(
+            status.error.is_none(),
+            "native creation retry failed: {:?}",
+            status.error
+        );
+        Ok(())
+    }
+
     pub(crate) async fn start_component(
         self: &Arc<Self>,
         id: &str,
@@ -1251,11 +1272,24 @@ impl Runtime {
                 "Component '{id}' cannot start while it is {:?}",
                 observed.lifecycle
             );
-            let handle = control.component_handle(&ComponentId::try_new(id)?)?;
+            let component = ComponentId::try_new(id)?;
+            let handle = control.component_handle(&component)?;
             anyhow::ensure!(
                 handle.generation() == observed.generation,
                 GraphError::StaleGeneration
             );
+            if observed.realization == RealizationState::CreationFailed {
+                self.retry_creation(&control, publication.desired.revision, &component)
+                    .await?;
+                return control
+                    .component_handle(&component)?
+                    .start()
+                    .await
+                    .map_err(Into::into);
+            }
+            if observed.failure.is_some() || observed.lifecycle == ComponentLifecycle::Failed {
+                handle.stop().await?;
+            }
             return handle.start().await.map_err(Into::into);
         }
         let record = self.record(id, kind).await?;
@@ -1365,355 +1399,82 @@ impl Runtime {
         kind: &str,
         cleanup: bool,
     ) -> anyhow::Result<()> {
-        self.control()?.require_configuration_write()?;
-        if !self.current_records().await?.contains_key(id) {
-            return self
-                .remove_native_component(id, kind, cleanup || kind == "query")
-                .await;
-        }
-        let record = self.record(id, kind).await?;
-        let dependents: Vec<_> = self
-            .control()?
-            .desired_snapshot()
-            .data_dependents(&record.node)
-            .into_iter()
-            .map(|id| id.to_string())
-            .collect();
-        if !dependents.is_empty() {
-            anyhow::bail!("Depended on by: {}", dependents.join(", "));
-        }
-        let (_, _, observed) = self.control_for(&record)?;
-        if needs_stop(&observed) {
-            self.stop_record(&record).await?;
-        }
-        let (control, _, observed) = self.control_for(&record)?;
-        if cleanup || kind == "query" {
-            record.owner.remove_data();
-        }
-        let result = control
-            .mutate_members(
-                BTreeMap::from([(record.node.clone(), observed.generation)]),
-                vec![
-                    DesiredMutation::RemoveComponents {
-                        selection: GraphSelection::Exact(vec![record.node.clone()]),
-                        policy: RemovalPolicy::Reject,
-                    },
-                    DesiredMutation::RemoveResource {
-                        resource: record.resource.clone(),
-                        policy: RemovalPolicy::Reject,
-                    },
-                ],
-                TopologyBindings::default(),
-                BTreeSet::new(),
-            )
-            .await;
-        match result {
-            Ok(report) if report.summary == OperationSummary::Completed => {}
-            other => {
-                record.owner.cancel_unstarted_removal();
-                anyhow::bail!("native removal failed: {other:?}");
-            }
-        }
-        self.cleanup_candidates.write().await.remove(&record.token);
-        self.logs
-            .remove_component_by_key(&crate::observability::ComponentLogKey::new(
-                self.config.id.clone(),
-                match kind {
-                    "source" => crate::channels::ComponentType::Source,
-                    "query" => crate::channels::ComponentType::Query,
-                    _ => crate::channels::ComponentType::Reaction,
-                },
-                id,
-            ))
-            .await?;
-        self.notify();
-        Ok(())
-    }
-
-    async fn replace_record(
-        &self,
-        old: Record,
-        value: Value,
-        definition: serde_json::Value,
-    ) -> anyhow::Result<Record> {
-        let subscription_inputs = value.subscription_inputs()?;
-        let component = value.instance();
-        let id = component.id().to_owned();
-        let (_, _, observed) = self.control_for(&old)?;
-        if needs_stop(&observed) {
-            self.stop_record(&old).await?;
-        }
-        let (control, revision, _) = self.control_for(&old)?;
-        let token = self.next_token()?;
-        let owner = Arc::new(RuntimeInstance::new(
-            component.clone(),
-            token,
-            &self.config.id,
-        ));
-        let mut desired = control
-            .desired_snapshot()
-            .select(GraphSelection::Exact(vec![old.node.clone()]))?
-            .components
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("native component disappeared"))?;
-        let ComponentConstruction::Factory(spec) = &mut desired.construction else {
-            anyhow::bail!("runtime component has no factory");
-        };
-        desired.lifecycle.auto_start = value.auto_start();
-        spec.configuration.insert(
-            Arc::from("definition"),
-            ConfigurationValue::Literal(definition),
-        );
-        spec.configuration.insert(
-            Arc::from("record_token"),
-            ConfigurationValue::Literal(token.into()),
-        );
-        let new = Record {
-            token,
-            node: old.node.clone(),
-            resource: old.resource.clone(),
-            value,
-            owner,
-            metadata: old.metadata.clone(),
-            bootstrap_recipe: old.bootstrap_recipe.clone(),
-            initial_status: ComponentStatus::Stopped,
-            activation_requested: false,
-        };
-        new.owner.bind_record(new.data())?;
-        // Retain both candidates before submission. The controller's committed
-        // token selects the current record even if the caller drops this await.
-        self.cleanup_candidates
-            .write()
+        self.remove_owned(id, kind, cleanup || kind == "query")
             .await
-            .insert(token, new.clone());
-        let result = async {
-            let preview = control
-                .preview(
-                    revision,
-                    vec![
-                        DesiredMutation::ReplaceComponent(desired),
-                        DesiredMutation::RebindResource(old.resource.clone()),
-                        DesiredMutation::SetSubscriptions {
-                            consumer: old.node.clone(),
-                            producers: subscription_inputs,
-                        },
-                    ],
-                )
-                .await?;
-            let mut bindings = TopologyBindings {
-                defer_activation: true,
-                ..Default::default()
-            };
-            bindings.resources.insert(
-                old.resource.clone(),
-                ResourceHandle::new(ResourceRole::Component, new.owner.clone())
-                    .with_cleanup(new.owner.clone()),
-            );
-            let report = control.reconcile(preview, bindings).await?;
-            if !report.committed || report.summary != OperationSummary::Completed {
-                return Err(
-                    anyhow::Error::new(LifecycleReportError::Reconciliation(report))
-                        .context("native reconfiguration failed"),
-                );
-            }
-            Ok::<_, anyhow::Error>(())
-        }
-        .await;
-        if let Err(error) = result {
-            if let Err(cleanup) = self.discard_uninstalled(&new).await {
-                return Err(error.context(crate::error::OperationFailures::new(
-                    "replacement cleanup also failed",
-                    vec![cleanup],
-                )));
-            }
-            return Err(error);
-        }
-        self.cleanup_candidates.write().await.remove(&old.token);
-        Ok(new)
     }
 
-    async fn pause_consumers(&self, query_ids: &[String]) -> anyhow::Result<Vec<Record>> {
-        let records = self.current_records().await?;
-        let desired = self.control()?.desired_snapshot();
-        let queries: BTreeSet<_> = query_ids
-            .iter()
-            .map(|id| ComponentId::try_new(id.as_str()))
-            .collect::<std::result::Result<_, _>>()?;
-        let dependents: BTreeSet<_> = queries
-            .iter()
-            .flat_map(|id| desired.data_dependents(id))
-            .collect();
-        let mut paused = Vec::new();
-        for record in records.values() {
-            if matches!(record.value, Value::Reaction(_))
-                && dependents.contains(&record.node)
-                && self.needs_resume(record)?
-            {
-                self.stop_record(record).await?;
-                paused.push(record.clone());
-            }
-        }
-        Ok(paused)
-    }
-
-    async fn resume_records(&self, records: Vec<Record>) -> anyhow::Result<()> {
-        let mut failures = Vec::new();
-        for old in records.into_iter().rev() {
-            let component = old.value.instance();
-            let record = self.record(component.id(), component.kind()).await?;
-            if let Err(error) = self.start_record(&record).await {
-                failures.push(error.context(component.id().to_owned()));
-            }
-        }
-        if !failures.is_empty() {
-            return Err(crate::error::OperationFailures::new(
-                "native dependent restart failed",
-                failures,
-            )
-            .into());
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn update_source(
+    pub(crate) async fn update_ordinary_definition(
         self: &Arc<Self>,
         id: &str,
-        source: Box<dyn Source>,
+        kind: &'static str,
+        definition: crate::management::OrdinaryComponentRecord,
     ) -> anyhow::Result<()> {
-        self.control()?.require_configuration_write()?;
-        if !self.current_records().await?.contains_key(id) {
-            self.component_observation_at(&self.control()?.registry_snapshot(), id, "source")?;
-            anyhow::bail!("Source '{id}' is a native component; replace its declared factory or external binding through computation operations");
-        }
-        let old = self.record(id, "source").await?;
-        if source.id() != id {
-            anyhow::bail!(
-                "New source ID '{}' does not match existing source ID '{id}'",
-                source.id()
-            );
-        }
-        let records = self.current_records().await?;
-        let publication = self.control()?.registry_snapshot();
-        let affected: Vec<_> = publication
-            .desired
-            .data_dependents(&old.node)
-            .into_iter()
-            .filter(|id| {
-                publication
-                    .desired
-                    .nodes
-                    .iter()
-                    .any(|node| node.descriptor.id() == id && Self::is_query_node(node))
-            })
-            .map(|id| id.to_string())
-            .collect();
-        let mut native = Vec::new();
-        for id in affected
-            .iter()
-            .filter(|id| !records.contains_key(id.as_str()))
-        {
-            let config = self.query_configuration(id).await?;
-            let node = &publication.observed.components[&ComponentId::try_new(id.as_str())?];
-            native.push((
-                id.clone(),
-                config,
-                matches!(
-                    node.lifecycle,
-                    ComponentLifecycle::Running | ComponentLifecycle::Starting
-                ),
-            ));
-        }
-        let resume = self.pause_consumers(&affected).await?;
-        for (id, _, running) in &native {
-            if *running {
-                self.stop_component(id, "query").await?;
-            }
-        }
-        let restart_source = self.needs_resume(&old)?;
-        let source = SourceInstance::new(
-            source,
-            self.services.clone(),
-            self.changed.clone(),
-            self.control()?,
-            Arc::downgrade(self),
+        anyhow::ensure!(
+            definition.id.as_str() == id,
+            "an update cannot change the component UUID"
         );
-        let replacement = self
-            .replace_record(
-                old,
-                Value::Source(source.clone()),
-                serde_json::json!({"auto_start":source.source.auto_start()}),
-            )
+        let publication = self.control()?.registry_snapshot();
+        let current = self.component_observation_at(&publication, id, kind)?;
+        let owner = self.configuration_owner()?;
+        let owner = owner
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("configuration owner is unavailable"))?;
+        let accepted = owner.configuration()?;
+        let previous = accepted
+            .desired
+            .ordinary
+            .iter()
+            .find(|record| record.id.as_str() == id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("native components update through apply_configuration")
+            })?;
+        anyhow::ensure!(
+            previous.name == definition.name,
+            "use rename_component to change a component name"
+        );
+        anyhow::ensure!(
+            matches!(
+                (&definition.component, kind),
+                (
+                    crate::management::OrdinaryComponent::Source { .. },
+                    "source"
+                ) | (
+                    crate::management::OrdinaryComponent::Reaction { .. },
+                    "reaction"
+                )
+            ),
+            "update definition does not match the component role"
+        );
+        let id = definition.id.clone();
+        let receipt = owner
+            .accept_auto(crate::management::AuthoringOperation::Edit {
+                generations: BTreeMap::from([(id.clone(), current.generation)]),
+                delete_owned_resources: BTreeSet::new(),
+                edit: Box::new(move |desired| {
+                    let current = desired
+                        .ordinary
+                        .iter_mut()
+                        .find(|current| current.id == id)
+                        .ok_or_else(|| anyhow::anyhow!("component {id} was removed"))?;
+                    *current = definition;
+                    Ok(())
+                }),
+            })
             .await?;
-        let mut native_plan: Option<native_query::NativeQueryUpdate> = None;
-        for (id, config, _) in &native {
-            let plan = self.native_query_update_plan(id, config.clone()).await?;
-            if let Some(combined) = &mut native_plan {
-                combined.merge(plan)?;
-            } else {
-                native_plan = Some(plan);
-            }
-        }
-        if let Some(plan) = native_plan {
-            let report = self
-                .control()?
-                .mutate_members(plan.members, plan.changes, plan.bindings, BTreeSet::new())
-                .await?;
-            anyhow::ensure!(
-                report.committed && report.summary == OperationSummary::Completed,
-                "native source consumers were not replaced: {report:?}"
-            );
-        }
-        if restart_source {
-            self.start_record(&replacement).await?;
-        }
-        for (id, _, running) in &native {
-            if *running {
-                self.start_component(id, "query").await?;
-            }
-        }
-        self.resume_records(resume).await
+        let status = owner.wait_applied(receipt.revision).await?;
+        anyhow::ensure!(
+            status.error.is_none(),
+            "accepted component update failed: {:?}",
+            status.error
+        );
+        Ok(())
     }
     pub(crate) async fn update_query(
         self: &Arc<Self>,
         id: &str,
         config: QueryConfig,
     ) -> anyhow::Result<()> {
-        self.control()?.require_configuration_write()?;
-        self.update_native_query(id, config).await
-    }
-    pub(crate) async fn update_reaction(
-        self: &Arc<Self>,
-        id: &str,
-        reaction: Box<dyn Reaction>,
-    ) -> anyhow::Result<()> {
-        self.control()?.require_configuration_write()?;
-        if !self.current_records().await?.contains_key(id) {
-            self.component_observation_at(&self.control()?.registry_snapshot(), id, "reaction")?;
-            anyhow::bail!("Reaction '{id}' is a native component; replace its declared factory or external binding through computation operations");
-        }
-        let old = self.record(id, "reaction").await?;
-        if reaction.id() != id {
-            anyhow::bail!(
-                "New reaction ID '{}' does not match existing reaction ID '{id}'",
-                reaction.id()
-            );
-        }
-        let ids = reaction.query_ids();
-        self.reaction_queries(&ids).await?;
-        let restart = self.needs_resume(&old)?;
-        let reaction = ReactionInstance::new(reaction, self);
-        let new = self
-            .replace_record(
-                old,
-                Value::Reaction(reaction.clone()),
-                serde_json::json!({"queries":ids,"auto_start":reaction.reaction.auto_start()}),
-            )
-            .await?;
-        if restart {
-            self.start_record(&new).await?;
-        }
-        Ok(())
+        self.update_owned_query(id, config).await
     }
     pub(crate) async fn start_kind(self: &Arc<Self>, kind: &str) -> anyhow::Result<()> {
         let publication = self.control()?.registry_snapshot();
@@ -1855,7 +1616,7 @@ impl Runtime {
             let mut changes = control.subscribe_observed();
             let settled = tokio::select! {
                 result = changes.wait_for(|state| {
-                    state.components.get(&id).map_or(true, |node| {
+                    state.components.get(&id).is_none_or(|node| {
                         node.generation != handle.generation()
                             || !matches!(
                                 node.realization,
@@ -1895,19 +1656,15 @@ impl Runtime {
             }
         }
         if !ready.is_empty() {
-            let revision = control.desired_snapshot().revision;
             for handle in &ready {
                 handle.observed()?;
             }
             let report = control
-                .start_requested(
-                    revision,
-                    GraphSelection::Exact(
-                        ready
-                            .into_iter()
-                            .map(|handle| handle.id().clone())
-                            .collect(),
-                    ),
+                .start_members(
+                    ready
+                        .into_iter()
+                        .map(|handle| (handle.id().clone(), handle.generation()))
+                        .collect(),
                 )
                 .await?;
             if let Err(error) = accept_waiting_start(report, &control.observed()) {
@@ -1950,10 +1707,12 @@ impl Runtime {
         for source in sources {
             let mut complete = true;
             for query in queries.iter().filter(|query| {
-                query
-                    .inputs
-                    .iter()
-                    .any(|input| input.component == source.source.id())
+                query.inputs.iter().any(|input| {
+                    input
+                        .component
+                        .as_id()
+                        .is_some_and(|id| id.as_str() == source.source.id())
+                })
             }) {
                 let id = ComponentId::try_new(query.id.as_str())?;
                 let requested = query.auto_start
@@ -1966,7 +1725,7 @@ impl Runtime {
                     let expected = query
                         .inputs
                         .iter()
-                        .map(|input| &input.component)
+                        .filter_map(|input| input.component.as_id())
                         .collect::<BTreeSet<_>>()
                         .len();
                     if self.query(&query.id).await?.subscription_count().await != expected {
@@ -2071,22 +1830,6 @@ impl Runtime {
         if let Some(parent) = self.parent.get() {
             parent.shutdown().await?;
         }
-        let candidates: Vec<_> = self
-            .cleanup_candidates
-            .read()
-            .await
-            .values()
-            .cloned()
-            .collect();
-        for record in candidates {
-            // Rejected additions belong to the graph's rejection owner, or to
-            // the caller after take(). Resubmission makes the record installed.
-            if record.owner.installed.load(Ordering::Acquire)
-                || !record.owner.rejection_owned.load(Ordering::Acquire)
-            {
-                record.owner.shutdown().await?;
-            }
-        }
         Ok(())
     }
     pub(crate) async fn source(&self, id: &str) -> anyhow::Result<Arc<dyn Source>> {
@@ -2145,7 +1888,7 @@ impl Runtime {
     ) -> anyhow::Result<HashMap<String, ReactionMetricsSnapshot>> {
         match self.record(id, "reaction").await?.value {
             Value::Reaction(reaction) => Ok(reaction
-                .metrics
+                .metrics()?
                 .iter()
                 .map(|(id, metrics)| (id.clone(), metrics.snapshot()))
                 .collect()),
@@ -2215,7 +1958,6 @@ impl Runtime {
             .iter()
             .filter(|node| {
                 Self::public_component_kind(&publication.desired, node) == Some("source")
-                    && node.descriptor.id().as_str() != crate::sources::COMPONENT_GRAPH_SOURCE_ID
             })
             .map(|node| node.descriptor.id().as_str())
             .collect();

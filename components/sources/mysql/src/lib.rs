@@ -336,8 +336,8 @@ impl Source for MySqlReplicationSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
         self.base
             .set_position_comparator(crate::types::MySqlPositionComparator)
             .await;

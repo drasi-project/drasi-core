@@ -9,6 +9,8 @@ description = "DrasiLib example demonstrating stock price monitoring with 3 quer
 [workspace]
 
 [dependencies]
+drasi-host-sdk = { path = "../../../components/host-sdk" }
+drasi-computation-transformer-query = { path = "../../../components/computation-plugins/transformers/query" }
 drasi-lib = { path = "../../../lib" }
 drasi-source-http = { path = "../../../components/sources/http" }
 drasi-reaction-log = { path = "../../../components/reactions/log" }

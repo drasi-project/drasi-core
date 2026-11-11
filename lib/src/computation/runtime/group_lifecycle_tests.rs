@@ -97,9 +97,24 @@ fn service() -> Service {
 
 async fn instance(component: Service) -> DrasiLib {
     DrasiLib::builder()
+        .with_query_factory(
+            crate::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &crate::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_components(
             ComponentBatch::builder()
-                .service(Box::new(component))
+                .service(
+                    ComponentName::try_new("service").unwrap(),
+                    Box::new(component),
+                )
                 .build()
                 .unwrap()
                 .auto_start(false),
@@ -294,8 +309,8 @@ async fn stop_during_failure_cleanup() {
     sink.stop_gate = Some(stop_gate.clone());
     let edge = EdgeDefinition::new(from.clone(), to);
     let batch = ComponentBatch::builder()
-        .source(Box::new(source))
-        .sink(Box::new(sink))
+        .source(ComponentName::try_new("source").unwrap(), Box::new(source))
+        .sink(ComponentName::try_new("sink").unwrap(), Box::new(sink))
         .bind_stream(from, StreamId::try_new("source/out").unwrap())
         .connect(edge.clone(), Box::new(BoundedPipeConfig { capacity: 1 }))
         .relationship_policy(
@@ -309,6 +324,18 @@ async fn stop_during_failure_cleanup() {
         .unwrap()
         .auto_start(false);
     let core = DrasiLib::builder()
+        .with_query_factory(
+            crate::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &crate::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_components(batch)
         .build()
         .await

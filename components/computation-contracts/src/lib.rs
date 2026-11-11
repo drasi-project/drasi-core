@@ -1,6 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+#![deny(unused)]
+
 //! Native component messages and contracts shared by the runtime and plugins.
 //! This crate contains no graph executor, query evaluator, parser or storage backend.
 
@@ -11,6 +13,9 @@ mod bootstrap;
 #[doc(hidden)]
 pub mod codec;
 mod component_data;
+mod component_id;
+mod component_reference;
+mod component_update;
 mod consumer_progress;
 #[doc(hidden)]
 pub mod delivery;
@@ -42,7 +47,12 @@ mod producer_identity;
 mod progress;
 #[doc(hidden)]
 pub mod query_codec;
+mod query_configuration;
 mod query_identity;
+mod query_joins;
+mod query_read;
+mod query_recovery;
+mod scheduling;
 mod snapshot;
 mod snapshot_consumer;
 mod source_schema;
@@ -54,6 +64,8 @@ pub mod workers;
 pub use binary_codec::*;
 pub use codec::*;
 pub use component_data::*;
+pub use component_reference::*;
+pub use component_update::*;
 pub use consumer_progress::*;
 pub use data::*;
 pub use drasi_core_types::{profiling, schema};
@@ -85,7 +97,12 @@ pub const MAX_CONTROL_JSON_DEPTH: usize = 64;
 pub use producer_identity::{
     has_distinct_producer_lineage, GraphProducerIdentity, GraphProducerProgress,
 };
+pub use query_configuration::*;
 pub use query_identity::*;
+pub use query_joins::*;
+pub use query_read::*;
+pub use query_recovery::*;
+pub use scheduling::*;
 
 pub use bootstrap::*;
 pub use delivery::{

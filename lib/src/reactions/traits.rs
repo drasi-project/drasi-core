@@ -33,29 +33,17 @@
 //! when added to DrasiLib. The `ReactionRuntimeContext` provides:
 //! - `event_tx`: Channel for component lifecycle events
 //! - `state_store`: Optional persistent state storage
-//! - `query_provider`: Access to query instances for subscription
+//! - `snapshot_fetcher`: Scoped access to graph-owned query results
 //!
 //! This replaces the previous `inject_*` methods with a cleaner single-call pattern.
 
 use anyhow::Result;
 use async_trait::async_trait;
-use std::sync::Arc;
 
 use crate::channels::{ComponentStatus, QueryResult};
 use crate::context::ReactionRuntimeContext;
-use crate::queries::Query;
 use crate::reactions::bootstrap_context::BootstrapContext;
 use crate::recovery::ReactionRecoveryPolicy;
-
-/// Trait for providing access to queries without requiring full DrasiLib dependency.
-///
-/// This trait provides a way for reactions to access query instances for subscription
-/// without needing a direct dependency on the server core.
-#[async_trait]
-pub trait QueryProvider: Send + Sync {
-    /// Get a query instance by ID
-    async fn get_query_instance(&self, id: &str) -> Result<Arc<dyn Query>>;
-}
 
 /// Trait defining the interface for all reaction implementations.
 ///
@@ -126,8 +114,8 @@ pub trait QueryProvider: Send + Sync {
 ///         self.base.queries.clone()
 ///     }
 ///
-///     async fn initialize(&self, context: ReactionRuntimeContext) {
-///         self.base.initialize(context).await;
+///     async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
+///         self.base.bind_runtime_context(context).await;
 ///     }
 ///
 ///     async fn start(&self) -> Result<()> {
@@ -189,7 +177,7 @@ pub trait Reaction: Send + Sync {
         true
     }
 
-    /// Initialize the reaction with runtime context.
+    /// Bind mandatory framework services before optional initialization.
     ///
     /// This method is called automatically by DrasiLib when the reaction is added
     /// via `add_reaction()`. Plugin developers do not need to call this directly.
@@ -199,8 +187,38 @@ pub trait Reaction: Send + Sync {
     /// - `event_tx`: Channel for reporting component lifecycle events
     /// - `state_store`: Optional persistent state storage
     ///
-    /// Implementation should delegate to `self.base.initialize(context).await`.
-    async fn initialize(&self, context: ReactionRuntimeContext);
+    /// Implementations using ReactionBase delegate to `bind_runtime_context`.
+    /// This required hook is separate from the optional no-op initializer.
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext);
+
+    /// Optional instance-lifetime initialization after mandatory context binding.
+    async fn initialize(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Final instance-lifetime release, including after failed initialization.
+    /// This does not delete persistent state or external artifacts.
+    async fn dispose(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Pause independently owned processing at a host-established data boundary.
+    async fn pause_processing(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Resume a temporary pause without starting a new activation.
+    async fn resume_processing(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Execute a registered factory's accepted retained-object update.
+    async fn apply_update(
+        &self,
+        _context: crate::management::OrdinaryComponentUpdateContext,
+    ) -> Result<()> {
+        anyhow::bail!("this reaction does not support retained-object updates")
+    }
 
     /// Start the reaction
     ///
@@ -210,10 +228,14 @@ pub trait Reaction: Send + Sync {
     ///
     /// Query subscriptions are managed by the host after start() returns.
     /// Results are forwarded via `enqueue_query_result()`.
-    async fn start(&self) -> Result<()>;
+    async fn start(&self) -> Result<()> {
+        Ok(())
+    }
 
     /// Stop the reaction, cleaning up all subscriptions and tasks
-    async fn stop(&self) -> Result<()>;
+    async fn stop(&self) -> Result<()> {
+        Ok(())
+    }
 
     /// Get the current status of the reaction
     async fn status(&self) -> ComponentStatus;
@@ -233,12 +255,10 @@ pub trait Reaction: Send + Sync {
     /// Use this to release external resources that should not persist after
     /// the reaction is deleted (e.g., delete output topics, remove external subscriptions).
     ///
-    /// The default implementation is a no-op. Override only if your reaction
-    /// manages external state that needs explicit teardown.
-    ///
-    /// Errors are logged but do not prevent the reaction from being removed.
-    async fn deprovision(&self) -> Result<()> {
-        Ok(())
+    /// Support is explicit. Failure retains the cleanup owner and prevents
+    /// final release; ordinary disposal never invokes this destructive hook.
+    async fn delete_owned_resources(&self) -> Result<()> {
+        anyhow::bail!("this reaction does not support deleting owned resources")
     }
 
     /// Set the identity provider for this reaction.
@@ -331,8 +351,31 @@ impl Reaction for Box<dyn Reaction + 'static> {
         (**self).auto_start()
     }
 
-    async fn initialize(&self, context: ReactionRuntimeContext) {
-        (**self).initialize(context).await
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
+        (**self).bind_runtime_context(context).await
+    }
+
+    async fn initialize(&self) -> Result<()> {
+        (**self).initialize().await
+    }
+
+    async fn dispose(&self) -> Result<()> {
+        (**self).dispose().await
+    }
+
+    async fn pause_processing(&self) -> Result<()> {
+        (**self).pause_processing().await
+    }
+
+    async fn resume_processing(&self) -> Result<()> {
+        (**self).resume_processing().await
+    }
+
+    async fn apply_update(
+        &self,
+        context: crate::management::OrdinaryComponentUpdateContext,
+    ) -> Result<()> {
+        (**self).apply_update(context).await
     }
 
     async fn start(&self) -> Result<()> {
@@ -351,8 +394,8 @@ impl Reaction for Box<dyn Reaction + 'static> {
         (**self).enqueue_query_result(result).await
     }
 
-    async fn deprovision(&self) -> Result<()> {
-        (**self).deprovision().await
+    async fn delete_owned_resources(&self) -> Result<()> {
+        (**self).delete_owned_resources().await
     }
 
     async fn set_identity_provider(

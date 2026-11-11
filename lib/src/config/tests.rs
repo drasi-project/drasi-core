@@ -43,7 +43,8 @@ mod schema_tests {
         let config = crate::Query::cypher("query")
             .query("MATCH (n) RETURN n")
             .with_priority_queue_capacity(17)
-            .build();
+            .build()
+            .unwrap();
         let value = serde_json::to_value(&config).unwrap();
         let restored: QueryConfig = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(restored.priority_queue_capacity, Some(17));
@@ -74,7 +75,7 @@ mod schema_tests {
     fn test_query_config_validation() {
         // Valid query config
         let valid_json = json!({
-            "id": "test-query",
+            "name": "test-query",
             "query": "MATCH (n) RETURN n",
             "inputs": [
                 {"component": "source1", "pipeline": []},
@@ -87,7 +88,8 @@ mod schema_tests {
         assert!(config.is_ok());
 
         let config = config.unwrap();
-        assert_eq!(config.id, "test-query");
+        assert!(config.id.is_none());
+        assert_eq!(config.name, "test-query");
         assert_eq!(config.inputs.len(), 2);
         assert!(!config.auto_start);
         assert_eq!(config.query_language, QueryLanguage::Cypher); // default
@@ -97,7 +99,7 @@ mod schema_tests {
     fn test_query_language_default() {
         // Test that queryLanguage defaults to Cypher when not specified
         let json = json!({
-            "id": "test-query",
+            "name": "test-query",
             "query": "MATCH (n) RETURN n",
             "inputs": [
                 {"component": "source1", "pipeline": []}
@@ -112,7 +114,7 @@ mod schema_tests {
     fn test_query_language_explicit_cypher() {
         // Test explicit Cypher language setting
         let json = json!({
-            "id": "test-query",
+            "name": "test-query",
             "query": "MATCH (n) RETURN n",
             "queryLanguage": "Cypher",
             "inputs": [
@@ -128,7 +130,7 @@ mod schema_tests {
     fn test_query_language_explicit_gql() {
         // Test explicit GQL language setting
         let json = json!({
-            "id": "test-query",
+            "name": "test-query",
             "query": "MATCH (n:Person) RETURN n.name",
             "queryLanguage": "GQL",
             "inputs": [
@@ -144,7 +146,7 @@ mod schema_tests {
     fn test_query_config_missing_required_fields() {
         // Missing query field
         let invalid_json = json!({
-            "id": "test-query",
+            "name": "test-query",
             "sources": ["source1"]
         });
 
@@ -161,14 +163,15 @@ mod schema_tests {
 
         // Add a query
         config.queries.push(QueryConfig {
-            id: "query1".to_string(),
+            id: None,
+            name: "query1".to_string(),
             query: "MATCH (n) RETURN n".to_string(),
             query_language: crate::config::QueryLanguage::Cypher,
             middleware: vec![],
             inputs: vec![crate::config::QueryInputConfig {
                 nodes: vec![],
                 relations: vec![],
-                component: "source1".to_string(),
+                component: crate::config::ComponentReference::by_name("source1").unwrap(),
                 pipeline: vec![],
                 port: None,
             }],
@@ -193,12 +196,30 @@ mod schema_tests {
 mod persistence_tests {
     use super::super::schema::*;
     use std::fs;
-    use tempfile::TempDir;
+    use std::path::PathBuf;
+
+    struct ConfigFile(PathBuf);
+    impl ConfigFile {
+        fn new() -> Self {
+            let path = PathBuf::from(format!(".config-fixture-{}.yaml", uuid::Uuid::new_v4()));
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for ConfigFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
 
     #[test]
     fn test_load_config_from_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let config_path = temp_dir.path().join("test_config.yaml");
+        let file = ConfigFile::new();
+        let config_path = &file.0;
 
         // Create config programmatically and serialize it
         let mut config = DrasiLibConfig {
@@ -208,7 +229,8 @@ mod persistence_tests {
 
         // Note: Sources are now instance-based. Only queries are stored in config.
         config.queries.push(QueryConfig {
-            id: "test-query".to_string(),
+            id: None,
+            name: "test-query".to_string(),
             query: "MATCH (n) RETURN n".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
@@ -238,14 +260,14 @@ mod persistence_tests {
 
     #[test]
     fn test_load_config_file_not_found() {
-        let result = fs::read_to_string("/non/existent/path.yaml");
+        let result = fs::read_to_string(format!(".missing-config-{}.yaml", uuid::Uuid::new_v4()));
         assert!(result.is_err());
     }
 
     #[test]
     fn test_load_config_invalid_yaml() {
-        let temp_dir = TempDir::new().unwrap();
-        let config_path = temp_dir.path().join("invalid.yaml");
+        let file = ConfigFile::new();
+        let config_path = &file.0;
 
         fs::write(&config_path, "invalid: yaml: content:").unwrap();
 
@@ -256,8 +278,8 @@ mod persistence_tests {
 
     #[test]
     fn test_save_config() {
-        let temp_dir = TempDir::new().unwrap();
-        let config_path = temp_dir.path().join("output_config.yaml");
+        let file = ConfigFile::new();
+        let config_path = &file.0;
 
         let config = DrasiLibConfig::default();
 
@@ -277,13 +299,14 @@ mod persistence_tests {
 
     #[test]
     fn test_config_roundtrip() {
-        let temp_dir = TempDir::new().unwrap();
-        let config_path = temp_dir.path().join("config.yaml");
+        let file = ConfigFile::new();
+        let config_path = &file.0;
 
         // Create a config with queries
         let mut config = DrasiLibConfig::default();
         config.queries.push(QueryConfig {
-            id: "test-query".to_string(),
+            id: None,
+            name: "test-query".to_string(),
             query: "MATCH (n) RETURN n".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
@@ -312,7 +335,8 @@ mod persistence_tests {
 
         // Verify config
         assert_eq!(config.queries.len(), 1);
-        assert_eq!(config.queries[0].id, "test-query");
+        assert!(config.queries[0].id.is_none());
+        assert_eq!(config.queries[0].name, "test-query");
     }
 }
 
@@ -325,15 +349,16 @@ mod runtime_tests {
 
     #[test]
     fn test_query_runtime_conversion() {
-        let config = QueryConfig {
-            id: "test-query".to_string(),
+        let config: QueryConfig = QueryConfig {
+            id: None,
+            name: "test-query".to_string(),
             query: "MATCH (n) RETURN n".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
             inputs: vec![crate::config::QueryInputConfig {
                 nodes: vec![],
                 relations: vec![],
-                component: "source1".to_string(),
+                component: crate::config::ComponentReference::by_name("source1").unwrap(),
                 pipeline: vec![],
                 port: None,
             }],
@@ -350,6 +375,7 @@ mod runtime_tests {
             result: Default::default(),
         };
 
+        let config = config.with_assigned_id(crate::config::ComponentId::generate());
         let runtime = QueryRuntime::from(config.clone());
         assert_eq!(runtime.id, config.id);
         assert_eq!(runtime.query, config.query);
@@ -359,15 +385,16 @@ mod runtime_tests {
 
     #[test]
     fn test_query_runtime_conversion_with_joins() {
-        let config = QueryConfig {
-            id: "test-query".to_string(),
+        let config: QueryConfig = QueryConfig {
+            id: None,
+            name: "test-query".to_string(),
             query: "MATCH (o:Order)-[:CUSTOMER]->(c:Customer) RETURN o, c".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
             inputs: vec![crate::config::QueryInputConfig {
                 nodes: vec![],
                 relations: vec![],
-                component: "source1".to_string(),
+                component: crate::config::ComponentReference::by_name("source1").unwrap(),
                 pipeline: vec![],
                 port: None,
             }],
@@ -396,8 +423,10 @@ mod runtime_tests {
             result: Default::default(),
         };
 
+        let config = config.with_assigned_id(crate::config::ComponentId::generate());
         let runtime = QueryRuntime::from(config.clone());
-        assert_eq!(runtime.id, "test-query");
+        assert_eq!(runtime.id, config.id);
+        assert_eq!(runtime.name, "test-query");
         assert!(runtime.joins.is_some());
         let joins = runtime.joins.unwrap();
         assert_eq!(joins.len(), 1);
@@ -417,14 +446,16 @@ mod runtime_tests {
     #[test]
     fn test_source_runtime_creation() {
         let source_runtime = SourceRuntime {
-            id: "test_source".to_string(),
+            id: crate::config::ComponentId::generate().to_string(),
+            name: "test_source".to_string(),
             source_type: "postgres".to_string(),
             status: ComponentStatus::Running,
             error_message: None,
             properties: HashMap::new(),
         };
 
-        assert_eq!(source_runtime.id, "test_source");
+        assert!(crate::config::ComponentId::try_new(source_runtime.id.as_str()).is_ok());
+        assert_eq!(source_runtime.name, "test_source");
         assert_eq!(source_runtime.source_type, "postgres");
         assert!(matches!(source_runtime.status, ComponentStatus::Running));
         assert!(source_runtime.error_message.is_none());
@@ -433,14 +464,15 @@ mod runtime_tests {
     #[test]
     fn test_source_runtime_with_error() {
         let source_runtime = SourceRuntime {
-            id: "failing_source".to_string(),
+            id: crate::config::ComponentId::generate().to_string(),
+            name: "failing_source".to_string(),
             source_type: "http".to_string(),
             status: ComponentStatus::Error,
             error_message: Some("Connection timeout".to_string()),
             properties: HashMap::new(),
         };
 
-        assert_eq!(source_runtime.id, "failing_source");
+        assert_eq!(source_runtime.name, "failing_source");
         assert!(matches!(source_runtime.status, ComponentStatus::Error));
         assert_eq!(
             source_runtime.error_message,
@@ -457,7 +489,8 @@ mod runtime_tests {
         );
 
         let source_runtime = SourceRuntime {
-            id: "test_source".to_string(),
+            id: crate::config::ComponentId::generate().to_string(),
+            name: "test_source".to_string(),
             source_type: "postgres".to_string(),
             status: ComponentStatus::Running,
             error_message: None,
@@ -475,14 +508,16 @@ mod runtime_tests {
     #[test]
     fn test_source_runtime_deserialization() {
         let json = r#"{
-            "id": "test_source",
+            "id": "00000000-0000-4000-8000-000000000001",
+            "name": "test_source",
             "source_type": "mock",
             "status": "Running",
             "properties": {}
         }"#;
 
         let source_runtime: SourceRuntime = serde_json::from_str(json).unwrap();
-        assert_eq!(source_runtime.id, "test_source");
+        assert_eq!(source_runtime.id, "00000000-0000-4000-8000-000000000001");
+        assert_eq!(source_runtime.name, "test_source");
         assert_eq!(source_runtime.source_type, "mock");
         assert!(source_runtime.error_message.is_none());
     }
@@ -490,15 +525,20 @@ mod runtime_tests {
     #[test]
     fn test_reaction_runtime_creation() {
         let reaction_runtime = ReactionRuntime {
-            id: "test_reaction".to_string(),
+            id: crate::config::ComponentId::generate().to_string(),
+            name: "test_reaction".to_string(),
             reaction_type: "http".to_string(),
             status: ComponentStatus::Running,
             error_message: None,
-            queries: vec!["query1".to_string(), "query2".to_string()],
+            queries: vec![
+                crate::config::ComponentReference::by_name("query1").unwrap(),
+                crate::config::ComponentReference::by_name("query2").unwrap(),
+            ],
             properties: HashMap::new(),
         };
 
-        assert_eq!(reaction_runtime.id, "test_reaction");
+        assert!(crate::config::ComponentId::try_new(reaction_runtime.id.as_str()).is_ok());
+        assert_eq!(reaction_runtime.name, "test_reaction");
         assert_eq!(reaction_runtime.reaction_type, "http");
         assert_eq!(reaction_runtime.queries.len(), 2);
         assert!(matches!(reaction_runtime.status, ComponentStatus::Running));
@@ -507,11 +547,12 @@ mod runtime_tests {
     #[test]
     fn test_reaction_runtime_with_error() {
         let reaction_runtime = ReactionRuntime {
-            id: "failing_reaction".to_string(),
+            id: crate::config::ComponentId::generate().to_string(),
+            name: "failing_reaction".to_string(),
             reaction_type: "grpc".to_string(),
             status: ComponentStatus::Error,
             error_message: Some("Failed to connect to endpoint".to_string()),
-            queries: vec!["query1".to_string()],
+            queries: vec![crate::config::ComponentReference::by_name("query1").unwrap()],
             properties: HashMap::new(),
         };
 
@@ -528,11 +569,12 @@ mod runtime_tests {
         );
 
         let reaction_runtime = ReactionRuntime {
-            id: "webhook".to_string(),
+            id: crate::config::ComponentId::generate().to_string(),
+            name: "webhook".to_string(),
             reaction_type: "http".to_string(),
             status: ComponentStatus::Stopped,
             error_message: None,
-            queries: vec!["orders_query".to_string()],
+            queries: vec![crate::config::ComponentReference::by_name("orders_query").unwrap()],
             properties,
         };
 
@@ -547,7 +589,8 @@ mod runtime_tests {
     #[test]
     fn test_reaction_runtime_deserialization() {
         let json = r#"{
-            "id": "test_reaction",
+            "id": "00000000-0000-4000-8000-000000000001",
+            "name": "test_reaction",
             "reaction_type": "log",
             "status": "Stopped",
             "queries": ["q1", "q2"],
@@ -555,7 +598,8 @@ mod runtime_tests {
         }"#;
 
         let reaction_runtime: ReactionRuntime = serde_json::from_str(json).unwrap();
-        assert_eq!(reaction_runtime.id, "test_reaction");
+        assert_eq!(reaction_runtime.id, "00000000-0000-4000-8000-000000000001");
+        assert_eq!(reaction_runtime.name, "test_reaction");
         assert_eq!(reaction_runtime.reaction_type, "log");
         assert_eq!(reaction_runtime.queries.len(), 2);
     }
@@ -563,7 +607,8 @@ mod runtime_tests {
     #[test]
     fn test_query_runtime_serialization() {
         let query_runtime = QueryRuntime {
-            id: "test_query".to_string(),
+            id: crate::config::ComponentId::generate().to_string(),
+            name: "test_query".to_string(),
             query: "MATCH (n) RETURN n".to_string(),
             status: ComponentStatus::Running,
             error_message: None,
@@ -582,14 +627,16 @@ mod runtime_tests {
     #[test]
     fn test_query_runtime_deserialization() {
         let json = r#"{
-            "id": "test_query",
+            "id": "00000000-0000-4000-8000-000000000001",
+            "name": "test_query",
             "query": "MATCH (n) RETURN n",
             "status": "Stopped",
             "inputs": []
         }"#;
 
         let query_runtime: QueryRuntime = serde_json::from_str(json).unwrap();
-        assert_eq!(query_runtime.id, "test_query");
+        assert_eq!(query_runtime.id, "00000000-0000-4000-8000-000000000001");
+        assert_eq!(query_runtime.name, "test_query");
         assert_eq!(query_runtime.query, "MATCH (n) RETURN n");
         assert!(query_runtime.error_message.is_none());
         assert!(query_runtime.joins.is_none());
@@ -599,6 +646,7 @@ mod runtime_tests {
     fn test_runtime_config_from_drasi_lib_config() {
         let config = DrasiLibConfig {
             id: "test-server".to_string(),
+            allow_external_component_ids: false,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             activation_timeout_secs: None,
@@ -609,7 +657,8 @@ mod runtime_tests {
             cleanup_timeout_secs: None,
             storage_backends: vec![],
             queries: vec![QueryConfig {
-                id: "q1".to_string(),
+                id: None,
+                name: "q1".to_string(),
                 query: "MATCH (n) RETURN n".to_string(),
                 query_language: QueryLanguage::Cypher,
                 middleware: vec![],
@@ -647,6 +696,7 @@ mod runtime_tests {
     fn test_runtime_config_applies_global_defaults() {
         let config = DrasiLibConfig {
             id: "test-server".to_string(),
+            allow_external_component_ids: false,
             priority_queue_capacity: Some(50000),
             dispatch_buffer_capacity: Some(5000),
             activation_timeout_secs: None,
@@ -658,7 +708,8 @@ mod runtime_tests {
             storage_backends: vec![],
             queries: vec![
                 QueryConfig {
-                    id: "q1".to_string(),
+                    id: None,
+                    name: "q1".to_string(),
                     query: "MATCH (n) RETURN n".to_string(),
                     query_language: QueryLanguage::Cypher,
                     middleware: vec![],
@@ -676,7 +727,8 @@ mod runtime_tests {
                     result: Default::default(),
                 },
                 QueryConfig {
-                    id: "q2".to_string(),
+                    id: None,
+                    name: "q2".to_string(),
                     query: "MATCH (m) RETURN m".to_string(),
                     query_language: QueryLanguage::Cypher,
                     middleware: vec![],
@@ -723,6 +775,7 @@ mod runtime_tests {
     fn test_runtime_config_new_without_provider() {
         let config = DrasiLibConfig {
             id: "test-server".to_string(),
+            allow_external_component_ids: false,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             activation_timeout_secs: None,
@@ -751,6 +804,7 @@ mod runtime_tests {
     fn test_runtime_config_debug() {
         let config = DrasiLibConfig {
             id: "debug-test".to_string(),
+            allow_external_component_ids: false,
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             activation_timeout_secs: None,
@@ -772,7 +826,8 @@ mod runtime_tests {
     #[test]
     fn test_source_runtime_clone() {
         let source_runtime = SourceRuntime {
-            id: "cloneable".to_string(),
+            id: crate::config::ComponentId::generate().to_string(),
+            name: "cloneable".to_string(),
             source_type: "mock".to_string(),
             status: ComponentStatus::Running,
             error_message: None,
@@ -787,11 +842,12 @@ mod runtime_tests {
     #[test]
     fn test_reaction_runtime_clone() {
         let reaction_runtime = ReactionRuntime {
-            id: "cloneable".to_string(),
+            id: crate::config::ComponentId::generate().to_string(),
+            name: "cloneable".to_string(),
             reaction_type: "log".to_string(),
             status: ComponentStatus::Stopped,
             error_message: None,
-            queries: vec!["q1".to_string()],
+            queries: vec![crate::config::ComponentReference::by_name("q1").unwrap()],
             properties: HashMap::new(),
         };
 
@@ -803,7 +859,8 @@ mod runtime_tests {
     #[test]
     fn test_query_runtime_clone() {
         let query_runtime = QueryRuntime {
-            id: "cloneable".to_string(),
+            id: crate::config::ComponentId::generate().to_string(),
+            name: "cloneable".to_string(),
             query: "MATCH (n) RETURN n".to_string(),
             status: ComponentStatus::Running,
             error_message: None,
@@ -825,7 +882,7 @@ mod dispatch_mode_tests {
     #[test]
     fn test_query_config_with_dispatch_mode() {
         let yaml = r#"
-            id: test_query
+            name: test_query
             query: "RETURN 1"
             inputs:
               - component: source1
@@ -834,15 +891,19 @@ mod dispatch_mode_tests {
         "#;
 
         let config: QueryConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.id, "test_query");
+        assert!(config.id.is_none());
+        assert_eq!(config.name, "test_query");
         assert_eq!(config.dispatch_mode, Some(DispatchMode::Broadcast));
-        assert_eq!(config.inputs[0].component, "source1");
+        assert_eq!(
+            config.inputs[0].component.as_name().unwrap().as_str(),
+            "source1"
+        );
     }
 
     #[test]
     fn test_query_config_without_dispatch_mode() {
         let yaml = r#"
-            id: test_query
+            name: test_query
             query: "RETURN 1"
             inputs:
               - component: source1
@@ -850,15 +911,19 @@ mod dispatch_mode_tests {
         "#;
 
         let config: QueryConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.id, "test_query");
+        assert!(config.id.is_none());
+        assert_eq!(config.name, "test_query");
         assert_eq!(config.dispatch_mode, None);
-        assert_eq!(config.inputs[0].component, "source1");
+        assert_eq!(
+            config.inputs[0].component.as_name().unwrap().as_str(),
+            "source1"
+        );
     }
 
     #[test]
     fn test_query_config_with_channel_dispatch_mode() {
         let yaml = r#"
-            id: test_query
+            name: test_query
             query: "RETURN 1"
             inputs:
               - component: source1
@@ -867,15 +932,19 @@ mod dispatch_mode_tests {
         "#;
 
         let config: QueryConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.id, "test_query");
+        assert!(config.id.is_none());
+        assert_eq!(config.name, "test_query");
         assert_eq!(config.dispatch_mode, Some(DispatchMode::Channel));
-        assert_eq!(config.inputs[0].component, "source1");
+        assert_eq!(
+            config.inputs[0].component.as_name().unwrap().as_str(),
+            "source1"
+        );
     }
 
     #[test]
     fn test_source_subscription_preserves_declared_order() {
         let yaml = r#"
-            id: legacy_query
+            name: ordered_query
             query: "MATCH (o:Order) RETURN o"
             inputs:
               - component: orders
@@ -885,13 +954,25 @@ mod dispatch_mode_tests {
 
         let config: QueryConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.inputs.len(), 2);
-        assert_eq!(config.inputs[0].component, "orders");
-        assert_eq!(config.inputs[1].component, "customers");
+        assert_eq!(
+            config.inputs[0].component.as_name().unwrap().as_str(),
+            "orders"
+        );
+        assert_eq!(
+            config.inputs[1].component.as_name().unwrap().as_str(),
+            "customers"
+        );
 
         let serialized = serde_yaml::to_string(&config).unwrap();
         let round_trip: QueryConfig = serde_yaml::from_str(&serialized).unwrap();
-        assert_eq!(round_trip.inputs[0].component, "orders");
-        assert_eq!(round_trip.inputs[1].component, "customers");
+        assert_eq!(
+            round_trip.inputs[0].component.as_name().unwrap().as_str(),
+            "orders"
+        );
+        assert_eq!(
+            round_trip.inputs[1].component.as_name().unwrap().as_str(),
+            "customers"
+        );
         let sources = serde_json::to_value(&config.inputs).unwrap();
         for source in sources.as_array().unwrap() {
             assert!(source.get("priority").is_none());
@@ -907,14 +988,15 @@ mod dispatch_mode_tests {
 
         // Add queries with different dispatch modes
         config.queries.push(QueryConfig {
-            id: "query1".to_string(),
+            id: None,
+            name: "query1".to_string(),
             query: "RETURN 1".to_string(),
             query_language: crate::config::QueryLanguage::Cypher,
             middleware: vec![],
             inputs: vec![crate::config::QueryInputConfig {
                 nodes: vec![],
                 relations: vec![],
-                component: "source1".to_string(),
+                component: crate::config::ComponentReference::by_name("source1").unwrap(),
                 pipeline: vec![],
                 port: None,
             }],
@@ -932,14 +1014,15 @@ mod dispatch_mode_tests {
         });
 
         config.queries.push(QueryConfig {
-            id: "query2".to_string(),
+            id: None,
+            name: "query2".to_string(),
             query: "RETURN 2".to_string(),
             query_language: crate::config::QueryLanguage::Cypher,
             middleware: vec![],
             inputs: vec![crate::config::QueryInputConfig {
                 nodes: vec![],
                 relations: vec![],
-                component: "source2".to_string(),
+                component: crate::config::ComponentReference::by_name("source2").unwrap(),
                 pipeline: vec![],
                 port: None,
             }],
@@ -957,14 +1040,15 @@ mod dispatch_mode_tests {
         });
 
         config.queries.push(QueryConfig {
-            id: "query3".to_string(),
+            id: None,
+            name: "query3".to_string(),
             query: "RETURN 3".to_string(),
             query_language: crate::config::QueryLanguage::Cypher,
             middleware: vec![],
             inputs: vec![crate::config::QueryInputConfig {
                 nodes: vec![],
                 relations: vec![],
-                component: "source3".to_string(),
+                component: crate::config::ComponentReference::by_name("source3").unwrap(),
                 pipeline: vec![],
                 port: None,
             }],
@@ -998,7 +1082,7 @@ mod query_input_tests {
 
     fn expanded() -> QueryInputConfig {
         QueryInputConfig {
-            component: "floor-comfort".into(),
+            component: crate::config::ComponentReference::by_name("floor-comfort").unwrap(),
             port: Some("out".into()),
             nodes: vec!["FloorComfort".into()],
             relations: vec!["PART_OF".into()],
@@ -1008,7 +1092,7 @@ mod query_input_tests {
 
     #[test]
     fn shorthand_and_expanded_inputs_round_trip_in_json_and_yaml() {
-        let inputs = vec![QueryInputConfig::new("facilities"), expanded()];
+        let inputs = vec![QueryInputConfig::by_name("facilities").unwrap(), expanded()];
         let value = serde_json::to_value(&inputs).unwrap();
         assert_eq!(value[0], json!("facilities"));
         assert_eq!(
@@ -1031,10 +1115,12 @@ mod query_input_tests {
         let parsed: Vec<QueryInputConfig> =
             serde_yaml::from_str("- facilities\n- component: floor-comfort\n  port: out\n")
                 .unwrap();
-        assert_eq!(parsed[0], QueryInputConfig::new("facilities"));
+        assert_eq!(parsed[0], QueryInputConfig::by_name("facilities").unwrap());
         assert_eq!(
             parsed[1],
-            QueryInputConfig::new("floor-comfort").with_port("out")
+            QueryInputConfig::by_name("floor-comfort")
+                .unwrap()
+                .with_port("out")
         );
     }
 
@@ -1056,7 +1142,7 @@ mod query_input_tests {
 
     #[test]
     fn query_config_rejects_the_removed_sources_field_and_defaults_result() {
-        let base = json!({"id": "q", "query": "MATCH (n) RETURN n"});
+        let base = json!({"name": "q", "query": "MATCH (n) RETURN n"});
         let config: QueryConfig = serde_json::from_value(base.clone()).unwrap();
         assert!(config.inputs.is_empty());
         assert_eq!(config.result, QueryResultConfig::default());
@@ -1085,28 +1171,28 @@ mod query_input_tests {
     #[test]
     fn declarations_are_validated_before_use() {
         let mut config: QueryConfig = serde_json::from_value(
-            json!({"id": "q", "query": "MATCH (n) RETURN n", "inputs": ["a"]}),
+            json!({"name": "q", "query": "MATCH (n) RETURN n", "inputs": ["a"]}),
         )
         .unwrap();
         config.validate_declarations().unwrap();
 
         config
             .inputs
-            .push(QueryInputConfig::new("a").with_port("out"));
+            .push(QueryInputConfig::by_name("a").unwrap().with_port("out"));
         assert!(config.validate_declarations().is_err(), "duplicate input");
         config.inputs.pop();
 
-        config.inputs.push(QueryInputConfig::new(""));
-        assert!(config.validate_declarations().is_err(), "empty component");
-        config.inputs.pop();
+        assert!(QueryInputConfig::by_name("").is_err(), "empty component");
 
-        config
-            .inputs
-            .push(QueryInputConfig::new("b").with_port("two words"));
+        config.inputs.push(
+            QueryInputConfig::by_name("b")
+                .unwrap()
+                .with_port("two words"),
+        );
         assert!(config.validate_declarations().is_err(), "malformed port");
         config.inputs.pop();
 
-        config.inputs.push(QueryInputConfig::new("q"));
+        config.inputs.push(QueryInputConfig::by_name("q").unwrap());
         assert!(config.validate_declarations().is_err(), "self input");
         config.inputs.pop();
 

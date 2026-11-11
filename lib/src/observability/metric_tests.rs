@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
-use drasi_computation_contracts::{ComponentId, ComponentRole, ComponentSemanticKind};
+use drasi_computation_contracts::{ComponentRole, ComponentSemanticKind};
 use drasi_core::computation::InMemoryComputationProvider;
 use std::{sync::Arc, time::Duration};
 use tracing::instrument::WithSubscriber;
@@ -28,7 +28,12 @@ fn owner(
         )
         .resolve("graph", None)
         .unwrap()
-        .observations(ComponentId::try_new("component").unwrap(), role, kind, 1)
+        .observations(
+            crate::test_helpers::component_id("component"),
+            role,
+            kind,
+            1,
+        )
         .unwrap();
     if kind == ComponentSemanticKind::Query {
         owner.bind_query_metrics().unwrap();
@@ -51,8 +56,8 @@ async fn query_processing_phases_do_not_add_callback_metrics_or_errors() {
         .resolve("graph", None)
         .unwrap()
         .observations(
-            ComponentId::try_new("query").unwrap(),
-            ComponentRole::Query,
+            crate::test_helpers::component_id("query"),
+            ComponentRole::Transformer,
             ComponentSemanticKind::Query,
             1,
         )
@@ -96,7 +101,7 @@ async fn evaluator_commit_and_cancelled_attempts_are_independent_of_tracing() {
     let owner = owner(
         &metrics,
         TelemetryProfile::Persistence,
-        ComponentRole::Query,
+        ComponentRole::Transformer,
         ComponentSemanticKind::Query,
     );
     let observer = owner.query_observer_for(QueryPhase::Steady, true).unwrap();
@@ -268,8 +273,8 @@ fn exclusions_leave_no_detail_observer_or_recorder_registrations() {
     .unwrap();
     let owner = graph
         .observations(
-            ComponentId::try_new("query").unwrap(),
-            ComponentRole::Query,
+            crate::test_helpers::component_id("query"),
+            ComponentRole::Transformer,
             ComponentSemanticKind::Query,
             1,
         )
@@ -284,7 +289,7 @@ fn query_definition(text: &str) -> crate::computation::v1::ContinuousQueryDefini
     use crate::computation::v1::*;
     ContinuousQueryDefinition {
         graph_id: "metric-query".into(),
-        id: ComponentId::try_new("component").unwrap(),
+        id: crate::test_helpers::component_id("component"),
         query: text.into(),
         language: ComputationQueryLanguage::Cypher,
         output_stream: StreamId::try_new("query/out").unwrap(),
@@ -326,7 +331,7 @@ async fn real_query_distinguishes_inputs_due_work_and_idle_notifications() {
     let owner = owner(
         &metrics,
         TelemetryProfile::Persistence,
-        ComponentRole::Query,
+        ComponentRole::Transformer,
         ComponentSemanticKind::Query,
     );
     owner.scope(async {
@@ -380,7 +385,7 @@ async fn prepared_input_replay_evaluates_only_fresh_inputs() {
     let owner = owner(
         &metrics,
         TelemetryProfile::Basic,
-        ComponentRole::Query,
+        ComponentRole::Transformer,
         ComponentSemanticKind::Query,
     );
     owner
@@ -435,7 +440,7 @@ async fn durable_output_replay_only_observes_real_bookkeeping_commits() {
     let owner = owner(
         &metrics,
         TelemetryProfile::Persistence,
-        ComponentRole::Query,
+        ComponentRole::Transformer,
         ComponentSemanticKind::Query,
     );
     owner

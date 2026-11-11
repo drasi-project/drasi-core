@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Optional host-side factories over existing plugin descriptors. No plugin
-//! vtable, registration ABI, runtime trait or configuration encoding changes.
+//! Optional host-side creation factories over ordinary plugin descriptors.
+//! Creation does not advertise an update plan or authorize reconstruction.
 //! Descriptors supplied here must already satisfy the host's loading/version
 //! checks and retain their normal code-unit lifetime. In-process descriptors use
 //! task-scoped instance secret resolution. An FFI descriptor keeps its existing
@@ -263,11 +263,13 @@ impl SourcePluginFactory {
     pub fn configuration(&self) -> &PluginConfiguration {
         &self.recipe
     }
+    /// Construct one owned object. Start/stop retain that object; this creation
+    /// descriptor does not authorize reconstruction or live configuration updates.
     pub async fn host(
         self: &Arc<Self>,
         services: LegacyPluginServices,
     ) -> anyhow::Result<Arc<SourcePluginHost>> {
-        SourcePluginHost::recreatable(
+        SourcePluginHost::from_constructor(
             Arc::new(ScopedSourceFactory {
                 factory: self.clone(),
                 resolution: PluginResolution::from_services(&services),
@@ -336,13 +338,15 @@ impl ReactionPluginFactory {
     pub fn configuration(&self) -> &PluginConfiguration {
         &self.recipe
     }
+    /// Construct one owned object without advertising a live-update strategy.
+    /// Repeated activation uses the same initialized reaction.
     pub async fn host(
         self: &Arc<Self>,
         services: LegacyPluginServices,
         catalog: QueryResultsCatalog,
         options: ReactionPluginOptions,
     ) -> anyhow::Result<Arc<ReactionPluginHost>> {
-        ReactionPluginHost::recreatable(
+        ReactionPluginHost::from_constructor(
             Arc::new(ScopedReactionFactory {
                 factory: self.clone(),
                 resolution: PluginResolution::from_services(&services),

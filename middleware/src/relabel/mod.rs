@@ -17,7 +17,7 @@ use std::{collections::HashMap, sync::Arc};
 #[cfg(feature = "engine-adapter")]
 use async_trait::async_trait;
 #[cfg(feature = "engine-adapter")]
-use drasi_core::interface::{ElementIndex, SourceMiddleware, SourceMiddlewareFactory};
+use drasi_core_types::interface::{ElementIndex, SourceMiddleware, SourceMiddlewareFactory};
 use drasi_core_types::{
     interface::{MiddlewareError, MiddlewareSetupError},
     models::{Element, ElementMetadata, SourceChange, SourceMiddlewareConfig},

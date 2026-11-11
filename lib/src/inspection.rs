@@ -278,7 +278,7 @@ impl InspectionAPI {
     pub async fn get_query_config(
         &self,
         id: &str,
-    ) -> crate::error::Result<crate::config::QueryConfig> {
+    ) -> crate::error::Result<crate::config::AssignedQueryConfig> {
         self.state_guard.require_initialized()?;
         self.computation
             .query_configuration(id)
@@ -380,6 +380,7 @@ impl InspectionAPI {
 
         Ok(DrasiLibConfig {
             id: self.config.id.clone(),
+            allow_external_component_ids: self.config.allow_external_component_ids,
             priority_queue_capacity: self.config.global_priority_queue_capacity,
             dispatch_buffer_capacity: self.config.global_dispatch_buffer_capacity,
             activation_timeout_secs: self.config.activation_timeout_secs,
@@ -389,7 +390,16 @@ impl InspectionAPI {
             resource_construction_timeout_secs: self.config.resource_construction_timeout_secs,
             cleanup_timeout_secs: self.config.cleanup_timeout_secs,
             storage_backends: self.config.storage_backends.clone(),
-            queries: self.computation.query_configurations().await?,
+            queries: self
+                .computation
+                .query_configurations()
+                .await?
+                .into_iter()
+                .map(|query| {
+                    let id = crate::config::ComponentId::try_new(query.id.as_str())?;
+                    Ok(query.map_id(Some(id)))
+                })
+                .collect::<anyhow::Result<_>>()?,
         })
     }
 
@@ -792,7 +802,7 @@ mod tests {
     use crate::error::DrasiError;
     use crate::lib_core::DrasiLib;
     use crate::sources::tests::TestMockSource;
-    use crate::sources::COMPONENT_GRAPH_SOURCE_ID;
+    use crate::test_helpers::creation::{BuilderFixtures, CoreFixtures};
 
     use async_trait::async_trait;
     use std::collections::HashMap;
@@ -809,6 +819,28 @@ mod tests {
     }
 
     impl TestMockReaction {
+        fn fixture(
+            name: String,
+            queries: Vec<String>,
+            auto_start: bool,
+        ) -> crate::test_helpers::creation::ReactionFixture<Self> {
+            crate::test_helpers::creation::ReactionFixture::new(
+                name,
+                queries
+                    .into_iter()
+                    .map(|name| crate::config::ComponentReference::by_name(name).unwrap())
+                    .collect(),
+                auto_start,
+                move |id, inputs| {
+                    Ok(Self::new(
+                        id.to_string(),
+                        inputs.iter().map(ToString::to_string).collect(),
+                        auto_start,
+                    ))
+                },
+            )
+        }
+
         fn new(id: String, queries: Vec<String>, auto_start: bool) -> Self {
             let status_handle = crate::component_graph::ComponentStatusHandle::new(&id);
             Self {
@@ -842,7 +874,7 @@ mod tests {
             self.auto_start
         }
 
-        async fn initialize(&self, context: crate::context::ReactionRuntimeContext) {
+        async fn bind_runtime_context(&self, context: crate::context::ReactionRuntimeContext) {
             self.status_handle.wire(context.update_tx.clone()).await;
         }
 
@@ -892,22 +924,51 @@ mod tests {
     // ========================================================================
 
     async fn build_and_start() -> DrasiLib {
-        let core = DrasiLib::builder().with_id("test").build().await.unwrap();
+        let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
+            .with_id("test")
+            .build()
+            .await
+            .unwrap();
         core.start().await.unwrap();
         core
     }
 
     async fn build_with_source_and_query() -> DrasiLib {
-        let source = TestMockSource::new("test-source".to_string()).unwrap();
+        let source = TestMockSource::fixture("test-source", true);
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("test")
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
                     .from_input("test-source")
                     .auto_start(false)
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .await
@@ -924,29 +985,21 @@ mod tests {
     async fn list_sources_empty() {
         let core = build_and_start().await;
         let sources = core.list_sources().await.unwrap();
-        let user_sources: Vec<_> = sources
-            .iter()
-            .filter(|(id, _)| id != COMPONENT_GRAPH_SOURCE_ID)
-            .collect();
-        assert!(user_sources.is_empty(), "No user sources initially");
+        assert!(sources.is_empty(), "No sources initially");
     }
 
     #[tokio::test]
     async fn list_sources_after_adding() {
         let core = build_and_start().await;
-        let s1 = TestMockSource::with_auto_start("src-a".to_string(), false).unwrap();
-        let s2 = TestMockSource::with_auto_start("src-b".to_string(), false).unwrap();
-        core.add_source(s1).await.unwrap();
-        core.add_source(s2).await.unwrap();
+        let s1 = TestMockSource::fixture("src-a", false);
+        let s2 = TestMockSource::fixture("src-b", false);
+        core.add_source_fixture(s1).await.unwrap();
+        core.add_source_fixture(s2).await.unwrap();
 
         let sources = core.list_sources().await.unwrap();
-        let user_sources: Vec<_> = sources
-            .iter()
-            .filter(|(id, _)| id != COMPONENT_GRAPH_SOURCE_ID)
-            .collect();
-        assert_eq!(user_sources.len(), 2);
-        assert!(user_sources.iter().any(|(id, _)| id == "src-a"));
-        assert!(user_sources.iter().any(|(id, _)| id == "src-b"));
+        assert_eq!(sources.len(), 2);
+        assert!(sources.iter().any(|(id, _)| id == "src-a"));
+        assert!(sources.iter().any(|(id, _)| id == "src-b"));
     }
 
     // ========================================================================
@@ -956,8 +1009,8 @@ mod tests {
     #[tokio::test]
     async fn get_source_status_found() {
         let core = build_and_start().await;
-        let source = TestMockSource::with_auto_start("status-src".to_string(), false).unwrap();
-        core.add_source(source).await.unwrap();
+        let source = TestMockSource::fixture("status-src", false);
+        core.add_source_fixture(source).await.unwrap();
 
         let status = core.get_source_status("status-src").await.unwrap();
         assert_eq!(status, ComponentStatus::Added);
@@ -1027,8 +1080,8 @@ mod tests {
     #[tokio::test]
     async fn list_reactions_after_adding() {
         let core = build_with_source_and_query().await;
-        let reaction = TestMockReaction::new("r1".into(), vec!["q1".into()], false);
-        core.add_reaction(reaction).await.unwrap();
+        let reaction = TestMockReaction::fixture("r1".into(), vec!["q1".into()], false);
+        core.add_reaction_fixture(reaction).await.unwrap();
 
         let reactions = core.list_reactions().await.unwrap();
         assert_eq!(reactions.len(), 1);
@@ -1042,8 +1095,8 @@ mod tests {
     #[tokio::test]
     async fn get_reaction_status_found() {
         let core = build_with_source_and_query().await;
-        let reaction = TestMockReaction::new("r1".into(), vec!["q1".into()], false);
-        core.add_reaction(reaction).await.unwrap();
+        let reaction = TestMockReaction::fixture("r1".into(), vec!["q1".into()], false);
+        core.add_reaction_fixture(reaction).await.unwrap();
 
         let status = core.get_reaction_status("r1").await.unwrap();
         assert_eq!(status, ComponentStatus::Added);
@@ -1069,7 +1122,11 @@ mod tests {
         let config = core.get_current_config().await.unwrap();
         assert_eq!(config.id, "test");
         assert_eq!(config.queries.len(), 1);
-        assert_eq!(config.queries[0].id, "q1");
+        assert_eq!(
+            config.queries[0].id.as_ref(),
+            Some(core.component_by_name("q1").unwrap().id())
+        );
+        assert_eq!(config.queries[0].name, "q1");
     }
 
     #[tokio::test]
@@ -1087,8 +1144,8 @@ mod tests {
     #[tokio::test]
     async fn subscribe_source_logs_returns_history_and_receiver() {
         let core = build_and_start().await;
-        let source = TestMockSource::with_auto_start("log-src".to_string(), false).unwrap();
-        core.add_source(source).await.unwrap();
+        let source = TestMockSource::fixture("log-src", false);
+        core.add_source_fixture(source).await.unwrap();
 
         let (history, _receiver) = core.subscribe_source_logs("log-src").await.unwrap();
         // Freshly added source should have no log history yet
@@ -1112,8 +1169,8 @@ mod tests {
     #[tokio::test]
     async fn subscribe_source_events_returns_history_and_receiver() {
         let core = build_and_start().await;
-        let source = TestMockSource::with_auto_start("event-src".to_string(), false).unwrap();
-        core.add_source(source).await.unwrap();
+        let source = TestMockSource::fixture("event-src", false);
+        core.add_source_fixture(source).await.unwrap();
 
         let (history, _receiver) = core.subscribe_source_events("event-src").await.unwrap();
         // Newly added source should have at least a Stopped event from registration

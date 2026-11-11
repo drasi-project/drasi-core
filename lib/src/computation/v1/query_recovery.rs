@@ -19,13 +19,7 @@ use super::super::query_bootstrap::{
 };
 use super::*;
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ResetMarker {
-    pub(super) sequence: u64,
-    pub(super) in_progress: bool,
-    pub(super) generation: u64,
-}
+pub(super) use drasi_query_common::QueryResetMarker as ResetMarker;
 
 struct BootstrapCounts {
     spans: [tracing::Span; 2],
@@ -53,7 +47,7 @@ impl ContinuousQueryTransformer {
     /// never a partially cleared query. Completion leaves a baseline reset
     /// marker that carries the generation even for checkpoint stores whose
     /// `write_output_generation` is a no-op.
-    pub(super) async fn deprovision_state(&mut self) -> anyhow::Result<()> {
+    pub(super) async fn delete_owned_state(&mut self) -> anyhow::Result<()> {
         if let Some(bootstrap) = &self.bootstrap {
             bootstrap.stop().await?;
         }
@@ -150,13 +144,7 @@ impl ContinuousQueryTransformer {
                 .unwrap_or(0),
             None => 0,
         };
-        self.results
-            .snapshot()?
-            .generation
-            .max(marker.map_or(0, |marker| marker.generation))
-            .max(persisted)
-            .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("query output generation exhausted"))
+        ResetMarker::next_generation(self.results.snapshot()?.generation, persisted, marker)
     }
 
     fn reset_key(&self) -> String {
@@ -185,21 +173,11 @@ impl ContinuousQueryTransformer {
         if volatile_failed {
             self.reset_for_bootstrap().await?;
         } else if let Err(error) = self.recover().await {
-            if matches!(
-                error.downcast_ref::<QueryRecoveryError>(),
-                Some(QueryRecoveryError::OwnershipMismatch)
+            if !drasi_query_common::should_reset_query_error(
+                &error,
+                self.options.recovery,
+                self.reset_configuration,
             ) {
-                return Err(error);
-            }
-            let explicit_configuration_reset = self.reset_configuration
-                && matches!(
-                    error.downcast_ref::<QueryRecoveryError>(),
-                    Some(QueryRecoveryError::ConfigurationChanged)
-                );
-            if self.options.recovery != QueryRecoveryPolicy::AutoReset
-                && !explicit_configuration_reset
-                || error.downcast_ref::<QueryRecoveryError>().is_none()
-            {
                 return Err(error);
             }
             self.reset_for_bootstrap().await?;
@@ -351,15 +329,9 @@ impl ContinuousQueryTransformer {
                             .map_err(anyhow::Error::from)
                     });
                 match identity {
-                    Ok(Some(owner))
-                        if owner.construction_scope() != expected.construction_scope()
-                            || owner.graph_id() != expected.graph_id()
-                            || owner.query_id() != expected.query_id()
-                            || owner.incarnation() != expected.incarnation() =>
-                    {
-                        return Err(QueryRecoveryError::OwnershipMismatch.into());
+                    Ok(owner) => {
+                        drasi_query_common::validate_query_reset_owner(&expected, owner.as_ref())?
                     }
-                    Ok(_) => {}
                     Err(error) => {
                         log::warn!(
                             "Authorized reset of query '{}' encountered corrupt output {sequence}: {error:#}",
@@ -787,14 +759,16 @@ impl ContinuousQueryTransformer {
             return Ok(());
         }
         let query = self.query()?;
-        let in_progress = Bytes::from_static(b"evaluating-v1");
         query
             .resource_transaction(|| async {
-                query
-                    .resources()
-                    .checkpoint_store()
-                    .ok_or(IndexError::NotSupported)?
-                    .stage_checkpoint(PENDING_OUTPUT, 0, Some(&in_progress))
+                QueryPublicationCheckpoint::Evaluating
+                    .stage(
+                        query
+                            .resources()
+                            .checkpoint_store()
+                            .ok_or(IndexError::NotSupported)?
+                            .as_ref(),
+                    )
                     .await
             })
             .await?;
@@ -811,11 +785,14 @@ impl ContinuousQueryTransformer {
                 if let Some(output) = output {
                     self.stage_output(output).await?;
                 }
-                query
-                    .resources()
-                    .checkpoint_store()
-                    .ok_or(IndexError::NotSupported)?
-                    .stage_checkpoint(PENDING_OUTPUT, 0, None)
+                QueryPublicationCheckpoint::Complete
+                    .stage(
+                        query
+                            .resources()
+                            .checkpoint_store()
+                            .ok_or(IndexError::NotSupported)?
+                            .as_ref(),
+                    )
                     .await?;
                 Ok(())
             })

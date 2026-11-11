@@ -808,7 +808,7 @@ mod tests {
     #[test]
     fn test_index_error_from_drasi_core_index_error() {
         // Create a std::io::Error to wrap in IndexError::other
-        let io_error = std::io::Error::new(std::io::ErrorKind::Other, "test error");
+        let io_error = std::io::Error::other("test error");
         let core_error = drasi_core::interface::IndexError::other(io_error);
         let error: IndexError = core_error.into();
         match error {

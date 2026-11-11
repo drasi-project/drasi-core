@@ -23,8 +23,8 @@ use async_trait::async_trait;
 use super::{Component, ComponentRole, EdgeDefinition, Endpoint, GraphError, GraphResult};
 use crate::computation::v1::{
     data::validate_identifier, ComponentDescriptor, ComponentGeneration, ComponentId, EnvelopeSink,
-    EnvelopeSource, FailureDisposition, OutputEndpoint, PortId, ResourceId, SinkCompletion,
-    StreamId, Transformer,
+    EnvelopeSource, FailureDisposition, OutputEndpoint, ResourceId, SinkCompletion, StreamId,
+    Transformer,
 };
 
 pub use drasi_computation_contracts::{
@@ -532,14 +532,15 @@ impl ComponentCreationError {
 pub struct ConstructedComponent(pub(super) Component);
 
 impl ConstructedComponent {
+    pub(crate) fn descriptor(&self) -> &ComponentDescriptor {
+        self.0.descriptor()
+    }
+
     pub fn source(source: Box<dyn EnvelopeSource>) -> Self {
         Self(Component::Source(source))
     }
     pub fn transformer(transformer: Box<dyn Transformer>) -> Self {
         Self(Component::Transformer(transformer))
-    }
-    pub fn query(query: Box<dyn Transformer>) -> Self {
-        Self(Component::Query(query))
     }
     pub fn sink(sink: Box<dyn EnvelopeSink>) -> Self {
         Self(Component::Sink(sink))
@@ -554,6 +555,9 @@ impl ConstructedComponent {
 #[async_trait]
 pub trait ComponentFactory: Send + Sync {
     fn descriptor(&self) -> &FactoryDescriptor;
+    fn query_authoring(&self) -> Option<&dyn crate::computation::v1::QueryAuthoring> {
+        None
+    }
     /// Ports this factory can describe and the formats it actually implements
     /// for each. When present, the graph checks before construction that a
     /// specification's declared ports are exactly those its literal `ports`
@@ -591,8 +595,18 @@ pub trait ComponentFactory: Send + Sync {
     fn record_schemas(&self) -> Vec<Arc<crate::computation::v1::Schema>> {
         Vec::new()
     }
-    fn supports_reconfiguration(&self) -> bool {
-        false
+    /// Pure per-change assessment by the component author. Creation capability
+    /// alone never authorizes retaining, restarting or reconstructing an object.
+    /// References remain explicit; this must not perform I/O or mutate resources.
+    fn plan_update(
+        &self,
+        _current: &ComponentSpecification,
+        _proposed: &ComponentSpecification,
+    ) -> anyhow::Result<crate::computation::v1::ComponentUpdatePlan> {
+        anyhow::bail!(
+            "factory '{}' does not support managed updates",
+            self.descriptor().implementation.name
+        )
     }
     /// Whether construction consumes [`ConstructionContext::input_bindings`].
     /// Only such factories wait for their declared incoming endpoints and
@@ -695,6 +709,36 @@ pub struct ConstructionContext {
     output_catalogue: crate::computation::v1::OutputCatalogue,
     input_bindings: Vec<InputBinding>,
     observability: crate::observability::RuntimeObservability,
+    update_directive: Option<crate::computation::v1::ComponentUpdateDirective>,
+}
+
+/// An accepted update of an existing initialized object. This is execution
+/// context, not a serializable request or caller-supplied update authorization.
+pub struct ComponentUpdateContext {
+    /// Stable owner-issued operation ID, retained across retry and process recovery.
+    /// Durable effects must recognize retries across process loss, not merely
+    /// cache a result on the current object.
+    pub operation_id: Arc<str>,
+    /// The factory's approved strategy, validated by the configuration owner.
+    pub plan: crate::computation::v1::ComponentUpdatePlan,
+    /// The creation specification before this accepted update.
+    pub current: Arc<ComponentSpecification>,
+    /// Resolved target configuration and the object's actual bound resources.
+    pub proposed: ConstructionContext,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ComponentUpdateExecution {
+    pub(crate) operation_id: Arc<str>,
+    pub(crate) plan: crate::computation::v1::ComponentUpdatePlan,
+    pub(crate) current: Arc<ComponentSpecification>,
+    pub(crate) proposed: Arc<ComponentSpecification>,
+    pub(crate) require_confirmation: bool,
+}
+
+pub(crate) struct ConstructionBindings {
+    pub(crate) inputs: Vec<InputBinding>,
+    pub(crate) update: Option<crate::computation::v1::ComponentUpdateDirective>,
 }
 
 impl ConstructionContext {
@@ -718,6 +762,7 @@ impl ConstructionContext {
         )?;
         Ok(binding.metrics())
     }
+
     pub fn telemetry(&self) -> &crate::observability::GraphTelemetry {
         &self.observability.telemetry
     }
@@ -739,6 +784,13 @@ impl ConstructionContext {
                     self.component_id.as_str(),
                 ),
             })
+    }
+
+    /// The accepted update intent when this object is being reconstructed.
+    /// Initial creation has no directive. A directive is not a storage-reset
+    /// boolean: the owner validates data-boundary capabilities before issuing it.
+    pub fn update_directive(&self) -> Option<&crate::computation::v1::ComponentUpdateDirective> {
+        self.update_directive.as_ref()
     }
 
     /// The component's validated, declared incoming edges. Populated only for
@@ -786,10 +838,10 @@ impl ConstructionContext {
         specification: Arc<ComponentSpecification>,
         resources: BTreeMap<ResourceId, ResourceHandle>,
         schema: &ConfigurationSchema,
-        ports: (crate::computation::v1::OutputCatalogue, Vec<InputBinding>),
+        output_catalogue: crate::computation::v1::OutputCatalogue,
+        bindings: ConstructionBindings,
         observability: crate::observability::RuntimeObservability,
     ) -> Result<Self, ComponentCreationError> {
-        let (output_catalogue, input_bindings) = ports;
         let configuration = schema
             .resolve_values(&specification.configuration, &resources)
             .await?;
@@ -802,8 +854,9 @@ impl ConstructionContext {
             configuration,
             resources,
             output_catalogue,
-            input_bindings,
             observability,
+            input_bindings: bindings.inputs,
+            update_directive: bindings.update,
         })
     }
 }

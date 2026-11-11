@@ -8,7 +8,8 @@ Each dynamic library owns its configuration, factory, implementation and export.
 Shared crates contain helpers, not additional registered components.
 
 The dynamic plugins use the lightweight `drasi-computation-contracts` and
-`drasi-core-types` packages, not `drasi-lib` or the query engine. The SDK exposes
+`drasi-core-types` packages, not `drasi-lib`. Only the query transformer depends
+on the query engine and parsers. The SDK exposes
 only supported plugin operations and borrowed host services. Native sinks accept the standard graph-change schema from any source,
 transformer or query ([sink input contract](SINKS.md)); a query-result
 message does not require query execution. `make check-native-dependencies`
@@ -30,7 +31,9 @@ checks every native library independently, including its build dependencies.
 | Source | [drasi-computation-source-sqlite](sources/sqlite) | `drasi.sqlite/changes`, `drasi.sqlite/transactions`, `drasi.sqlite/replay-transactions`, `drasi.sqlite/shared-transactions` | Dynamic or Rust SDK |
 | Source | [drasi-computation-source-bridge](sources/bridge) | `drasi.bridge/source` | Static Rust factory |
 | Transformer | [drasi-computation-transformer-middleware](transformers/middleware) | `drasi.standard/middleware` | Dynamic or Rust SDK |
+| Transformer | [drasi-computation-transformer-view](transformers/view) | `drasi.standard/view` | Dynamic or Rust SDK; memory-backed maintained view and snapshots |
 | Transformer | [drasi-computation-transformer-arithmetic](transformers/arithmetic) | `drasi.standard/arithmetic` | Dynamic or Rust SDK |
+| Transformer | [drasi-computation-transformer-query](transformers/query) | `drasi.experimental/volatile-query`, `drasi.experimental/indexed-query`, `drasi.experimental/provider-query` | Dynamic or Rust SDK; explicit ordinary-query adapter through Host |
 | Sink | [drasi-computation-sink-capture](sinks/capture) | `drasi.standard/capture` | Dynamic or Rust SDK |
 | Sink | [drasi-computation-sink-http](sinks/http) | `drasi.network/http-sink` | Dynamic or Rust SDK |
 | Sink | [drasi-computation-sink-grpc](sinks/grpc) | `drasi.network/grpc-sink` | Dynamic or Rust SDK |
@@ -47,6 +50,14 @@ under the user-approved database-test deferral. See the
 and each family guide for the tested scope and operating restrictions.
 SQLite has no legacy reaction to migrate; no new SQLite sink is implied by this
 inventory.
+
+The query plugin is the normal explicitly selected Host/Server query
+implementation; the historical `drasi.experimental` names remain stable
+identities. The separate view component maintains map/relabel projections and
+exact retractions, but does not advertise durability, replay/follow or
+transaction participation. Native `scheduled_processing` is an optional
+borrowed service, not another plugin or graph: its standalone profile requires
+atomic persistent RocksDB. See each component/SDK guide for its actual limits.
 
 ## Build just one plugin
 
@@ -95,7 +106,8 @@ field/type-only metadata.
 For example, gRPC sink `batchSize` is bounded to `1..=65536`, while gRPC source
 adaptive ingress is restricted to `false`. These descriptions do not enable
 missing features. Rebuild the component library to publish the new details;
-loading an older native ABI 1.0 library remains supported.
+host and plugins must use native ABI 2.0.0 and the UUID wire-version-2 contract.
+Native ABI-1 and wire-version-1 libraries are rejected.
 
 ## Shared code and contracts
 
@@ -113,12 +125,25 @@ loading an older native ABI 1.0 library remains supported.
 Existing implementation names, implementation version `"1"` and configuration
 version `1` remain stable. New factory modes have distinct identities; consult
 each family guide for its schemas, resource requirements and recovery boundaries.
-The native plugin ABI remains **1.0.0**, with optional batching, query-snapshot,
-consumer-progress/cursor-policy, source-schema, source/bootstrap coordination and
-activation-credential extensions rather than changes to its base tables.
+The native plugin ABI is **2.0.0**, including lifecycle operations and the factory
+update planner. Batching, query-snapshot, consumer-progress/cursor-policy,
+source-schema, source/bootstrap coordination and activation credentials remain
+separately negotiated extensions.
 Source/bootstrap coordination exposes no application SQL API. The native ABI
 version is independent of the workspace package version and the legacy
 Source/Reaction ABI.
+
+Lifecycle hooks do not automatically make a component updateable. A factory
+must opt into update planning, and the host must validate the requested data
+handling against the actual graph. The counter supports interval changes that
+preserve its emitted values and sequence. The query plugin can increase output
+retention without replacing its evaluator or discarding history. It reports
+`Recreate`/`Rebootstrap` for changed query semantics, but Core currently rejects
+every such managed update: provider availability alone does not establish a safe
+snapshot/live boundary or downstream reset. Initial bootstrap is unaffected.
+The missing coordination is tracked in
+[CW-92](../../lib/docs/computation-graph-remaining-work.md#cw-92). See the
+[Host lifecycle contract](../host-sdk/README.md#component-lifecycle-and-managed-updates).
 
 Recovery-aware fan-out binds every actual required consumer independently.
 Native producers using `consumer_progress_v1` receive the exact read-only set,

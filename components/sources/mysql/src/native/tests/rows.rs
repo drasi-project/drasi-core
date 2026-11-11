@@ -261,7 +261,7 @@ async fn memory_rows() -> Result<()> {
         outputs.push(receiver);
         let sink = format!("{name}-sink");
         builder = builder
-            .query(Box::new(query))
+            .transformer(Box::new(query))
             .sink(Box::new(Sink {
                 descriptor: ComponentDescriptor::try_new(
                     id(&sink),
@@ -293,6 +293,18 @@ async fn memory_rows() -> Result<()> {
             );
     }
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("native-mysql-rows")
         .with_components(builder.build()?)
         .build()
@@ -586,7 +598,7 @@ async fn myisam_rows(tracked: bool) -> Result<()> {
         outputs.push(receiver);
         let sink = format!("{name}-sink");
         builder = builder
-            .query(Box::new(query))
+            .transformer(Box::new(query))
             .sink(Box::new(Sink {
                 descriptor: ComponentDescriptor::try_new(
                     id(&sink),
@@ -610,6 +622,18 @@ async fn myisam_rows(tracked: bool) -> Result<()> {
             );
     }
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("mysql-nontransactional-rows")
         .with_components(builder.build()?)
         .build()

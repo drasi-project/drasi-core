@@ -3,6 +3,9 @@
 
 #![cfg(test)]
 
+#[allow(dead_code)]
+mod computation_support;
+
 use drasi_lib::{
     channels::{
         BroadcastChangeDispatcher, ChangeDispatcher, ChangeMessage, ChannelChangeDispatcher,
@@ -108,6 +111,7 @@ async fn blocked_ordinary_enqueue_keeps_the_waiting_items_context() {
 mod traces {
     use super::*;
     use async_trait::async_trait;
+    use computation_support::{component, name};
     use drasi_core::{
         computation::InMemoryComputationProvider,
         models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
@@ -137,7 +141,7 @@ mod traces {
     fn definition() -> ContinuousQueryDefinition {
         ContinuousQueryDefinition {
             graph_id: "async-tests".into(),
-            id: ComponentId::try_new("query").unwrap(),
+            id: component("query"),
             query: "MATCH (n:Item) RETURN n.name AS name".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("query/out").unwrap(),
@@ -285,68 +289,56 @@ mod traces {
                 .clone();
             let mut graph = ComputationGraph::builder("async-tests")
                 .with_telemetry(telemetry())
-                .source(Box::new(EmptySource(
-                    ComponentDescriptor::try_new(
-                        ComponentId::try_new("source").unwrap(),
-                        vec![PortDescriptor::new(
-                            PortId::try_new("out").unwrap(),
-                            PortDirection::Output,
-                            GraphChangeCodec::schema().descriptor().clone(),
-                            PipeRequirements::default(),
-                        )],
-                    )
-                    .unwrap(),
-                )))
-                .query(Box::new(query))
-                .sink(Box::new(DrainSink(
-                    ComponentDescriptor::try_new(
-                        ComponentId::try_new("sink").unwrap(),
-                        vec![PortDescriptor::new(
-                            PortId::try_new("in").unwrap(),
-                            PortDirection::Input,
-                            output_schema,
-                            PipeRequirements::default(),
-                        )],
-                    )
-                    .unwrap(),
-                )))
+                .source(
+                    name("source"),
+                    Box::new(EmptySource(
+                        ComponentDescriptor::try_new(
+                            component("source"),
+                            vec![PortDescriptor::new(
+                                PortId::try_new("out").unwrap(),
+                                PortDirection::Output,
+                                GraphChangeCodec::schema().descriptor().clone(),
+                                PipeRequirements::default(),
+                            )],
+                        )
+                        .unwrap(),
+                    )),
+                )
+                .transformer(name("query"), Box::new(query))
+                .sink(
+                    name("sink"),
+                    Box::new(DrainSink(
+                        ComponentDescriptor::try_new(
+                            component("sink"),
+                            vec![PortDescriptor::new(
+                                PortId::try_new("in").unwrap(),
+                                PortDirection::Input,
+                                output_schema,
+                                PipeRequirements::default(),
+                            )],
+                        )
+                        .unwrap(),
+                    )),
+                )
                 .bind_stream(
-                    Endpoint::new(
-                        ComponentId::try_new("source").unwrap(),
-                        PortId::try_new("out").unwrap(),
-                    ),
+                    Endpoint::new(component("source"), PortId::try_new("out").unwrap()),
                     StreamId::try_new("source/out").unwrap(),
                 )
                 .bind_stream(
-                    Endpoint::new(
-                        ComponentId::try_new("query").unwrap(),
-                        PortId::try_new("out").unwrap(),
-                    ),
+                    Endpoint::new(component("query"), PortId::try_new("out").unwrap()),
                     StreamId::try_new("query/out").unwrap(),
                 )
                 .connect(
                     EdgeDefinition {
-                        from: Endpoint::new(
-                            ComponentId::try_new("source").unwrap(),
-                            PortId::try_new("out").unwrap(),
-                        ),
-                        to: Endpoint::new(
-                            ComponentId::try_new("query").unwrap(),
-                            PortId::try_new("in").unwrap(),
-                        ),
+                        from: Endpoint::new(component("source"), PortId::try_new("out").unwrap()),
+                        to: Endpoint::new(component("query"), PortId::try_new("in").unwrap()),
                     },
                     Box::new(BoundedPipeConfig { capacity: 1 }),
                 )
                 .connect(
                     EdgeDefinition::new(
-                        Endpoint::new(
-                            ComponentId::try_new("query").unwrap(),
-                            PortId::try_new("out").unwrap(),
-                        ),
-                        Endpoint::new(
-                            ComponentId::try_new("sink").unwrap(),
-                            PortId::try_new("in").unwrap(),
-                        ),
+                        Endpoint::new(component("query"), PortId::try_new("out").unwrap()),
+                        Endpoint::new(component("sink"), PortId::try_new("in").unwrap()),
                     ),
                     Box::new(BoundedPipeConfig { capacity: 1 }),
                 )
@@ -361,9 +353,7 @@ mod traces {
                         let mut observed = control.subscribe_observed();
                         observed
                             .wait_for(|graph| {
-                                graph.components[&ComponentId::try_new("query").unwrap()]
-                                    .failure
-                                    .is_some()
+                                graph.components[&component("query")].failure.is_some()
                             })
                             .await
                             .unwrap();
@@ -400,7 +390,9 @@ mod traces {
                 .find(|span| {
                     span.name == "component.start"
                         && field(span, "component_id")
-                            == Some(&opentelemetry::Value::String("query".into()))
+                            == Some(&opentelemetry::Value::String(
+                                component("query").to_string().into(),
+                            ))
                 })
                 .unwrap();
             assert_eq!(
@@ -485,7 +477,7 @@ mod traces {
                                 .component_id()
                                 .unwrap()
                                 .as_str(),
-                            "worker-service",
+                            component("worker-service").as_str(),
                         );
                         Ok::<_, anyhow::Error>(())
                     })
@@ -506,15 +498,18 @@ mod traces {
             let done = Arc::new(tokio::sync::Notify::new());
             let mut graph = ComputationGraph::builder("async-tests")
                 .with_telemetry(telemetry())
-                .service(Box::new(WorkService {
-                    descriptor: ComponentDescriptor::try_new(
-                        ComponentId::try_new("worker-service").unwrap(),
-                        vec![],
-                    )
-                    .unwrap(),
-                    inputs: receive,
-                    done: done.clone(),
-                }))
+                .service(
+                    name("worker-service"),
+                    Box::new(WorkService {
+                        descriptor: ComponentDescriptor::try_new(
+                            component("worker-service"),
+                            vec![],
+                        )
+                        .unwrap(),
+                        inputs: receive,
+                        done: done.clone(),
+                    }),
+                )
                 .build()
                 .unwrap();
             let run = graph.start().unwrap();
@@ -546,6 +541,8 @@ mod traces {
                     && span.parent_span_id.to_bytes() == [id; 8]));
         }
         assert!(work.iter().all(|span| field(span, "component_id")
-            == Some(&opentelemetry::Value::String("worker-service".into()))));
+            == Some(&opentelemetry::Value::String(
+                component("worker-service").to_string().into()
+            ))));
     }
 }

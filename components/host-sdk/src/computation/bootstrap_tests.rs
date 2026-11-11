@@ -790,6 +790,7 @@ async fn native_bootstrap_recipe_uses_declared_owners_and_unresolved_secrets() -
         .declare_resource(specification)?
         .provide_resource(id, handle)?
         .component(
+            ComponentName::try_new("owner")?,
             service.specification(ComponentId::try_new("owner")?, json!({}))?,
             service,
         )
@@ -804,6 +805,90 @@ async fn native_bootstrap_recipe_uses_declared_owners_and_unresolved_secrets() -
         .validate_query_scope("native-bootstrap", "native-bootstrap", &config.component)
         .is_err());
     assert!(!serde_json::to_string(&recipe)?.contains("fixture-only"));
+    Ok(())
+}
+
+#[test]
+fn bootstrap_recipes_accept_native_query_owners_without_relaxing_scope() -> anyhow::Result<()> {
+    use crate::management::{CompositeBootstrapConfig, NativeBootstrapConfig};
+    let plugin = NativePlugin::from_definition(drasi_computation_transformer_query::plugin()?)?;
+    let factories: [Arc<dyn ComponentFactory>; 2] = [
+        Arc::new(ContinuousQueryFactory::default()),
+        plugin.query_factory()?,
+    ];
+    let owner = ComponentId::try_new("query")?;
+    let resource = ResourceId::try_new("bootstrap")?;
+    let progress = ResourceId::try_new("progress")?;
+    let native = NativeBootstrapConfig {
+        component: owner.clone(),
+        implementation: ImplementationIdentity::try_new("test/bootstrap", "1")?,
+        configuration_version: 1,
+        configuration: BTreeMap::new(),
+        source_progress: Some(progress.clone()),
+        source_bootstrap: None,
+    };
+    let composite = CompositeBootstrapConfig {
+        component: owner.clone(),
+        providers: vec![ResourceId::try_new("child")?],
+    };
+    for factory in factories {
+        let mut specification = factory.specification_from_config(
+            owner.clone(),
+            json!({"query":"MATCH (n) RETURN n","stream":"query/out"}),
+        )?;
+        specification.dependencies = BTreeMap::from([
+            ("bootstrap".into(), vec![resource.clone()]),
+            ("source_progress".into(), vec![progress.clone()]),
+        ]);
+        let mut topology = ComputationGraph::empty("bootstrap-owners")?
+            .snapshot()
+            .select(GraphSelection::All)?;
+        topology.components.push(DesiredComponent {
+            name: ComponentName::try_new("query")?,
+            descriptor: specification.descriptor.clone(),
+            role: specification.role,
+            completion: None,
+            streams: BTreeMap::new(),
+            lifecycle: LifecyclePolicy::default(),
+            input_merge: InputMergePolicy::default(),
+            construction: ComponentConstruction::Factory(specification.clone()),
+        });
+        native.validate_owner(&resource, &topology)?;
+        composite.validate_owner(&resource, &topology)?;
+        let mut wrong_owner = native.clone();
+        wrong_owner.component = ComponentId::try_new("other")?;
+        assert!(wrong_owner.validate_owner(&resource, &topology).is_err());
+        let mut wrong_progress = native.clone();
+        wrong_progress.source_progress = Some(ResourceId::try_new("other-progress")?);
+        assert!(wrong_progress.validate_owner(&resource, &topology).is_err());
+        for invalid in ["role", "semantic", "slot"] {
+            let mut changed = specification.clone();
+            match invalid {
+                "role" => changed.role = ComponentRole::Source,
+                "semantic" => {
+                    changed.descriptor = changed
+                        .descriptor
+                        .with_semantic_kind(ComponentSemanticKind::Source);
+                }
+                "slot" => {
+                    changed.dependencies.remove("bootstrap");
+                    changed
+                        .dependencies
+                        .insert("wrong".into(), vec![resource.clone()]);
+                }
+                _ => unreachable!(),
+            }
+            topology.components[0].construction = ComponentConstruction::Factory(changed);
+            assert!(
+                native.validate_owner(&resource, &topology).is_err(),
+                "{invalid}"
+            );
+            assert!(
+                composite.validate_owner(&resource, &topology).is_err(),
+                "{invalid}"
+            );
+        }
+    }
     Ok(())
 }
 

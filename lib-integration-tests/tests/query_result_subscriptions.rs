@@ -44,7 +44,7 @@ async fn fixture(
             durability: None,
         },
     )?;
-    let core = DrasiLib::builder()
+    let core = lib_integration_tests::query_builder()
         .with_id(id)
         .with_priority_queue_capacity(1)
         .with_dispatch_buffer_capacity(1)

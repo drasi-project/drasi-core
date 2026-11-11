@@ -37,7 +37,7 @@ use tracing_subscriber::Layer;
 
 use super::callbacks::{FfiLogEntry, FfiLogLevel, FfiLogLevelFilter, LogCallbackFn};
 use super::types::FfiStr;
-use super::vtable_gen::{current_instance_log_ctx, InstanceLogContext};
+use super::vtable_gen::current_instance_log_ctx;
 
 /// Maximum verbosity forwarded across the FFI, stored as the numeric value
 /// of [`FfiLogLevelFilter`]. Defaults to `Trace` (forward everything) until
@@ -121,7 +121,7 @@ where
                 let info = SpanComponentInfo {
                     instance_id: visitor.instance_id.unwrap_or_default(),
                     component_id: visitor.component_id.unwrap_or_default(),
-                    component_type: visitor.component_type.unwrap_or_default(),
+                    _component_type: visitor.component_type.unwrap_or_default(),
                 };
                 span.extensions_mut().insert(info);
             }
@@ -217,7 +217,7 @@ where
 struct SpanComponentInfo {
     instance_id: String,
     component_id: String,
-    component_type: String,
+    _component_type: String,
 }
 
 /// Visitor that extracts component routing fields from span attributes.

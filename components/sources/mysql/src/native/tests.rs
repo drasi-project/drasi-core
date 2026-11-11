@@ -939,7 +939,7 @@ async fn native_factory_and_direct_sources_deliver_transactions_through_graph_pi
             NonZeroUsize::new(1).unwrap(),
         )?;
         let graph = ComputationGraph::builder("native-mysql")
-            .query(Box::new(query))
+            .transformer(Box::new(query))
             .sink(Box::new(sink));
         let graph = if factory_created {
             let factory = Arc::new(MySqlSourceFactory::default());

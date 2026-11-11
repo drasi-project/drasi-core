@@ -1,8 +1,8 @@
 # Shared Drasi data types
 
 This package owns graph elements, source changes, query values, projected result
-changes and storage-survival descriptions. It does not evaluate queries, parse
-query languages, run components or open storage.
+changes, storage-survival descriptions and indexed-state contracts. It does not
+evaluate queries, parse query languages, run components or open storage.
 
 The existing implementations are shared rather than copied. `drasi-core` exposes
 the same types through its existing model and value paths, while native component
@@ -54,11 +54,14 @@ these shapes and must be kept in sync by hand.
 
 ## Scope
 
-This is the shared value foundation: one lossless codec and typed element
-property values. It does not yet make graph and query default ports share one
-data contract; that follows in later work. The `VariableValue` equality, numeric
-grouping hash used by the query evaluator are unchanged;
-`DataValue` equality and hashing are separate and bitwise.
+Element and archive indexes, result indexes and accumulator values, future
+queues, checkpoints, outbox/live-result writers and session interfaces are
+available here without the evaluator. `ResultKey` retains the evaluator's exact
+numeric grouping equality and hashing rules; `DataValue` equality and hashing
+are separate and bitwise. Element-index join configuration carries the join
+definitions and matching slot numbers; predicates and path topology remain with
+the evaluator. These interfaces do not provide a native
+indexed-storage service or prove shared transaction ownership.
 
 Engine-dependent value tests remain in `drasi-core`; run those together with
 `cargo test -p drasi-core-types` when changing these definitions.

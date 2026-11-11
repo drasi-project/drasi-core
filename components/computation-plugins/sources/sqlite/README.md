@@ -1,6 +1,6 @@
 # Native SQLite source
 
-Independent native source library using ComputationGraph ABI `1.0.0`.
+Independent native source library using ComputationGraph ABI `2.0.0`.
 All factories use implementation/configuration version `1` and reuse the same
 bounded SQLite worker, SQL handles, capture/journal and REST routes as the
 host-linked native Rust source.

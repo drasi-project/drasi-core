@@ -53,37 +53,9 @@ use drasi_plugin_sdk::descriptor::{
 };
 use serial_test::serial;
 
-/// Locate the fixtures belonging to the selected Cargo build output.
-fn plugin_dir() -> PathBuf {
-    // Walk up from this crate's manifest dir to the workspace root
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // host-sdk is at components/host-sdk, workspace root is ../../
-    let workspace_root = manifest_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("Cannot find workspace root from CARGO_MANIFEST_DIR");
-    selected_plugin_dir(
-        workspace_root,
-        std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from),
-        std::env::var_os("DRASI_HOST_TEST_PLUGINS_DIR").map(PathBuf::from),
-    )
-}
-
-fn selected_plugin_dir(
-    workspace_root: &Path,
-    target: Option<PathBuf>,
-    fixtures: Option<PathBuf>,
-) -> PathBuf {
-    if let Some(directory) = fixtures {
-        return directory;
-    }
-    let target = match target {
-        Some(path) if path.is_absolute() => path,
-        Some(path) => workspace_root.join(path),
-        None => workspace_root.join("target"),
-    };
-    target.join("debug").join("plugins")
-}
+#[path = "fixtures/plugin_directory.rs"]
+mod plugin_directory;
+use plugin_directory::{plugin_dir, selected_plugin_dir};
 
 #[test]
 fn plugin_directory_honors_cargo_target_and_fixture_override() {
@@ -2884,6 +2856,18 @@ async fn test_e2e_cdylib_source_query_reaction() {
 
     // Build DrasiLib with source, query, reaction
     let core = drasi_lib::DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("e2e-test")
         .with_source(source)
         .with_query(
@@ -3061,7 +3045,7 @@ async fn test_e2e_multi_source_query_reaction() {
         .expect("Should create sse-sensors reaction");
 
     // ── Build DrasiLib ──
-    let core = drasi_lib::DrasiLib::builder()
+    let core = drasi_lib::DrasiLib::builder().with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone())
         .with_id("multi-e2e-test")
         .with_source(counter_source)
         .with_source(sensor_source)
@@ -3804,6 +3788,18 @@ async fn test_ffi_checkpoint_persist_and_resume_from() {
     // Use a persistent (in-memory) checkpoint store shared between phases.
     // Build DrasiLib with the source and a simple query
     let core1 = drasi_lib::DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("ckpt-test-1")
         .with_source(source1)
         .with_query(

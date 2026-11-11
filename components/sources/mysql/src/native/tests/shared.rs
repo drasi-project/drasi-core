@@ -116,7 +116,7 @@ fn queries(
         let sink = format!("{name}-sink");
         let (sender, receiver) = mpsc::channel(32);
         builder = builder
-            .query(Box::new(query))
+            .transformer(Box::new(query))
             .sink(Box::new(Sink {
                 descriptor: ComponentDescriptor::try_new(
                     id(&sink),
@@ -457,6 +457,18 @@ async fn graph_case(factory_created: bool, initialize: bool) -> Result<()> {
     let mut database = Database::new(MySqlRetention::UntilProcessed).await?;
     let path = tempfile::tempdir()?;
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("mysql-shared-graph")
         .build()
         .await?;
@@ -654,6 +666,18 @@ async fn replay_different_owners(add_member: bool) -> Result<()> {
     let mut database = Database::new(MySqlRetention::UntilProcessed).await?;
     let path = tempfile::tempdir()?;
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("mysql-replay-group")
         .build()
         .await?;
@@ -928,6 +952,18 @@ async fn unequal_snapshots() -> Result<()> {
     let mut database = Database::new(MySqlRetention::UntilProcessed).await?;
     let path = tempfile::tempdir()?;
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("mysql-unequal-snapshots")
         .build()
         .await?;

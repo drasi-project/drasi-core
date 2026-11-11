@@ -440,7 +440,7 @@ async fn test_sse_lifecycle_bind_failure_reports_error_without_running() {
     let addr = occupied_listener.local_addr().unwrap();
     let (update_tx, mut updates) = tokio::sync::mpsc::channel(16);
     reaction
-        .initialize(ReactionRuntimeContext::new(
+        .bind_runtime_context(ReactionRuntimeContext::new(
             "test-instance",
             reaction.id(),
             None,

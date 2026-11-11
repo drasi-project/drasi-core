@@ -23,6 +23,154 @@ ComputationGraph.
 This change does not import the retired engine's saved indexes/checkpoints.
 ComputationGraph keeps its existing storage namespaces.
 
+## Component UUIDs and names
+
+Desired topology version **2** requires a UUID in every component descriptor and
+a separate validated `name` on every `DesiredComponent`. The same UUID is the
+component's graph-node key. Names are unique across kinds, including stopped,
+waiting and failed declarations. Snapshots and selected subgraphs preserve both
+fields; factory specifications remain independent of mutable name metadata.
+
+For DrasiLib, rename through `rename_component` or `ComponentHandle::rename`;
+both write through the configuration owner. Standalone graphs also support
+`GraphControl::rename_component` and `DesiredMutation::RenameComponent`.
+A name-only desired-topology change preserves the existing instance. UUID-addressed connections,
+streams, plugin configuration, storage identity and construction generation do
+not change. Reusing the old name cannot retarget existing handles or connections.
+
+This is a breaking format change: rebuild authoring definitions with names and
+let Core assign their UUIDs, then use fresh processing state. Assigned native
+topology and stored definitions contain both fields. Old string IDs and version-1 topology records are not
+converted, migrated or deleted. Instance external-ID admission policy and trusted
+persisted restoration are separate from these graph naming APIs.
+
+## Configuration ownership and definition batches
+
+Every initialized DrasiLib has a configuration store. Without a configured
+backend it uses a private `MemoryConfigStore`; acceptance receipts then report
+`durable: false`, and a fresh instance starts with fresh records. Store providers
+declare `ConfigurationStoreGuarantees` explicitly. `DURABLE` requires
+reconstructible component and resource recipes; selecting a store never changes
+the instance's immutable `allowExternalComponentIds` policy.
+
+Definition-based single and batch operations share preparation, ID assignment,
+validation, acceptance and realization:
+
+- `apply_configuration(revision, request_id, ConfigurationRequest)` accepts
+  optional replacement `desired` records plus `additions`. Each addition is a
+  `NewComponentDefinition::Native` or `::Ordinary` with an optional ID.
+- `create_managed_component` and `create_managed_ordinary_component` submit
+  one-element batches through that path.
+- `create_managed_components(revision, request_id, |ids| ...)` builds a complete
+  native `DesiredTopology` of factory/resource recipes. Its callback declares
+  configuration only; actual construction follows acceptance.
+- `create_computation_component(ComponentDefinition)` and `create_components(|ids| ...)`
+  use the same owner without a caller-supplied request ID. The latter supplies
+  `ComponentBatch` metadata and deferred factories, not eager component objects.
+- `with_component_batch_factory(|ids| ...)` contributes scoped native declarations
+  to the same initial batch as ordinary builder declarations. Every member is
+  validated before any component constructor runs.
+- `ids.allocate()?` generates a UUID. `ids.allocate_requested(Some(id))?` accepts
+  that exact UUID only when the instance permits external IDs. Derived helpers
+  must belong to an owner allocated in the same scope.
+
+New additions never become updates by matching a name. Updates in `desired`
+address existing UUIDs. Business configuration remains opaque: UUID-looking
+strings inside plugin settings are not rewritten or treated as references.
+
+Native additions can declare UUID-addressed relationships to previously accepted
+components. Accepted native topology contains only native declarations; an edge
+to an ordinary query can therefore be stored in `boundary_relationships` until
+ordinary records are expanded. Both relationship collections are owned desired
+configuration, not disposable inspection context. Reconciliation combines them
+with generated query input edges and binds required links once both endpoints
+exist, without changing their UUIDs. An unresolved name is not a native endpoint;
+allocate the dependency through its normal creation API before wiring it.
+
+`AcceptanceReceipt.creation.components` contains every newly declared
+component's UUID and original name. Its `allocations` transcript and
+`request_digest` are stored atomically with the definition. Reusing the request ID
+with the same operation returns those original assignments, even after deletion;
+it does not recreate deleted members. Changed operations conflict. Historical
+restoration still loads actual records through the configured store owner.
+
+Durable builders intentionally reject initial component additions, including
+query declarations and native batches. Configure factories/resolvers and the
+store, build the instance from its saved records, then submit revisioned
+definition requests. Process-local constructor/object paths do not make opaque
+objects reconstructible and are not a durable-import mechanism.
+
+Ordinary memory-only constructors also use this path. Supply lifecycle and input
+metadata before constructing:
+
+```rust,ignore
+let source = core.create_source("orders", false, |id| make_source(id)).await?;
+let reaction = core.create_reaction(
+    "consumer",
+    vec![ComponentReference::by_name("view")?],
+    true,
+    |id, inputs| make_reaction(id, inputs),
+).await?;
+```
+
+Async variants additionally accept `requested_id: Option<ComponentId>` and return
+`(object, metadata)` from their futures. Constructors receive assigned UUIDs;
+reaction inputs remain names until the owner commits their UUID bindings. Names
+are never resolved again after binding. Adding already constructed objects requires
+external-ID opt-in and memory-only storage. Their IDs are never rewritten.
+Updates address an existing UUID rather than adopting a new identity.
+
+The memory store records process-local declarations explicitly as opaque
+bindings. A pending opaque constructor has unavailable configuration, not a fake
+empty plugin configuration. Removing its object invalidates that binding;
+neither an old snapshot nor reuse of its UUID can restore that object. Durable
+ordinary records instead use the configured `OrdinaryComponentResolver` and
+explicit query factory. Current and historical restoration load the actual
+store owner's records; ordinary import DTOs have no restoration authority.
+
+## Object lifecycle and assessed updates
+
+Object lifetime is distinct from activation. Native components implement optional
+async, fallible `initialize`, `start`, `stop` and `dispose` hooks. Ordinary
+Source/Reaction implementations first bind their required runtime context through
+`bind_runtime_context(context)`; their optional `initialize()` takes no arguments.
+Initialization runs once per actual object, after binding and before first start.
+Normal stop/start retains that initialized object. Final retirement calls
+`dispose`, including after partial initialization. Failed cleanup retains its
+actual owner and blocks conflicting activation.
+
+`pause_processing`/`resume_processing` are temporary processing boundaries, not
+aliases for stop/start. Borrowed adapters do not take lifecycle ownership.
+Explicit destructive removal orders stop, `delete_owned_resources`, dispose and
+final release. Disposal, update and ordinary shutdown do not delete stored state.
+
+Managed updates require a registered factory's pure `plan_update` assessment:
+`InPlace`, `Restart` or `Recreate`, with explicit `Preserve` or `Rebootstrap` data
+semantics. The default is unsupported. Retained objects execute `apply_update`;
+reconstruction uses the factory with an owner-issued `ComponentUpdateDirective`.
+There is no opaque-object or replacement-callback update API. Source/reaction
+update façades accept `OrdinaryComponentRecord`; native definitions use
+`apply_configuration`. Memory-only constructor callbacks remain creation inputs.
+
+`AcceptanceReceipt.updates` retains accepted plans and operation IDs.
+`CommittedConfiguration.pending_updates` records unfinished execution, including
+current and proposed recipes, atomically with the target configuration.
+`ConfigurationSession::complete_updates` confirms exact operations without
+advancing the desired revision. Core gates processing until that confirmation;
+an uncertain acknowledgement is resolved by authoritative readback. Historical
+configuration snapshots do not grant permission to replay their old update
+operations. Plugins with durable update effects must handle repeated operation
+IDs across process recovery.
+
+The generic configuration path currently rejects `Rebootstrap`: initial
+bootstrap support alone does not establish an authoritative snapshot/live
+handover, safe handling of superseded work, or downstream reset acknowledgement.
+It never synthesizes `reset_configuration` to bypass this boundary.
+Native live changes to input bindings or resource recipes also require an
+assessment that represents those bindings. The specification-only planner cannot
+establish that contract, so such changes are rejected rather than silently
+reconstructing a live component from creation support alone.
+
 ## Declare before dependencies are available
 
 A valid component can be declared before a required source, query, resource or
@@ -40,20 +188,24 @@ declaration-first policy.
 
 ## Library settings
 
-Set these on `DrasiLib::builder()`. Sources and reactions are plugin objects
-supplied by the application, not plugin kinds that the library discovers from
-Server YAML.
+Set these on `DrasiLib::builder()`. The application supplies source/reaction
+objects or native factory declarations; the library does not discover Server
+YAML plugin kinds itself.
 
 | Builder method | Default | Meaning |
 |---|---|---|
 | `with_id(id)` | `"drasi-lib"` | Instance identity; keep it stable when resuming instance-scoped storage |
+| `with_query_factory(factory)` | None | Explicitly select query construction before adding ordinary queries; no linked fallback |
+| `with_configuration_store(store)` | Private in-memory configuration store | Supply a configuration owner with explicit durability/reconstruction guarantees |
+| `with_allow_external_component_ids(allow)` | `false` | Immutable opt-in for caller-chosen UUIDs and preconstructed objects; does not waive reconstruction requirements |
+| `with_component_batch_factory(declare)` | No initial native batch | Scope UUID allocation for deferred native factories; accepted atomically with ordinary builder declarations in memory-only instances |
 | `with_priority_queue_capacity(n)` | 10,000 when no override is set | Default query input-queue capacity |
 | `with_dispatch_buffer_capacity(n)` | 1,000 when no override is set | Default runtime dispatch-buffer capacity |
 | `with_default_recovery_policy(policy)` | `RecoveryPolicy::Strict` | Query recovery default when the query has no override |
 | `with_activation_timeout_secs(seconds)` | 300 | Positive per-component deadline covering input binding, startup and output binding |
 | `with_startup_timeout_secs(seconds)` | 600 | Overall `start()` budget, including lifecycle-lock admission and managed reconciliation |
 | `with_shutdown_timeout_secs(seconds)` | 60 | Overall `stop()` / `shutdown()` budget, including lock admission and cleanup phases |
-| `with_construction_timeout_secs(seconds)` | 5 | One budget for configuration resolution and component construction/reconfiguration |
+| `with_construction_timeout_secs(seconds)` | 5 | One budget for configuration resolution, construction and initialization, or an accepted update |
 | `with_resource_construction_timeout_secs(seconds)` | 30 | Per-resource construction budget |
 | `with_cleanup_timeout_secs(seconds)` | 5 | Individual owner cleanup budget, independent of the overall shutdown budget |
 | `with_index_provider(name, provider)` | None registered by this call | Register an existing index provider under a name |
@@ -68,6 +220,21 @@ Plugins can also allocate their own queues; these settings are not a total
 process-memory limit. In particular, check the reaction plugin's own queue
 settings rather than assuming an already-created plugin inherits every builder
 default.
+
+For native plugin-backed queries, select `plugin.query_factory()?`; Server
+resolves the unique eligible loaded implementation. Loading/registering
+component recipes is separate from selecting an ordinary-query default.
+An empty/source-only instance needs no query factory. See the
+[query plugin guide](../../components/computation-plugins/transformers/query/README.md).
+
+`create_computation_component` accepts a native `ComponentDefinition`, assigning
+its UUID before factory construction. `add_source_from_factory` and
+`add_reaction_from_factory` accept `ComponentAddition` declarations whose
+caller-chosen UUIDs require external-ID opt-in. Handles can represent declarations
+waiting for dependencies. `ComponentAddition::declaration` can precede factory registration.
+Explicit recipes preserve versions, resource dependencies and secret references
+for `GraphConfigurationSnapshot::reconstructible_topology()`. Existing legacy
+object-based APIs remain supported; the new recipe constructors are native-only.
 
 `DrasiLibConfig` has a different ID default: constructing/deserializing it without
 an ID generates a UUID. The Rust builder defaults to `"drasi-lib"`. For persistent
@@ -92,19 +259,25 @@ let builder = DrasiLib::builder()
 
 ## Query settings
 
-Use `Query::cypher(id)` or `Query::gql(id)`, then pass the built `QueryConfig` to
+Use `Query::cypher(name)` or `Query::gql(name)`, then pass the fallible `build()?`
+result (`QueryConfig`) to
 DrasiLib. GQL means the graph query language, not GraphQL.
 
 The serialization column below describes **DrasiLib's `QueryConfig`**. It is not
-a replacement for Server's configuration DTOs.
+a replacement for Server's configuration DTOs or the evaluator's configuration.
+Authoring IDs are optional; `AssignedQueryConfig` returned by inspection has an
+assigned UUID. A bare input string always means a name, including UUID-looking
+strings. Use `QueryInputConfig::by_id(id)` or the JSON `{"id":"UUID"}` reference
+form to address an ID explicitly.
 
 | Rust builder method | Serialized `QueryConfig` field | Default / behaviour |
 |---|---|---|
-| `Query::cypher(id)` / `Query::gql(id)` | `id`, `queryLanguage` | ID required; default language `Cypher`, alternative `GQL` |
+| `Query::cypher(name)` / `Query::gql(name)` | `name`, `queryLanguage` | Name required; default language `Cypher`, alternative `GQL` |
+| `with_id(id)` | `id` | Omit for a new Core-assigned UUID; a supplied new UUID requires external-ID opt-in |
 | `query(text)` | `query` | Required query text |
-| `from_input(id)` | `inputs[].component` (or the bare `inputs[]` name) | Ordered list of upstream components; position determines input rank |
-| `from_input_port(id, port)` | `inputs[].port` | Consume a named output port; otherwise the component's primary (or only) output is used |
-| `from_input_with_pipeline(id, names)` | `inputs[].pipeline` | No per-input middleware pipeline by default |
+| `from_input(name)` | `inputs[].component` (or the bare `inputs[]` name) | Ordered list of upstream names; position determines input rank |
+| `from_input_port(name, port)` | `inputs[].port` | Consume a named output port; otherwise the component's primary (or only) output is used |
+| `from_input_with_pipeline(name, names)` | `inputs[].pipeline` | No per-input middleware pipeline by default |
 | `with_input(input)` | `inputs[]` | Fully specified input with port, label selectors and pipeline |
 | `with_result_label(label)` | `result.label` | Optional non-empty node label for published results; the output schema stays graph-change |
 | `with_middleware(item)` | `middleware` | Empty; each call adds one middleware definition |
@@ -179,13 +352,15 @@ recoveryPolicy: strict
 
 Deserializing configuration does not register source/reaction plugins.
 When loading a `DrasiLibConfig`, explicitly apply its instance
-settings and queries to your builder and supply the plugin objects/providers.
+settings and queries to your builder and supply the query factory, plugin
+objects/providers or native factory declarations.
 
 ## Ordering and buffers
 
 The source list is significant. `primary` ranks before `secondary` in the example.
-For queued events, comparison uses source-reported event timestamp, then this
-query-local rank, then the raw source sequence number.
+Each producer's admitted order is preserved. Among the available producer heads,
+comparison uses source-reported event timestamp, then this query-local rank,
+then the raw source sequence number.
 
 - Use the source event wrapper's timestamp, not an element's `effective_from`
   value or a profiling timestamp.

@@ -163,6 +163,77 @@ impl OutputCatalogue {
         self.handle(endpoint.clone(), resolved)
     }
 
+    pub(crate) async fn read_when_ready<T, F: Future<Output = ReadResult<T>>>(
+        &self,
+        endpoint: &OutputEndpoint,
+        read: impl Fn(OutputHandle) -> F,
+    ) -> ReadResult<T> {
+        let mut publications = self.registry.clone();
+        let generation = self
+            .registry_snapshot()
+            .observed
+            .components
+            .get(&endpoint.component)
+            .map(|component| component.generation);
+        loop {
+            publications.borrow_and_update();
+            let publication = self.registry_snapshot();
+            let result = match Self::resolve_at(&publication, endpoint)
+                .and_then(|resolved| self.handle(endpoint.clone(), resolved))
+            {
+                Ok(handle) => read(handle).await,
+                Err(error) => Err(error),
+            };
+            match result {
+                Err(OutputReadError::Retired)
+                    if !matches!(
+                        *self.state.borrow(),
+                        GraphState::Stopping
+                            | GraphState::Completed
+                            | GraphState::Cancelled
+                            | GraphState::Failed
+                            | GraphState::CleanupRequired
+                    ) && self
+                        .registry_snapshot()
+                        .observed
+                        .components
+                        .get(&endpoint.component)
+                        .is_some_and(|component| {
+                            Some(component.generation) == generation
+                                && !matches!(
+                                    component.lifecycle,
+                                    ComponentLifecycle::Failed | ComponentLifecycle::Stopping
+                                )
+                        }) =>
+                {
+                    // Activation changes the operation epoch before publishing readiness.
+                    // No snapshot/replay has escaped this wait, and replacement stays fenced.
+                    publications
+                        .changed()
+                        .await
+                        .map_err(|_| OutputReadError::Retired)?;
+                    continue;
+                }
+                Err(error @ OutputReadError::NotReady(_)) => {
+                    if self
+                        .registry_snapshot()
+                        .observed
+                        .components
+                        .get(&endpoint.component)
+                        .is_some_and(|component| component.lifecycle == ComponentLifecycle::Failed)
+                    {
+                        return Err(error);
+                    }
+                    publications
+                        .changed()
+                        .await
+                        .map_err(|_| OutputReadError::Retired)?;
+                }
+                result => return result,
+            }
+        }
+    }
+
     fn handle(&self, endpoint: OutputEndpoint, resolved: Resolved) -> ReadResult<OutputHandle> {
         if resolved.description.snapshot == Provision::NotConstructed
             && resolved.description.replay == Provision::NotConstructed

@@ -122,32 +122,38 @@ async fn directly_constructed_query_uses_real_evaluator_and_commit_boundaries() 
     async {
         let mut graph = ComputationGraph::builder("query-boundaries")
             .with_telemetry(settings(TelemetryProfile::Debug, true, &metrics))
-            .source(Box::new(Source(
-                ComponentDescriptor::try_new(
-                    component("source"),
-                    vec![PortDescriptor::new(
-                        port("out"),
-                        PortDirection::Output,
-                        input_schema,
-                        PipeRequirements::default(),
-                    )],
-                )
-                .unwrap(),
-                Some(OutputEnvelope::new(port("out"), input)),
-            )))
-            .query(Box::new(query))
-            .sink(Box::new(Sink(
-                ComponentDescriptor::try_new(
-                    component("sink"),
-                    vec![PortDescriptor::new(
-                        port("in"),
-                        PortDirection::Input,
-                        output_schema,
-                        PipeRequirements::default(),
-                    )],
-                )
-                .unwrap(),
-            )))
+            .source(
+                name("source"),
+                Box::new(Source(
+                    ComponentDescriptor::try_new(
+                        component("source"),
+                        vec![PortDescriptor::new(
+                            port("out"),
+                            PortDirection::Output,
+                            input_schema,
+                            PipeRequirements::default(),
+                        )],
+                    )
+                    .unwrap(),
+                    Some(OutputEnvelope::new(port("out"), input)),
+                )),
+            )
+            .transformer(name("query"), Box::new(query))
+            .sink(
+                name("sink"),
+                Box::new(Sink(
+                    ComponentDescriptor::try_new(
+                        component("sink"),
+                        vec![PortDescriptor::new(
+                            port("in"),
+                            PortDirection::Input,
+                            output_schema,
+                            PipeRequirements::default(),
+                        )],
+                    )
+                    .unwrap(),
+                )),
+            )
             .bind_stream(endpoint("source", "out"), stream("source"))
             .bind_stream(endpoint("query", "out"), stream("query"))
             .connect(
@@ -188,7 +194,7 @@ async fn directly_constructed_query_uses_real_evaluator_and_commit_boundaries() 
     assert_eq!(
         metrics.count(
             "drasi.component.calls",
-            &[("component_id", "query"), ("operation", "confirm_outputs")]
+            &[("component_id", component("query").as_str()), ("operation", "confirm_outputs")]
         ),
         1
     );
@@ -210,7 +216,7 @@ async fn directly_constructed_query_uses_real_evaluator_and_commit_boundaries() 
     assert_eq!(
         metrics.count(
             "drasi.component.inputs_processed",
-            &[("component_id", "query")]
+            &[("component_id", component("query").as_str())]
         ),
         1
     );
@@ -262,16 +268,25 @@ async fn processing_failure_and_cancellation_have_one_local_outcome() {
         async {
             let mut graph = ComputationGraph::builder("interrupted")
                 .with_telemetry(settings(TelemetryProfile::Debug, true, &metrics))
-                .source(Box::new(FiniteSource::new(
-                    "source",
-                    vec![output(root("source", 1, &[1]))],
-                )))
-                .transformer(Box::new(Pending {
-                    descriptor: descriptor("pending", &["in"], &["out"]),
-                    entered: entered.clone(),
-                    cancel,
-                }))
-                .sink(Box::new(CollectSink::new("sink", &["in"], Arc::default())))
+                .source(
+                    name("source"),
+                    Box::new(FiniteSource::new(
+                        "source",
+                        vec![output(root("source", 1, &[1]))],
+                    )),
+                )
+                .transformer(
+                    name("pending"),
+                    Box::new(Pending {
+                        descriptor: descriptor("pending", &["in"], &["out"]),
+                        entered: entered.clone(),
+                        cancel,
+                    }),
+                )
+                .sink(
+                    name("sink"),
+                    Box::new(CollectSink::new("sink", &["in"], Arc::default())),
+                )
                 .bind_stream(endpoint("source", "out"), stream("source"))
                 .bind_stream(endpoint("pending", "out"), stream("pending"))
                 .connect(
@@ -314,14 +329,14 @@ async fn processing_failure_and_cancellation_have_one_local_outcome() {
         assert_eq!(
             metrics.count(
                 "drasi.component.inputs_processed",
-                &[("component_id", "pending")]
+                &[("component_id", component("pending").as_str())]
             ),
             0
         );
         assert_eq!(
             metrics.count(
                 "drasi.component.outputs_emitted",
-                &[("component_id", "pending")]
+                &[("component_id", component("pending").as_str())]
             ),
             0
         );
@@ -338,7 +353,11 @@ async fn processing_failure_and_cancellation_have_one_local_outcome() {
         );
         let durations = metrics.matching(
             "drasi.component.operation.duration",
-            &[("component_id", "pending"), ("operation", "transform"), ("outcome", outcome)],
+            &[
+                ("component_id", component("pending").as_str()),
+                ("operation", "transform"),
+                ("outcome", outcome),
+            ],
         );
         assert_eq!(durations[0].histogram.len(), 1);
         if cancel {
@@ -384,11 +403,14 @@ async fn readiness_updates_synchronously_and_idle_service_stays_up() {
     let started = Arc::new(tokio::sync::Notify::new());
     let mut graph = ComputationGraph::builder("readiness")
         .with_telemetry(settings(TelemetryProfile::Basic, false, &metrics))
-        .service(Box::new(ReadyService {
-            descriptor: descriptor("service", &[], &[]),
-            control: binding.clone(),
-            started: started.clone(),
-        }))
+        .service(
+            name("service"),
+            Box::new(ReadyService {
+                descriptor: descriptor("service", &[], &[]),
+                control: binding.clone(),
+                started: started.clone(),
+            }),
+        )
         .build()
         .unwrap();
     let run = graph.start().unwrap();
@@ -396,7 +418,11 @@ async fn readiness_updates_synchronously_and_idle_service_stays_up() {
     let (result, ()) = tokio::join!(run, async {
         started.notified().await;
         assert_eq!(
-            metrics.matching("drasi.component.up", &[("component_id", "service")])[0].gauge,
+            metrics.matching(
+                "drasi.component.up",
+                &[("component_id", component("service").as_str())]
+            )[0]
+            .gauge,
             0.0
         );
         let sender = binding.lock().unwrap().clone().unwrap();
@@ -410,17 +436,29 @@ async fn readiness_updates_synchronously_and_idle_service_stays_up() {
         .unwrap()
         .unwrap();
         assert_eq!(
-            metrics.matching("drasi.component.up", &[("component_id", "service")])[0].gauge,
+            metrics.matching(
+                "drasi.component.up",
+                &[("component_id", component("service").as_str())]
+            )[0]
+            .gauge,
             1.0
         );
         sender.not_ready().unwrap();
         assert_eq!(
-            metrics.matching("drasi.component.up", &[("component_id", "service")])[0].gauge,
+            metrics.matching(
+                "drasi.component.up",
+                &[("component_id", component("service").as_str())]
+            )[0]
+            .gauge,
             0.0
         );
         sender.ready().unwrap();
         assert_eq!(
-            metrics.matching("drasi.component.up", &[("component_id", "service")])[0].gauge,
+            metrics.matching(
+                "drasi.component.up",
+                &[("component_id", component("service").as_str())]
+            )[0]
+            .gauge,
             1.0
         );
         control.cancel();
@@ -428,7 +466,11 @@ async fn readiness_updates_synchronously_and_idle_service_stays_up() {
     assert!(matches!(result, Err(GraphError::Cancelled)));
     graph.shutdown().await.unwrap();
     assert_eq!(
-        metrics.matching("drasi.component.up", &[("component_id", "service")])[0].gauge,
+        metrics.matching(
+            "drasi.component.up",
+            &[("component_id", component("service").as_str())]
+        )[0]
+        .gauge,
         0.0
     );
 }
@@ -461,11 +503,17 @@ async fn supported_acknowledgements_record_physical_queue_and_input_identity() {
                 ),
             )
             .unwrap()
-            .source(Box::new(FiniteSource::new(
-                "source",
-                vec![output(root("source", 1, &[1]))],
-            )))
-            .sink(Box::new(CollectSink::new("sink", &["in"], Arc::default())))
+            .source(
+                name("source"),
+                Box::new(FiniteSource::new(
+                    "source",
+                    vec![output(root("source", 1, &[1]))],
+                )),
+            )
+            .sink(
+                name("sink"),
+                Box::new(CollectSink::new("sink", &["in"], Arc::default())),
+            )
             .bind_stream(endpoint("source", "out"), stream("source"))
             .connect(
                 edge("source", "sink"),
@@ -596,15 +644,17 @@ async fn admitted_publication_attempts_and_retries_do_not_duplicate_physical_out
             .unwrap()
             .provide_resource(resource.clone(), channel.resource())
             .unwrap()
-            .source(Box::new(Admitted {
-                descriptor: descriptor("source", &[], &["out"]),
-                admission: admission.clone(),
-            }))
-            .sink(Box::new(CollectSink::new(
-                "sink",
-                &["in"],
-                received.clone(),
-            )))
+            .source(
+                name("source"),
+                Box::new(Admitted {
+                    descriptor: descriptor("source", &[], &["out"]),
+                    admission: admission.clone(),
+                }),
+            )
+            .sink(
+                name("sink"),
+                Box::new(CollectSink::new("sink", &["in"], received.clone())),
+            )
             .bind_stream(endpoint("source", "out"), stream("source"))
             .connect(
                 edge("source", "sink"),
@@ -653,7 +703,7 @@ async fn admitted_publication_attempts_and_retries_do_not_duplicate_physical_out
     assert_eq!(
         metrics.count(
             "drasi.component.calls",
-            &[("component_id", "source"), ("operation", "publish")]
+            &[("component_id", component("source").as_str()), ("operation", "publish")]
         ),
         3
     );
@@ -661,7 +711,7 @@ async fn admitted_publication_attempts_and_retries_do_not_duplicate_physical_out
     assert_eq!(
         metrics.count(
             "drasi.component.outputs_emitted",
-            &[("component_id", "source")]
+            &[("component_id", component("source").as_str())]
         ),
         1
     );
@@ -816,27 +866,31 @@ async fn burst_case(count: usize, continuation: bool, tracing: bool) {
     async {
         let mut graph = ComputationGraph::builder("burst")
             .with_telemetry(settings(TelemetryProfile::Debug, tracing, &metrics))
-            .source(Box::new(FiniteSource::new(
-                "source",
-                vec![output(root("source", 1, &[7]))],
-            )))
-            .transformer(Box::new(Burst {
-                descriptor: descriptor("transform", &["in"], &["out"]),
-                count,
-                pending: false,
-                continuation,
-                sequence: 0,
-            }))
-            .sink(Box::new(CollectSink::new(
-                "one",
-                &["in"],
-                collected.clone(),
-            )))
-            .sink(Box::new(CollectSink::new(
-                "two",
-                &["in"],
-                collected.clone(),
-            )))
+            .source(
+                name("source"),
+                Box::new(FiniteSource::new(
+                    "source",
+                    vec![output(root("source", 1, &[7]))],
+                )),
+            )
+            .transformer(
+                name("transform"),
+                Box::new(Burst {
+                    descriptor: descriptor("transform", &["in"], &["out"]),
+                    count,
+                    pending: false,
+                    continuation,
+                    sequence: 0,
+                }),
+            )
+            .sink(
+                name("one"),
+                Box::new(CollectSink::new("one", &["in"], collected.clone())),
+            )
+            .sink(
+                name("two"),
+                Box::new(CollectSink::new("two", &["in"], collected.clone())),
+            )
             .bind_stream(endpoint("source", "out"), stream("source"))
             .bind_stream(endpoint("transform", "out"), stream("transform"))
             .connect(
@@ -864,35 +918,41 @@ async fn burst_case(count: usize, continuation: bool, tracing: bool) {
     assert_eq!(
         metrics.count(
             "drasi.component.calls",
-            &[("component_id", "transform"), ("operation", "transform")]
+            &[("component_id", component("transform").as_str()), ("operation", "transform")]
         ),
         1
     );
     assert_eq!(
         metrics.count(
             "drasi.component.calls",
-            &[("component_id", "transform"), ("operation", "continue_transform")]
+            &[
+                ("component_id", component("transform").as_str()),
+                ("operation", "continue_transform")
+            ]
         ),
         u64::from(continuation)
     );
     assert_eq!(
         metrics.count(
             "drasi.component.calls",
-            &[("component_id", "transform"), ("operation", "confirm_outputs")]
+            &[
+                ("component_id", component("transform").as_str()),
+                ("operation", "confirm_outputs")
+            ]
         ),
         attempts as u64
     );
     assert_eq!(
         metrics.count(
             "drasi.component.inputs_processed",
-            &[("component_id", "transform"), ("completion", "transformed")]
+            &[("component_id", component("transform").as_str()), ("completion", "transformed")]
         ),
         1
     );
     assert_eq!(
         metrics.count(
             "drasi.component.outputs_emitted",
-            &[("component_id", "transform")]
+            &[("component_id", component("transform").as_str())]
         ),
         produced as u64
     );
@@ -908,7 +968,7 @@ async fn burst_case(count: usize, continuation: bool, tracing: bool) {
     let durations = metrics.matching(
         "drasi.component.operation.duration",
         &[
-            ("component_id", "transform"),
+            ("component_id", component("transform").as_str()),
             ("operation", "transform"),
             ("outcome", "success"),
         ],
@@ -965,11 +1025,17 @@ async fn off_has_no_production_series_or_operation_spans() {
     async {
         let mut graph = ComputationGraph::builder("off")
             .with_telemetry(settings(TelemetryProfile::Off, true, &metrics))
-            .source(Box::new(FiniteSource::new(
-                "source",
-                vec![output(root("source", 1, &[1]))],
-            )))
-            .sink(Box::new(CollectSink::new("sink", &["in"], Arc::default())))
+            .source(
+                name("source"),
+                Box::new(FiniteSource::new(
+                    "source",
+                    vec![output(root("source", 1, &[1]))],
+                )),
+            )
+            .sink(
+                name("sink"),
+                Box::new(CollectSink::new("sink", &["in"], Arc::default())),
+            )
             .bind_stream(endpoint("source", "out"), stream("source"))
             .connect(
                 edge("source", "sink"),
@@ -1014,12 +1080,21 @@ async fn retained_and_multicast_backlog_counts_physical_records_not_subscribers_
         .unwrap()
         .provide_resource(resource.clone(), channel.resource())
         .unwrap()
-        .source(Box::new(FiniteSource::new(
-            "source",
-            vec![output(root("source", 1, &[1]))],
-        )))
-        .sink(Box::new(CollectSink::new("one", &["in"], received.clone())))
-        .sink(Box::new(CollectSink::new("two", &["in"], received.clone())))
+        .source(
+            name("source"),
+            Box::new(FiniteSource::new(
+                "source",
+                vec![output(root("source", 1, &[1]))],
+            )),
+        )
+        .sink(
+            name("one"),
+            Box::new(CollectSink::new("one", &["in"], received.clone())),
+        )
+        .sink(
+            name("two"),
+            Box::new(CollectSink::new("two", &["in"], received.clone())),
+        )
         .bind_stream(endpoint("source", "out"), stream("source"))
         .connect(
             edge("source", "one"),
@@ -1042,7 +1117,7 @@ async fn retained_and_multicast_backlog_counts_physical_records_not_subscribers_
     assert_eq!(
         metrics.count(
             "drasi.component.outputs_emitted",
-            &[("component_id", "source")]
+            &[("component_id", component("source").as_str())]
         ),
         1
     );

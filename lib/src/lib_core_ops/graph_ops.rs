@@ -16,8 +16,11 @@
 //!
 //! Provides public API methods for querying the component dependency graph,
 //! including graph snapshots, dependency lookups, and impact analysis.
+//! String selectors are exact current component names; use the paired `_by_id`
+//! methods for explicit [`crate::config::ComponentId`] selection.
 
 use crate::component_graph::{ComponentNode, GraphSnapshot};
+use crate::config::ComponentId;
 use crate::error::Result;
 use crate::lib_core::DrasiLib;
 
@@ -58,7 +61,7 @@ impl DrasiLib {
     /// were removed or stopped. For example, queries that subscribe to a source,
     /// or reactions that subscribe to a query.
     ///
-    /// Returns an empty list if the component has no dependents or doesn't exist.
+    /// Returns an empty list if the component has no dependents.
     ///
     /// # Example
     /// ```no_run
@@ -71,11 +74,17 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_dependents(&self, id: &str) -> Result<Vec<ComponentNode>> {
+    pub async fn get_dependents(&self, name: &str) -> Result<Vec<ComponentNode>> {
+        let id = self.resolve_any_component_name(name)?;
+        self.get_dependents_by_id(&id).await
+    }
+
+    /// Get dependent components for an immutable component UUID.
+    pub async fn get_dependents_by_id(&self, id: &ComponentId) -> Result<Vec<ComponentNode>> {
         Ok(self
             .get_graph()
             .await?
-            .get_dependents(id)
+            .get_dependents(id.as_str())
             .into_iter()
             .cloned()
             .collect())
@@ -87,7 +96,7 @@ impl DrasiLib {
     /// For example, the sources that a query subscribes to, or the queries
     /// that a reaction subscribes to.
     ///
-    /// Returns an empty list if the component has no dependencies or doesn't exist.
+    /// Returns an empty list if the component has no dependencies.
     ///
     /// # Example
     /// ```no_run
@@ -100,11 +109,17 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_dependencies(&self, id: &str) -> Result<Vec<ComponentNode>> {
+    pub async fn get_dependencies(&self, name: &str) -> Result<Vec<ComponentNode>> {
+        let id = self.resolve_any_component_name(name)?;
+        self.get_dependencies_by_id(&id).await
+    }
+
+    /// Get dependency components for an immutable component UUID.
+    pub async fn get_dependencies_by_id(&self, id: &ComponentId) -> Result<Vec<ComponentNode>> {
         Ok(self
             .get_graph()
             .await?
-            .get_dependencies(id)
+            .get_dependencies(id.as_str())
             .into_iter()
             .cloned()
             .collect())
@@ -126,18 +141,22 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn can_remove_component(&self, id: &str) -> Result<()> {
-        let id = crate::computation::v1::ComponentId::try_new(id)
-            .map_err(|error| crate::DrasiError::validation(error.to_string()).with_cause(error))?;
+    pub async fn can_remove_component(&self, name: &str) -> Result<()> {
+        let id = self.resolve_any_component_name(name)?;
+        self.can_remove_component_by_id(&id).await
+    }
+
+    /// Check removal safety for an immutable component UUID.
+    pub async fn can_remove_component_by_id(&self, id: &ComponentId) -> Result<()> {
         let control = self.computation_control()?;
         let publication = control.registry_snapshot();
-        let mut dependents = publication.desired.data_dependents(&id);
+        let mut dependents = publication.desired.data_dependents(id);
         if self
             .computation_runtime
             .ordinary_queries_at(&publication)?
-            .contains_key(&id)
+            .contains_key(id)
         {
-            let owned = crate::computation::runtime::native_query::query_members(&publication, &id);
+            let owned = crate::computation::runtime::native_query::query_members(&publication, id);
             dependents.retain(|dependent| !owned.contains_key(dependent));
         }
         if !dependents.is_empty() {
@@ -159,6 +178,7 @@ impl DrasiLib {
 mod tests {
     use crate::component_graph::ComponentKind;
     use crate::sources::tests::TestMockSource;
+    use crate::test_helpers::creation::BuilderFixtures;
     use crate::{DrasiLib, Query};
 
     // ========================================================================
@@ -168,6 +188,18 @@ mod tests {
     #[tokio::test]
     async fn get_graph_empty_has_instance_root() {
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("empty-graph")
             .build()
             .await
@@ -194,16 +226,29 @@ mod tests {
 
     #[tokio::test]
     async fn get_graph_with_components() {
-        let source = TestMockSource::new("src1".to_string()).unwrap();
+        let source = TestMockSource::fixture("src1", true);
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("graph-test")
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
                     .from_input("src1")
                     .auto_start(false)
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .await
@@ -230,16 +275,29 @@ mod tests {
 
     #[tokio::test]
     async fn get_dependents_source_with_query() {
-        let source = TestMockSource::new("src1".to_string()).unwrap();
+        let source = TestMockSource::fixture("src1", true);
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("dep-test")
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
                     .from_input("src1")
                     .auto_start(false)
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .await
@@ -248,22 +306,38 @@ mod tests {
         let dependents = core.get_dependents("src1").await.unwrap();
 
         assert_eq!(dependents.len(), 1);
-        assert_eq!(dependents[0].id, "q1");
+        assert_eq!(
+            dependents[0].id,
+            core.component_by_name("q1").unwrap().id().as_str()
+        );
         assert_eq!(dependents[0].kind, ComponentKind::Query);
     }
 
     #[tokio::test]
     async fn get_dependents_leaf_returns_empty() {
-        let source = TestMockSource::new("src1".to_string()).unwrap();
+        let source = TestMockSource::fixture("src1", true);
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("leaf-test")
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
                     .from_input("src1")
                     .auto_start(false)
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .await
@@ -280,16 +354,29 @@ mod tests {
 
     #[tokio::test]
     async fn get_dependencies_query_depends_on_source() {
-        let source = TestMockSource::new("src1".to_string()).unwrap();
+        let source = TestMockSource::fixture("src1", true);
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("deps-test")
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
                     .from_input("src1")
                     .auto_start(false)
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .await
@@ -298,16 +385,31 @@ mod tests {
         let deps = core.get_dependencies("q1").await.unwrap();
 
         assert_eq!(deps.len(), 1);
-        assert_eq!(deps[0].id, "src1");
+        assert_eq!(
+            deps[0].id,
+            core.component_by_name("src1").unwrap().id().as_str()
+        );
         assert_eq!(deps[0].kind, ComponentKind::Source);
     }
 
     #[tokio::test]
     async fn get_dependencies_source_has_none() {
-        let source = TestMockSource::new("src1".to_string()).unwrap();
+        let source = TestMockSource::fixture("src1", true);
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("no-deps-test")
-            .with_source(source)
+            .with_source_fixture(source)
             .build()
             .await
             .unwrap();
@@ -322,16 +424,29 @@ mod tests {
 
     #[tokio::test]
     async fn can_remove_component_safe() {
-        let source = TestMockSource::new("src1".to_string()).unwrap();
+        let source = TestMockSource::fixture("src1", true);
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("remove-safe")
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
                     .from_input("src1")
                     .auto_start(false)
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .await
@@ -343,20 +458,36 @@ mod tests {
 
     #[tokio::test]
     async fn can_remove_component_unsafe_has_dependents() {
-        let source = TestMockSource::new("src1".to_string()).unwrap();
+        let source = TestMockSource::fixture("src1", true);
         let core = DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("remove-unsafe")
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(
                 Query::cypher("q1")
                     .query("MATCH (n:Test) RETURN n")
                     .from_input("src1")
                     .auto_start(false)
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .await
             .unwrap();
+
+        let source_id = core.component_by_name("src1").unwrap().id().to_string();
+        let query_id = core.component_by_name("q1").unwrap().id().to_string();
 
         // src1 has q1 depending on it — cannot remove
         let result = core.can_remove_component("src1").await;
@@ -364,11 +495,11 @@ mod tests {
 
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("src1"),
+            err_msg.contains(&source_id),
             "Error should mention the component ID"
         );
         assert!(
-            err_msg.contains("q1"),
+            err_msg.contains(&query_id),
             "Error should mention the dependent ID"
         );
     }

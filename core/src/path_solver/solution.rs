@@ -93,7 +93,7 @@ impl MatchPathSolution {
 
     pub(crate) fn clear_incomplete_optional_paths(&mut self, match_path: &MatchPath) {
         // Failed optional paths null only the variables they introduced, not earlier bindings.
-        let mut paths: Vec<_> = match_path.optional_paths.iter().copied().collect();
+        let mut paths: Vec<_> = match_path.optional_paths().iter().copied().collect();
         paths.sort_unstable();
         for path in paths {
             let incomplete = match_path

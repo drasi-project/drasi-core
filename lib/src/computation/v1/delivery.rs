@@ -16,12 +16,11 @@ use drasi_core::{
     interface::IndexError,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::{
     output_identity::{Candidate, Producer},
-    ChangeEnvelope, ChangeOperation, ComponentId, EnvelopeCodec, InputEnvelope, PortId,
-    RecoveryScope, ReplayRejection, StreamId, TransactionContext,
+    EnvelopeCodec, InputEnvelope, PortId, RecoveryScope, ReplayRejection, StreamId,
+    TransactionContext,
 };
 
 const METADATA_KEY: &str = "computation:delivery:v1";
@@ -250,7 +249,7 @@ impl Ledger {
                             .iter()
                             .rev()
                             .nth(1)
-                            .map_or(true, |previous| previous.sequence == stream.handled)
+                            .is_none_or(|previous| previous.sequence == stream.handled)
                 },
                 "delivery handled cursor disagrees with receipts"
             );

@@ -595,7 +595,7 @@ async fn postgres_direct_and_factory_sources_deliver_whole_groups_through_actual
             size(1),
         )?;
         let graph = ComputationGraph::builder("native-postgres")
-            .query(Box::new(query))
+            .transformer(Box::new(query))
             .sink(Box::new(sink));
         let graph = if factory_created {
             let factory = Arc::new(PostgresTransactionSourceFactory::default());

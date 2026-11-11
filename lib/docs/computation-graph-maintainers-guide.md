@@ -1,16 +1,13 @@
 # Maintaining ComputationGraph
 
-**Development snapshot: 27 October 2026, `agentofreality-parallel-computation-graph`.**
-
 This guide is for a Drasi engineer who knows the ComponentGraph-based
 `drasi-lib`: source/query/reaction managers, source subscriptions, the query
 worker, result channels, plugin callbacks and component status. It explains
 where those responsibilities now live, what stayed the same, and how to
 investigate a problem without recreating the old execution paths.
 
-The implementation described is the current Core checkout, based on
-[`3b22333e`](https://github.com/drasi-project/drasi-core/commit/3b22333e56b46c9682366799cf055890ce07f500),
-and its matching Server integration. This is a development description, not
+The implementation described is the current Core checkout and its matching
+Server integration. This is a development description, not
 a claim that every deployment or plugin has been release-qualified.
 
 **The central change is ownership, not a new query language.** Previously,
@@ -18,8 +15,11 @@ ComponentGraph largely recorded metadata, relationships, runtime references and
 status while managers coordinated execution. ComputationGraph owns the
 components, their connections, resources, execution tasks and lifecycle.
 The familiar managers are now facades over that one runtime, not second
-registries or executors. Both ordinary and explicitly composed queries run
-`ContinuousQueryTransformer` and use the same Core evaluator.
+registries or executors. Ordinary queries use an explicitly registered native
+query factory; explicitly composed graphs can load the same plugin. Both use
+the existing Core evaluator and `drasi-query-common`. The linked
+`ContinuousQueryTransformer` remains an explicitly selected reference, not a
+fallback used when native registration is missing.
 
 Here, **ordinary** means the familiar Source/Query/Reaction authoring and plugin
 interfaces. **Native** means implementing the computation component contracts
@@ -117,12 +117,12 @@ The former `ComponentGraph` alias has been removed.
 | Familiar place or responsibility | Current owner and first files to inspect |
 |---|---|
 | Manager registration and object lookup | [`runtime/mod.rs`](../src/computation/runtime/mod.rs) assembles declarations; [`graph/registry.rs`](../src/computation/v1/graph/registry.rs) publishes the authoritative objects and state |
-| Query worker, subscription forwarders and future-queue reader | [`pipeline.rs`](../src/computation/v1/pipeline.rs) assembles helpers; [`graph.rs`](../src/computation/v1/graph.rs) runs nodes; [`query.rs`](../src/computation/v1/query.rs) owns query processing |
+| Query worker, subscription forwarders and future-queue reader | [`pipeline.rs`](../src/computation/v1/pipeline.rs) and the [Host query adapter](../../components/host-sdk/src/computation/query.rs) assemble resources/helpers; [`graph.rs`](../src/computation/v1/graph.rs) runs nodes; the [native query plugin](../../components/computation-plugins/transformers/query/src/lib.rs) uses [shared execution](../../components/query-common/src/execution.rs) |
 | Query-language evaluation | [`core/src/computation/query_adapter.rs`](../../core/src/computation/query_adapter.rs) calls the shared [`QueryEvaluator`](../../core/src/query/evaluator.rs), not a new evaluator |
 | Source and result channels | [`ranked_pipe.rs`](../src/computation/v1/ranked_pipe.rs) adapts ordinary admission; native pipes own per-connection acceptance/handling; [`query_catalog.rs`](../src/computation/v1/query_catalog.rs) serves ordinary result subscriptions |
 | Component start/stop and asynchronous status updates | [`graph/controller.rs`](../src/computation/v1/graph/controller.rs) owns operations; coherent registry publication drives [`runtime/events.rs`](../src/computation/runtime/events.rs) synchronously |
 | Source/Reaction plugin callbacks | [`plugin_source.rs`](../src/computation/v1/plugin_source.rs) and [`plugin_reaction.rs`](../src/computation/v1/plugin_reaction.rs) keep adapters graph-owned; plugin workers still need real cleanup |
-| Query persistence and output cache | Query indexes, checkpoints, current result nodes and outbox have explicit owners; [`query_recovery.rs`](../src/computation/v1/query_recovery.rs) and [`query_delivery.rs`](../src/computation/v1/query_delivery.rs) coordinate recovery and handoff |
+| Query persistence and output cache | Actual Host/Core resources own storage/transactions; shared [publication](../../components/query-common/src/publication.rs), [recovery](../../components/query-common/src/recovery.rs) and [output](../../components/query-common/src/query_output.rs) retain canonical state without a Host row mirror |
 
 For example, fixing a missing source subscription still requires understanding
 the source plugin. But adding a new worker loop to QueryManager would now bypass
@@ -167,16 +167,19 @@ relationships do not turn readiness notifications into data records.
 Ordinary Source and Reaction objects appear as graph-owned service
 adapters at the root. Their semantic kinds remain Source and Reaction;
 "service" describes their execution interface, not how users should see them.
-Ordinary query APIs assemble a `ContinuousQueryTransformer` and its subscription,
-timer and output helpers directly in the same graph. The query uses the existing
-Core evaluator. There is no separate `QueryInstance` execution host or private
-query graph.
+Ordinary query APIs assemble the registered native query component and its
+subscription, timer and output helpers directly in the same graph.
+`with_query_factory`, `register_query_factory` or pipeline `query_factory`
+selects the implementation explicitly; Server selects the unique eligible
+loaded factory. The plugin owns its evaluator while actual graph resources own
+transactions and cleanup. There is no separate `QueryInstance` execution host,
+private query graph or Host evaluator RPC.
 
 ```mermaid
 flowchart TB
     D[DrasiLib] -->|owns| R[Root ComputationGraph]
     R -->|owns| S[Ordinary source adapter]
-    R -->|owns| Q[ContinuousQueryTransformer]
+    R -->|owns| Q[Selected native query component]
     R -->|owns| A[Ordinary reaction adapter]
     R -->|owns| N[Explicit native components]
     Q -->|uses| EV[Existing drasi-core query engine]
@@ -788,7 +791,7 @@ rules:
   output. Envelope logical event/due time remains separate from transport
   counters and local wait clocks. Ordinary result metadata is projected at
   the result API boundary, not duplicated throughout native execution.
-- **One wire.** Native/binary envelope wire is version 1 and ABI layout 1.0. All
+- **One wire.** Native/binary envelope wire is version 2 and ABI layout 2.0. All
   matching hosts and libraries must be rebuilt; there is no reader or migration
   for an earlier wire or for query-row records, so a mismatch is a build error to
   fix rather than data to convert.
@@ -838,14 +841,11 @@ format. Matching custom-schema ports connect directly; differing formats need an
 intentional conversion. See
 [Choosing a port format](computation-graph-schemas-ports-pipes.md#choosing-a-port-format).
 
-**Extensions not provided:**
-
-- A stateful **view transform** component, tracked as
-  [CW-68](computation-graph-remaining-work.md#cw-68) (see
-  [the middleware note](#standalone-middleware-retains-the-state-needed-to-interpret-changes)).
-  It is a new, separate component, not a mode of `map`/`jq` and not part of
-  current acceptance.
-- New query syntax: `ORDER BY`, `LIMIT` and `SKIP` stay unsupported.
+The [stateful view transformer](../../components/computation-plugins/transformers/view/README.md)
+provides a separate memory-backed maintained projection. It is not a mode of
+`map`/`jq`, and its snapshot capability does not imply replay, durable storage or
+snapshot-input initialization. `ORDER BY`, `LIMIT` and `SKIP` remain unsupported
+query syntax.
 
 ### Event time and progress sequence answer different questions
 
@@ -986,19 +986,29 @@ The design is in [`time_merge.rs`](../src/computation/v1/time_merge.rs) and
 [`time_merge/recovery.rs`](../src/computation/v1/time_merge/recovery.rs);
 [time-merge tests](../tests/computation_time_merge.rs) cover both time behavior
 and graph integration. The [feature guide](computation-graph-time-merge.md)
-defines exact policies and administrative held-event resolution. There is no
-explicit source-watermark protocol, retroactive query correction, or standard
-Server/factory recipe for this component.
+defines exact policies and administrative held-event resolution.
+`SourceTimeMergeDefinition::specification` supplies the standard
+`drasi/source-time-merge` factory recipe; Host/Server share the pinned
+`sourceTimeMergeStorage` resource recipe. Custom schemas still use direct Rust
+construction. There is no explicit source-watermark protocol or retroactive
+query correction, and the factory's canonical scope does not migrate state from
+older direct-constructor namespaces.
 
 ## Query execution, bootstrap and scheduled work
 
 ### The runtime wraps the evaluator; it does not replace it
 
-`ContinuousQueryTransformer` handles graph input/output, query configuration,
-progress, recovery and result publication. The standard `ContinuousQueryFactory`
-constructs that component directly with output-delivery tracking enabled.
-Direct query constructors opt in with `with_delivery_tracking()`, so do not
-assume their default output-handoff configuration matches the factory.
+`drasi-computation-transformer-query` handles graph input/output, configuration,
+progress, recovery and publication through shared `drasi-query-common` helpers.
+Its Host adapter binds the real processing resources and ordinary read/catalogue
+facades. It is a separately loadable native transformer, not a callback that
+asks the Host to evaluate a query.
+
+The explicit linked `ContinuousQueryFactory` and
+`ContinuousQueryTransformer` remain reference constructors. That factory enables
+output-delivery tracking; direct constructors opt in with
+`with_delivery_tracking()`. Do not mistake their defaults or preservation tests
+for implicit native selection.
 `TransactionTransformer` is only the linear transaction container; it is not
 a second query host or a query execution mode.
 
@@ -1017,7 +1027,8 @@ wrong progress or bad publication belongs in the computation adapter/runtime.
 Do not compensate for an evaluator bug by adding query-language logic to
 `run_node`.
 
-In [`query.rs`](../src/computation/v1/query.rs), follow `process` from input
+Follow the [native indexed adapter](../../components/computation-plugins/transformers/query/src/indexed.rs)
+and [shared execution](../../components/query-common/src/execution.rs) from input
 progress validation through the evaluator's pre-commit hook. That hook stages
 result changes, materialized result rows and source checkpoints while the
 index transaction is still open. The local ready result view is updated after
@@ -1026,7 +1037,7 @@ the outbox answers "what result changes can a consumer replay?" They are not
 interchangeable storage.
 
 The query output's logical position also differs from its retry transport
-position. [`query_delivery.rs`](../src/computation/v1/query_delivery.rs)
+position. The [shared query-output owner](../../components/query-common/src/query_output.rs)
 restores unconfirmed output, assigns replay transport sequences and confirms
 handoff. A crash after commit must replay output rather than reevaluate the
 same input against already-updated state.
@@ -1118,7 +1129,7 @@ every downstream query or external consumer.
 
 Read the shared [`source_transaction.rs`](../../components/computation-contracts/src/source_transaction.rs)
 for framing and limits, then `evaluate_source_transaction` in the core adapter and
-[`query_results.rs`](../../core/src/computation/query_results.rs) for result
+[`transaction_projection.rs`](../../core/src/query/transaction_projection.rs) for result
 consolidation. [Source-transaction tests](../tests/computation_source_transactions.rs)
 cover incomplete input and final-result semantics.
 
@@ -1249,14 +1260,33 @@ If evaluation rolls back, the due work must remain recoverable.
 
 Scheduled hints have their own kind and transport progress. They must not
 advance live source checkpoints. Source time, timer due time and local time
-used to wait are distinct. Timer sleeps periodically recheck the wall clock;
-this is not a general deterministic clock-injection framework.
+used to wait are distinct. Timer sleeps periodically recheck the wall clock.
+Shared `CommittedSchedule`/`FutureWakeup` and `PhysicalClock` live in
+`drasi-computation-contracts`; query-common retains its re-exports. Query test
+controls fence actual due-work processing and immediate output confirmation,
+not unrelated downstream effects.
 
 Start in [`query_scheduling.rs`](../src/computation/v1/query_scheduling.rs),
 then the core adapter's `evaluate_due_future` and the query's `on_wakeup`.
 [Temporal-retraction tests](../tests/computation_temporal_retractions.rs)
 and the scheduling mutation cases in
 [query fault tests](../tests/computation_query_faults.rs) protect this ownership.
+
+Non-query native transformers can negotiate `scheduled_processing` with indexed
+processing, committed input progress and wakeups. The borrowed
+`NativeProcessingContext` requests, replaces, cancels, claims and completes work;
+`processing.scheduling().wakeup_source()` supplies the graph wakeup hook.
+The existing revocable mailbox, future queue and actual computation transaction
+remain the owners. Only committed deadlines are observed, stale incarnation
+tokens reject, and a successful claim needs explicit completion.
+
+This standalone service requires an actual complete atomic persistent bundle
+and process-restart durability; the qualified backend is RocksDB, not no-op
+memory or an independent non-atomic writer. The
+[loaded scheduling fixture and restart cases](../../components/host-sdk/tests/native_scheduling.rs)
+cover both Tokio runtimes. They do not establish the
+[mixed application profile](computation-graph-remaining-work.md#cw-82) or
+exactly-once external delivery.
 
 ## Reading state without running another query
 
@@ -1347,7 +1377,7 @@ command-capable `GraphControl` or component owners.
 publication; resolving them independently could cross a replacement.
 
 Start with [`output_catalogue.rs`](../src/computation/v1/output_catalogue.rs),
-[`query_output.rs`](../src/computation/v1/query_output.rs),
+[`query_output.rs`](../../components/query-common/src/query_output.rs),
 [`query_catalog.rs`](../src/computation/v1/query_catalog.rs) and
 [`runtime/native_query.rs`](../src/computation/runtime/native_query.rs).
 [Native read transport limits](#native-output-read-services) are separate
@@ -1394,17 +1424,22 @@ diagnostic, still run explicit `Insert`/`Replace`/`Delete` rules, and leave
 configured processing failures still error. `relabel`, `decoder`, `parse_json` and
 `promote` forward removals and replacements, and `unwind` is the stage that uses
 retained previous elements. Do not add retained input/output state to `map` or
-`jq`. A **view transform**, which maintains an output dataset and retracts or
-re-keys outputs as input changes, is a different, future component
-([CW-68](computation-graph-remaining-work.md#cw-68)); it would own its own
-storage and recovery, and it does not exist today.
+`jq`. The separate `drasi.standard/view` factory reconstructs complete input
+images and applies map/relabel rules once to each affected final input. It
+retains the actual output associations, so filtering, removed children and key
+changes retract the previously emitted images without rerunning historical
+mapping. Whole-envelope staging protects its state on failure.
 
 For example, a `map` rule emits an event when `quantity < 5`. It can emit an
 update at quantity 3 and ignore a later event at quantity 8. Ignoring that
 event does **not** emit a deletion of the earlier output. A continuous query
 maintaining `WHERE quantity < 5` can retract the result because it owns the
-indexed prior state. Do not document event filtering as maintained-view
-filtering or add hidden view storage to `map`/`jq` to imitate it.
+indexed prior state. The view component can do the same for its configured
+projection. Its initial profile offers coherent snapshots and volatile producer
+progress, not transactions, durability, replay/follow or input deduplication.
+Same-object restart retains state; reconstruction starts empty with a fresh
+epoch. Full initial inputs and ordered lossless delivery remain prerequisites.
+Do not add hidden view storage to `map`/`jq` to imitate it.
 
 Read [`middleware.rs`](../src/computation/v1/middleware.rs) alongside
 [`middleware_recovery.rs`](../src/computation/v1/middleware_recovery.rs).
@@ -1885,6 +1920,21 @@ or removed. A configuration snapshot records reconstructible definitions,
 not a snapshot of processing state. Restoring it cannot rewind a database,
 restore pruned events or undo an external effect.
 
+Native `add_source_from_factory` and `add_reaction_from_factory` return
+declaration handles and preserve failed construction for retry. A declaration
+may precede its factory; registration wakes normal reconciliation rather than a
+new polling worker. Existing legacy Source/Reaction object APIs remain intact;
+the new recipe constructors are native-only.
+
+`GraphConfigurationSnapshot::reconstructible_topology()` exports explicit
+factory, resource and pipe recipes with implementation/configuration versions and
+original secret references. Opaque external bindings reject rather than become
+invented empty settings. Host's versioned index-provider registration can satisfy
+pinned recipes; an unversioned registration cannot. Server defers resource
+construction to the graph so missing dependencies remain owned declarations.
+Durable source-time merger recipes require an independent persistent atomic
+provider; shared groups and volatile memory are not interchangeable profiles.
+
 ### Removing durable state needs more than a stopped status
 
 Replacing a persistent resource can destroy the only remaining path to
@@ -2000,7 +2050,8 @@ custom schemas and several subscribers keep working.
 
 The separate `drasi_computation_plugin_consumer_progress_v1` symbol adds
 producer consumer-progress inspection and an optional retained position
-comparator. Base ABI `1.0.0`, wire `1` and recovery-v1 are unchanged.
+comparator. Current libraries use base ABI `2.0.0`, wire `2` and the separate
+recovery-v1 interface.
 Opt-in source/transformer factories require one `consumer_progress` Checkpoint
 dependency containing the actual `Arc<ConsumerProgressSet>`; it cannot coexist
 with single-owner progress or admission on that producer.
@@ -2103,15 +2154,15 @@ establish atomic snapshot/live follow. The native SSE sink uses this service.
 Do not confuse it with exporting a component's providers or accepting incoming
 recovery snapshot envelopes.
 
-See the [SDK read and binding contracts](../../components/computation-plugin-sdk/README.md#optional-per-output-snapshot-replay-and-follow-providers)
+See the [SDK read and binding contracts](../../components/computation-plugin-sdk/README.md#optional-per-output-snapshot-replay-follow-and-query-readers)
 and [in-process reader model](#reading-state-without-running-another-query).
-All services use the current base ABI 1.0 and envelope wire v1; optional
+All services use the current base ABI 2.0 and envelope wire v2; optional
 negotiation does not imply every loaded library implements every service.
 
 ### Activation credentials preserve per-start identity behavior
 
-`activation_credentials_v1` is an optional extension over the frozen base
-ABI `1.0.0` and envelope wire `1`. An opted-in factory describes its hostname/
+`activation_credentials_v1` is an optional extension over native
+ABI `2.0.0` and envelope wire `2`. An opted-in factory describes its hostname/
 port context without I/O. The Host binds an actual `NativeIdentityResource`
 under `identity`; it keeps ordinary identity-provider traits and provider
 construction outside the native library.
@@ -2236,9 +2287,9 @@ generator/metadata checks are not database qualification. The
 [native inventory](../../components/computation-plugins/README.md) links the
 role-specific libraries and supported modes.
 
-Native source/reaction conversion is not universal, and the continuous query
-implementation is built into the runtime rather than an independently loadable
-query plugin. Ordinary adapters remain supported on the same graph. RocksDB-backed
+Native source/reaction conversion is not universal. The continuous query
+implementation is an independently loadable native plugin with explicit factory
+registration. Ordinary Source/Reaction adapters remain supported on the same graph. RocksDB-backed
 native admission QoS, retained inputs and shared journals have real process-crash
 coverage with eager/paged storage on both Tokio runtimes. The
 [native-input matrix](../../lib-integration-tests/tests/native_input_crash_recovery.rs)
@@ -2586,9 +2637,9 @@ tests. The revised Stockroom companion also passed its default/optional and
 network lessons. These are scoped local proofs, not a newer CI result,
 universal release qualification or a performance comparison.
 
-The broader requirements ledger still records **20 covered, 23 partial and
-5 unqualified** requirements. SQL Server live qualification remains explicitly
-deferred. Remaining connector conversions, external-effect gaps, native
+The broader requirements ledger records per-requirement evidence and unresolved
+qualification rather than one blanket readiness grade. SQL Server live
+qualification remains explicitly deferred. Remaining connector conversions, external-effect gaps, native
 persistent-input-pipe combinations, bounded-read limits and other open work
 must be assessed for the deployment actually being changed. Do not describe
 all native persistent replay as missing when specific reopen cases work, or

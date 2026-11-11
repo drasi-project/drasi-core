@@ -3,7 +3,6 @@
 
 #![cfg(test)]
 
-#[allow(dead_code)]
 mod computation_support;
 
 use std::{
@@ -254,10 +253,7 @@ impl EnvelopeSource for Source {
             Some(Event::Panic) => panic!("native processing panic"),
             Some(Event::AbiPanic) => Err(ComponentOperationError::new(
                 FailureDisposition::Retryable,
-                ComponentPanic::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "retained native ABI panic",
-                )),
+                ComponentPanic::new(std::io::Error::other("retained native ABI panic")),
             )
             .into()),
             None => Ok(None),

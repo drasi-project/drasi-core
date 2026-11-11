@@ -173,6 +173,18 @@ async fn test_oracle_change_detection_end_to_end() -> Result<()> {
             .build();
 
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("oracle-integration-test")
             .with_source(source)
             .with_query(query)
@@ -297,6 +309,18 @@ async fn test_oracle_start_position_beginning() -> Result<()> {
             .build();
 
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("oracle-beginning-test")
             .with_source(source)
             .with_query(query)
@@ -409,6 +433,18 @@ async fn test_oracle_checkpoint_resume() -> Result<()> {
                 .build();
 
             let core = DrasiLib::builder()
+                .with_query_factory(
+                    drasi_lib::computation::v1::FactoryRegistry::standard()
+                        .get(
+                            &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                                "drasi/continuous-query",
+                                "1",
+                            )
+                            .expect("reference query identity"),
+                        )
+                        .expect("reference query factory")
+                        .clone(),
+                )
                 .with_id("oracle-resume-test")
                 .with_source(source)
                 .with_query(query)
@@ -479,6 +515,18 @@ async fn test_oracle_checkpoint_resume() -> Result<()> {
                 .build();
 
             let core = DrasiLib::builder()
+                .with_query_factory(
+                    drasi_lib::computation::v1::FactoryRegistry::standard()
+                        .get(
+                            &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                                "drasi/continuous-query",
+                                "1",
+                            )
+                            .expect("reference query identity"),
+                        )
+                        .expect("reference query factory")
+                        .clone(),
+                )
                 .with_id("oracle-resume-test")
                 .with_source(source)
                 .with_query(query)
@@ -598,6 +646,18 @@ async fn test_oracle_checkpoint_recovery_round_trip() -> Result<()> {
         let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("oracle-cp-test")
             .with_source(source)
             .with_query(query)
@@ -754,6 +814,18 @@ async fn test_oracle_full_restart_picks_up_offline_changes() -> Result<()> {
         let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
         let core = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("oracle-restart-test")
             .with_source(source)
             .with_query(query)

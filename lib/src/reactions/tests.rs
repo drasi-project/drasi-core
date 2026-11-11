@@ -14,8 +14,8 @@
 
 #[cfg(test)]
 pub(crate) mod manager_tests {
-    use super::super::*;
     use crate::channels::*;
+    use crate::test_helpers::creation::BuilderFixtures;
     use crate::test_helpers::managers::ReactionManager;
     use crate::test_helpers::wait_for_component_status;
     use anyhow::Result;
@@ -23,20 +23,6 @@ pub(crate) mod manager_tests {
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::sync::RwLock;
-
-    struct MockQueryProvider;
-
-    #[async_trait]
-    impl QueryProvider for MockQueryProvider {
-        async fn get_query_instance(
-            &self,
-            id: &str,
-        ) -> anyhow::Result<Arc<dyn crate::queries::Query>> {
-            Err(anyhow::anyhow!("No query '{id}' in test"))
-        }
-    }
-
     /// A simple test mock reaction for unit testing the ReactionManager.
     pub struct TestMockReaction {
         id: String,
@@ -47,6 +33,29 @@ pub(crate) mod manager_tests {
     }
 
     impl TestMockReaction {
+        pub(crate) fn fixture(
+            name: String,
+            queries: Vec<String>,
+            auto_start: bool,
+        ) -> crate::test_helpers::creation::ReactionFixture<Self> {
+            crate::test_helpers::creation::ReactionFixture::new(
+                name,
+                queries
+                    .into_iter()
+                    .map(|name| crate::config::ComponentReference::by_name(name).unwrap())
+                    .collect(),
+                auto_start,
+                move |id, inputs| {
+                    let inputs = inputs.iter().map(ToString::to_string).collect();
+                    Ok(if auto_start {
+                        Self::new(id.to_string(), inputs)
+                    } else {
+                        Self::with_auto_start(id.to_string(), inputs, false)
+                    })
+                },
+            )
+        }
+
         pub fn new(id: String, queries: Vec<String>) -> Self {
             let status_handle = crate::component_graph::ComponentStatusHandle::new(&id);
             Self {
@@ -90,7 +99,7 @@ pub(crate) mod manager_tests {
             self.auto_start
         }
 
-        async fn initialize(&self, context: crate::context::ReactionRuntimeContext) {
+        async fn bind_runtime_context(&self, context: crate::context::ReactionRuntimeContext) {
             self.status_handle.wire(context.update_tx.clone()).await;
         }
 
@@ -136,8 +145,11 @@ pub(crate) mod manager_tests {
     }
 
     /// Helper to create a TestMockReaction instance
-    pub fn create_test_mock_reaction(id: String, queries: Vec<String>) -> TestMockReaction {
-        TestMockReaction::new(id, queries)
+    pub fn create_test_mock_reaction(
+        name: String,
+        queries: Vec<String>,
+    ) -> crate::test_helpers::creation::ReactionFixture<TestMockReaction> {
+        TestMockReaction::fixture(name, queries, true)
     }
 
     async fn create_test_manager() -> (
@@ -151,20 +163,14 @@ pub(crate) mod manager_tests {
         )
     }
 
-    /// Create a test manager that also returns the shared graph for event subscription.
-    async fn create_test_manager_with_graph() -> (
-        Arc<ReactionManager>,
-        crate::component_graph::ComponentGraphView,
-    ) {
-        create_test_manager().await
-    }
-
     /// Helper: register a reaction in the graph, then provision it in the manager.
     /// Registers placeholder query nodes for any referenced queries not already in the graph.
     async fn add_reaction(
         manager: &ReactionManager,
         _graph: &crate::component_graph::ComponentGraphView,
-        reaction: impl crate::reactions::Reaction + 'static,
+        reaction: crate::test_helpers::creation::ReactionFixture<
+            impl crate::reactions::Reaction + 'static,
+        >,
     ) -> anyhow::Result<()> {
         manager.add(reaction).await
     }
@@ -270,7 +276,10 @@ pub(crate) mod manager_tests {
         let retrieved = retrieved.unwrap();
         assert_eq!(retrieved.id, "test-reaction");
         assert_eq!(retrieved.reaction_type, "log");
-        assert_eq!(retrieved.queries, vec!["query1".to_string()]);
+        assert_eq!(
+            retrieved.queries,
+            vec![crate::config::ComponentReference::by_name("query1").unwrap()]
+        );
     }
 
     #[tokio::test]
@@ -309,7 +318,7 @@ pub(crate) mod manager_tests {
 
     #[tokio::test]
     async fn test_get_nonexistent_reaction_status() {
-        let (manager, graph) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         let status = manager.get_reaction_status("nonexistent".to_string()).await;
         assert!(status.is_err());
@@ -397,13 +406,12 @@ pub(crate) mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Add reaction with auto_start=true
-        let reaction1 =
-            TestMockReaction::with_auto_start("auto-start-reaction".to_string(), vec![], true);
+        let reaction1 = TestMockReaction::fixture("auto-start-reaction".to_string(), vec![], true);
         add_reaction(&manager, &graph, reaction1).await.unwrap();
 
         // Add reaction with auto_start=false
         let reaction2 =
-            TestMockReaction::with_auto_start("no-auto-start-reaction".to_string(), vec![], false);
+            TestMockReaction::fixture("no-auto-start-reaction".to_string(), vec![], false);
         add_reaction(&manager, &graph, reaction2).await.unwrap();
 
         // Subscribe BEFORE the operation that triggers status changes
@@ -450,7 +458,6 @@ pub(crate) mod manager_tests {
         let reaction = create_test_mock_reaction("default-reaction".to_string(), vec![]);
 
         // Verify auto_start is true
-        use crate::reactions::Reaction;
         assert!(reaction.auto_start(), "Default auto_start should be true");
 
         add_reaction(&manager, &graph, reaction).await.unwrap();
@@ -486,8 +493,7 @@ pub(crate) mod manager_tests {
         let (manager, graph) = create_test_manager().await;
 
         // Add reaction with auto_start=false
-        let reaction =
-            TestMockReaction::with_auto_start("manual-reaction".to_string(), vec![], false);
+        let reaction = TestMockReaction::fixture("manual-reaction".to_string(), vec![], false);
         add_reaction(&manager, &graph, reaction).await.unwrap();
 
         // start_all should not start it
@@ -604,26 +610,32 @@ pub(crate) mod manager_tests {
     }
 
     impl DeprovisionTestReaction {
-        fn new(id: &str) -> (Self, Arc<std::sync::atomic::AtomicBool>) {
+        fn new(
+            name: &str,
+        ) -> (
+            crate::test_helpers::creation::ReactionFixture<Self>,
+            Arc<std::sync::atomic::AtomicBool>,
+        ) {
             let deprovision_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let called = deprovision_called.clone();
             (
-                Self {
-                    id: id.to_string(),
-                    queries: vec![],
-                    status_handle: crate::component_graph::ComponentStatusHandle::new(id),
-                    deprovision_called: deprovision_called.clone(),
-                },
+                crate::test_helpers::creation::ReactionFixture::new(
+                    name,
+                    vec![],
+                    false,
+                    move |id, _| {
+                        Ok(Self {
+                            id: id.to_string(),
+                            queries: vec![],
+                            status_handle: crate::component_graph::ComponentStatusHandle::new(
+                                id.as_str(),
+                            ),
+                            deprovision_called: called,
+                        })
+                    },
+                ),
                 deprovision_called,
             )
-        }
-
-        fn new_simple(id: &str) -> Self {
-            Self {
-                id: id.to_string(),
-                queries: vec![],
-                status_handle: crate::component_graph::ComponentStatusHandle::new(id),
-                deprovision_called: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            }
         }
     }
 
@@ -649,7 +661,7 @@ pub(crate) mod manager_tests {
             false
         }
 
-        async fn initialize(&self, context: crate::context::ReactionRuntimeContext) {
+        async fn bind_runtime_context(&self, context: crate::context::ReactionRuntimeContext) {
             self.status_handle.wire(context.update_tx.clone()).await;
         }
 
@@ -671,7 +683,7 @@ pub(crate) mod manager_tests {
             self.status_handle.get_status().await
         }
 
-        async fn deprovision(&self) -> anyhow::Result<()> {
+        async fn delete_owned_resources(&self) -> anyhow::Result<()> {
             self.deprovision_called
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
@@ -722,122 +734,139 @@ pub(crate) mod manager_tests {
 
     #[tokio::test]
     async fn test_update_reaction_replaces_stopped_reaction() {
-        let (manager, graph) = create_test_manager().await;
-
-        let reaction = DeprovisionTestReaction::new_simple("reconfig-stopped-reaction");
-        add_reaction(&manager, &graph, reaction).await.unwrap();
-
-        let new_reaction = DeprovisionTestReaction::new_simple("reconfig-stopped-reaction");
-        manager
-            .update_reaction("reconfig-stopped-reaction".to_string(), new_reaction)
+        use crate::test_helpers::updates;
+        let (core, trace) = updates::core().await;
+        let old = updates::add(&core, "reconfig-stopped-reaction", true).await;
+        core.reaction_manager()
+            .update_reaction(
+                old.id().to_string(),
+                updates::definition(old.id().clone(), "reconfig-stopped-reaction", true, 1),
+            )
             .await
             .unwrap();
-
-        let status = manager
-            .get_reaction_status("reconfig-stopped-reaction".to_string())
-            .await
-            .unwrap();
-        assert_eq!(status, ComponentStatus::Stopped);
+        updates::settle(&core).await;
+        let current = core.computation_component(old.id().as_str()).unwrap();
+        assert_eq!(current.id(), old.id());
+        assert_ne!(current.generation(), old.generation());
+        assert_eq!(
+            current.observed().unwrap().lifecycle,
+            crate::computation::v1::ComponentLifecycle::Stopped
+        );
+        assert_eq!(
+            trace.events(),
+            ["create", "bind", "initialize", "dispose", "create", "bind", "initialize"]
+        );
+        core.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_update_reaction_stops_and_restarts_running_reaction() {
-        let (manager, graph) = create_test_manager().await;
-
-        let reaction = DeprovisionTestReaction::new_simple("reconfig-running-reaction");
-        add_reaction(&manager, &graph, reaction).await.unwrap();
-
-        // Subscribe BEFORE the operation that triggers status change
-        let mut event_rx = graph.subscribe().unwrap();
-
-        manager
-            .start_reaction("reconfig-running-reaction".to_string())
+        use crate::test_helpers::updates;
+        let (core, trace) = updates::core().await;
+        let old = updates::add(&core, "reconfig-running-reaction", true).await;
+        old.start().await.unwrap();
+        old.wait_started().await.unwrap();
+        core.reaction_manager()
+            .update_reaction(
+                old.id().to_string(),
+                updates::definition(old.id().clone(), "reconfig-running-reaction", true, 1),
+            )
             .await
             .unwrap();
-        // Wait for async graph update to propagate
-        wait_for_component_status(
-            &mut event_rx,
-            "reconfig-running-reaction",
-            ComponentStatus::Running,
-            Duration::from_secs(5),
-        )
-        .await;
-        let status = manager
-            .get_reaction_status("reconfig-running-reaction".to_string())
-            .await
-            .unwrap();
-        assert_eq!(status, ComponentStatus::Running);
-
-        let new_reaction = DeprovisionTestReaction::new_simple("reconfig-running-reaction");
-        manager
-            .update_reaction("reconfig-running-reaction".to_string(), new_reaction)
-            .await
-            .unwrap();
-
-        // Wait for async graph update to propagate
-        wait_for_component_status(
-            &mut event_rx,
-            "reconfig-running-reaction",
-            ComponentStatus::Running,
-            Duration::from_secs(5),
-        )
-        .await;
-        let status = manager
-            .get_reaction_status("reconfig-running-reaction".to_string())
-            .await
-            .unwrap();
-        assert_eq!(status, ComponentStatus::Running);
+        updates::settle(&core).await;
+        let current = core.computation_component(old.id().as_str()).unwrap();
+        let started = current.wait_started().await;
+        assert!(
+            started.is_ok(),
+            "{started:?}; state={:?}; hooks={:?}; management={:?}",
+            current.observed(),
+            trace.events(),
+            core.management_status().await
+        );
+        assert_eq!(
+            core.reaction_manager()
+                .get_reaction_status(old.id().to_string())
+                .await
+                .unwrap(),
+            ComponentStatus::Running
+        );
+        assert_eq!(
+            trace.events(),
+            [
+                "create",
+                "bind",
+                "initialize",
+                "start",
+                "stop",
+                "dispose",
+                "create",
+                "bind",
+                "initialize",
+                "start"
+            ]
+        );
+        assert!(old.start().await.is_err());
+        core.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_update_reaction_emits_reconfiguring_event() {
-        let (manager, graph) = create_test_manager_with_graph().await;
-
-        // Subscribe to graph events BEFORE adding reaction
-        let mut event_rx = graph.subscribe().unwrap();
-
-        let reaction = DeprovisionTestReaction::new_simple("reconfig-event-reaction");
-        add_reaction(&manager, &graph, reaction).await.unwrap();
-
-        let new_reaction = DeprovisionTestReaction::new_simple("reconfig-event-reaction");
-        manager
-            .update_reaction("reconfig-event-reaction".to_string(), new_reaction)
+        use crate::test_helpers::updates;
+        let (core, _) = updates::core().await;
+        let reaction = updates::add(&core, "reconfig-event-reaction", true).await;
+        reaction.start().await.unwrap();
+        reaction.wait_started().await.unwrap();
+        let mut event_rx = core.component_graph().subscribe().unwrap();
+        core.reaction_manager()
+            .update_reaction(
+                reaction.id().to_string(),
+                updates::definition(reaction.id().clone(), "reconfig-event-reaction", true, 1),
+            )
             .await
             .unwrap();
 
         // Wait for the Reconfiguring event via the broadcast channel
         wait_for_component_status(
             &mut event_rx,
-            "reconfig-event-reaction",
+            reaction.id().as_str(),
             ComponentStatus::Reconfiguring,
             Duration::from_secs(5),
         )
         .await;
+        core.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_update_reaction_rejects_mismatched_id() {
-        let (manager, graph) = create_test_manager().await;
-
-        let reaction = DeprovisionTestReaction::new_simple("original-reaction");
-        add_reaction(&manager, &graph, reaction).await.unwrap();
-
-        let new_reaction = DeprovisionTestReaction::new_simple("different-id");
-        let result = manager
-            .update_reaction("original-reaction".to_string(), new_reaction)
+        use crate::test_helpers::updates;
+        let (core, trace) = updates::core().await;
+        let reaction = updates::add(&core, "original-reaction", true).await;
+        let before = trace.events();
+        let result = core
+            .reaction_manager()
+            .update_reaction(
+                reaction.id().to_string(),
+                updates::definition(
+                    crate::config::ComponentId::generate(),
+                    "original-reaction",
+                    true,
+                    1,
+                ),
+            )
             .await;
         assert!(result.is_err(), "Expected error for mismatched IDs");
-        assert!(result.unwrap_err().to_string().contains("does not match"));
+        assert!(result.unwrap_err().to_string().contains("UUID"));
+        assert_eq!(trace.events(), before);
+        core.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_update_nonexistent_reaction() {
-        let (manager, graph) = create_test_manager().await;
-
-        let new_reaction = DeprovisionTestReaction::new_simple("nonexistent");
-        let result = manager
-            .update_reaction("nonexistent".to_string(), new_reaction)
-            .await;
+        let (manager, _graph) = create_test_manager().await;
+        let id = crate::config::ComponentId::generate();
+        let definition =
+            crate::test_helpers::updates::definition(id.clone(), "nonexistent", true, 1);
+        let result = manager.update_reaction(id.to_string(), definition).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
@@ -861,20 +890,34 @@ pub(crate) mod manager_tests {
             id: &str,
             queries: Vec<String>,
         ) -> (
-            Self,
+            crate::test_helpers::creation::ReactionFixture<Self>,
             Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
             Arc<std::sync::atomic::AtomicBool>,
         ) {
             let captured = Arc::new(tokio::sync::Mutex::new(Vec::new()));
             let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let captured_instance = captured.clone();
+            let called_instance = called.clone();
             (
-                Self {
-                    id: id.to_string(),
-                    queries,
-                    status_handle: crate::component_graph::ComponentStatusHandle::new(id),
-                    captured_snapshot: captured.clone(),
-                    bootstrap_called: called.clone(),
-                },
+                crate::test_helpers::creation::ReactionFixture::new(
+                    id,
+                    queries
+                        .into_iter()
+                        .map(|name| crate::config::ComponentReference::by_name(name).unwrap())
+                        .collect(),
+                    false,
+                    move |id, inputs| {
+                        Ok(Self {
+                            id: id.to_string(),
+                            queries: inputs.iter().map(ToString::to_string).collect(),
+                            status_handle: crate::component_graph::ComponentStatusHandle::new(
+                                id.as_str(),
+                            ),
+                            captured_snapshot: captured_instance,
+                            bootstrap_called: called_instance,
+                        })
+                    },
+                ),
                 captured,
                 called,
             )
@@ -898,7 +941,7 @@ pub(crate) mod manager_tests {
         fn auto_start(&self) -> bool {
             false
         }
-        async fn initialize(&self, context: crate::context::ReactionRuntimeContext) {
+        async fn bind_runtime_context(&self, context: crate::context::ReactionRuntimeContext) {
             self.status_handle.wire(context.update_tx.clone()).await;
         }
         async fn start(&self) -> Result<()> {
@@ -964,15 +1007,28 @@ pub(crate) mod manager_tests {
             SnapshotTestReaction::new("snap-reaction", vec!["e2e-query".to_string()]);
 
         let core = crate::DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("e2e-bootstrap")
-            .with_source(source)
+            .with_source_fixture(source)
             .with_query(
                 crate::Query::cypher("e2e-query")
                     .query("MATCH (n:Person) RETURN n.name, n.age")
                     .from_input("e2e-src")
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
-            .with_reaction(reaction)
+            .with_reaction_fixture(reaction)
             .build()
             .await
             .unwrap();

@@ -238,6 +238,14 @@ impl CheckpointStore for ComputationCheckpointStore {
             .await
     }
 
+    async fn stage_clear_checkpoints(&self) -> Result<(), IndexError> {
+        let db = self.db.clone();
+        let session = self.session.clone();
+        self.work
+            .run(move || crate::checkpoint::stage_clear(&db, &session))
+            .await
+    }
+
     async fn write_config_hash(&self, hash: u64) -> Result<(), IndexError> {
         let db = self.db.clone();
         self.work

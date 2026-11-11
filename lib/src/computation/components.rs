@@ -6,6 +6,8 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use super::v1::*;
 
 pub(crate) const INSTANCE_GRAPH_ID: &str = "__drasi_lib_runtime__";
+pub(crate) type ComponentBatchDeclaration =
+    Box<dyn FnOnce(&mut ComponentIds) -> GraphResult<ComponentBatch> + Send>;
 
 /// Component declarations and supplied bindings for one instance-level addition.
 pub struct ComponentBatch {
@@ -40,37 +42,33 @@ pub struct ComponentBatchBuilder {
 }
 
 impl ComponentBatchBuilder {
-    pub fn source(mut self, source: Box<dyn EnvelopeSource>) -> Self {
-        self.inner = self.inner.source(source);
+    pub fn source(mut self, name: ComponentName, source: Box<dyn EnvelopeSource>) -> Self {
+        self.inner = self.inner.source(name, source);
         self
     }
 
-    pub fn transformer(mut self, transformer: Box<dyn Transformer>) -> Self {
-        self.inner = self.inner.transformer(transformer);
+    pub fn transformer(mut self, name: ComponentName, transformer: Box<dyn Transformer>) -> Self {
+        self.inner = self.inner.transformer(name, transformer);
         self
     }
 
-    pub fn query(mut self, query: Box<dyn Transformer>) -> Self {
-        self.inner = self.inner.query(query);
+    pub fn sink(mut self, name: ComponentName, sink: Box<dyn EnvelopeSink>) -> Self {
+        self.inner = self.inner.sink(name, sink);
         self
     }
 
-    pub fn sink(mut self, sink: Box<dyn EnvelopeSink>) -> Self {
-        self.inner = self.inner.sink(sink);
-        self
-    }
-
-    pub fn service(mut self, service: Box<dyn ComputationService>) -> Self {
-        self.inner = self.inner.service(service);
+    pub fn service(mut self, name: ComponentName, service: Box<dyn ComputationService>) -> Self {
+        self.inner = self.inner.service(name, service);
         self
     }
 
     pub fn component(
         mut self,
+        name: ComponentName,
         specification: ComponentSpecification,
         factory: Arc<dyn ComponentFactory>,
     ) -> Self {
-        self.inner = self.inner.component(specification, factory);
+        self.inner = self.inner.component(name, specification, factory);
         self
     }
 
@@ -164,15 +162,28 @@ pub(crate) fn append_definition(
     supplied: &BTreeMap<ResourceId, ResourceHandle>,
 ) -> anyhow::Result<DesiredTopology> {
     for component in &addition.components {
-        anyhow::ensure!(
-            !target
-                .components
-                .iter()
-                .any(|current| current.descriptor.id() == component.descriptor.id()),
-            "component {} already exists",
-            component.descriptor.id()
-        );
+        if let Some(existing) = target
+            .components
+            .iter()
+            .find(|current| current.descriptor.id() == component.descriptor.id())
+        {
+            return Err(GraphError::DuplicateComponentId {
+                existing: Box::new(ComponentConflict::from_desired(existing)),
+            }
+            .into());
+        }
+        if let Some(existing) = target
+            .components
+            .iter()
+            .find(|current| current.name == component.name)
+        {
+            return Err(GraphError::DuplicateComponentName {
+                existing: Box::new(ComponentConflict::from_desired(existing)),
+            }
+            .into());
+        }
     }
+    addition.validate_component_identities()?;
     for resource in &addition.resources {
         if let Some(current) = target
             .resources

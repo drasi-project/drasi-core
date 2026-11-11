@@ -402,7 +402,7 @@ fn desired(root: &Path, instance: &str, durable_input: bool) -> Result<DesiredIn
     };
     let query = ComponentSpecification {
         descriptor: definition.descriptor(),
-        role: ComponentRole::Query,
+        role: ComponentRole::Transformer,
         completion: None,
         implementation: ContinuousQueryFactory::default()
             .descriptor()
@@ -503,7 +503,7 @@ async fn open_instance(
     if reaction_available {
         factories.register(Arc::new(ReactionFactory::new()?))?;
     }
-    let core = DrasiLib::builder()
+    let core = lib_integration_tests::query_builder()
         .with_id(instance)
         .with_configuration_store(resources.configuration.clone())
         .with_component_factories(factories)

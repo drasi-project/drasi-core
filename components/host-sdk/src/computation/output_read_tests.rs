@@ -62,6 +62,8 @@ enum Mode {
     WrongSchema,
     ForeignCursor,
     Huge,
+    Wide,
+    OversizedRecord,
 }
 
 struct Log {
@@ -104,13 +106,24 @@ fn producer_for(component: &str) -> GraphProducerIdentity {
 }
 
 fn record(index: u64) -> Record {
+    record_with_padding(index, 0)
+}
+
+fn record_with_padding(index: u64, padding: usize) -> Record {
     GraphChangeCodec::element_record(&ElementImage::Node {
         metadata: ElementMetadata {
             reference: ElementReference::new("source", &index.to_string()),
             labels: Arc::from(Vec::<Arc<str>>::new()),
             effective_from: index,
         },
-        properties: BTreeMap::new(),
+        properties: if padding == 0 {
+            BTreeMap::new()
+        } else {
+            BTreeMap::from([(
+                "padding".into(),
+                drasi_core_types::data_value::DataValue::String("x".repeat(padding)),
+            )])
+        },
     })
     .unwrap()
 }
@@ -237,14 +250,15 @@ impl Provider {
                 Default::default(),
             ),
             _ => {
-                let count = if mode == Mode::Huge {
-                    abi::output_reads::MAX_SNAPSHOT_RECORDS as u64 + 1
-                } else {
-                    head
+                let (count, padding) = match mode {
+                    Mode::Huge => (abi::output_reads::MAX_SNAPSHOT_RECORDS as u64 + 1, 0),
+                    Mode::Wide => (8193, 2048),
+                    Mode::OversizedRecord => (1, abi::output_reads::MAX_READ_BYTES),
+                    _ => (head, 0),
                 };
                 let records: Vec<_> = (1..=count)
                     .map(|index| {
-                        let record = record(index);
+                        let record = record_with_padding(index, padding);
                         (record.identity().clone(), record)
                     })
                     .collect();
@@ -607,7 +621,7 @@ async fn declarations_must_match_registrations_and_declared_outputs() -> anyhow:
 }
 
 fn raw_open(
-    table: &abi::output_reads::PluginOutputReadsV1,
+    table: &abi::output_reads::PluginOutputReadsV2,
     proxy: &NativeComponentProxy,
     port: &str,
     capability: u32,
@@ -639,6 +653,185 @@ fn raw_request(
         ))?;
         sdk::transport::OperationFuture::new(operation)
     }
+}
+
+struct OwnedRead(abi::output_reads::OutputReadHandle);
+impl Drop for OwnedRead {
+    fn drop(&mut self) {
+        unsafe { ((*self.0.vtable).release.unwrap())(self.0.state) };
+    }
+}
+impl OwnedRead {
+    fn transfer(&self) -> Result<Self, sdk::transport::Failure> {
+        let mut transfer = abi::output_reads::OutputReadHandle::null();
+        unsafe {
+            sdk::transport::take_status(((*self.0.vtable).transfer.unwrap())(
+                self.0.state,
+                abi::output_reads::operation::SNAPSHOT,
+                abi::BorrowedBytes::new(&[]),
+                &mut transfer,
+            ))?;
+        }
+        Ok(Self(transfer))
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn transfer_owns_one_observation_and_cannot_cross_activation() -> anyhow::Result<()> {
+    use abi::output_reads::{capability, transfer_operation};
+    let table = unsafe {
+        *sdk::ExportedPlugin::new(definition(Kind::Both, &Created::default())?)?.output_reads()
+    };
+    let fixture = fixture(Kind::Both)?;
+    let (mut proxy, shared) = fixture.create("paged-observation")?;
+    shared.commit(2049);
+    proxy.start().await?;
+    let provider = OwnedRead(raw_open(&table, &proxy, "out", capability::SNAPSHOT)?);
+    let transfer = provider.transfer()?;
+    let header = raw_request(&transfer.0, transfer_operation::START, &[])?.await?;
+    let sdk::output_reads::Outcome::Ok(sdk::output_reads::WireReadMetadata::Snapshot(metadata)) =
+        sdk::wire::decode(&header)?
+    else {
+        anyhow::bail!("missing captured snapshot metadata");
+    };
+    assert_eq!(metadata.records, 2049);
+    assert_eq!(metadata.cursor.sequence, 2049);
+    shared.commit(4098);
+    let mut identities = std::collections::HashSet::new();
+    let mut index = 0;
+    loop {
+        let bytes = raw_request(&transfer.0, transfer_operation::NEXT, &[])?.await?;
+        assert!(bytes.len() <= abi::output_reads::MAX_READ_BYTES);
+        let sdk::output_reads::Outcome::Ok(page) = sdk::wire::decode::<
+            sdk::output_reads::Outcome<sdk::output_reads::WireReadPage<'_>>,
+        >(&bytes)?
+        else {
+            anyhow::bail!("snapshot page failed");
+        };
+        index += 1;
+        assert_eq!(page.index, index);
+        assert!(page.records.len() <= abi::output_reads::MAX_PAGE_ITEMS);
+        for record in page.records {
+            assert!(identities.insert(RecordId::try_new(
+                &*record.namespace,
+                bytes::Bytes::copy_from_slice(&record.identity),
+            )?));
+        }
+        if page.done {
+            break;
+        }
+    }
+    assert_eq!(identities.len(), 2049);
+    for index in 1..=2049 {
+        assert!(identities.contains(record(index).identity()));
+    }
+    let ended = raw_request(&transfer.0, transfer_operation::NEXT, &[])?
+        .await
+        .unwrap_err();
+    assert_eq!(ended.code, abi::status::INVALID_ARGUMENT);
+    drop(transfer);
+
+    let held = provider.transfer()?;
+    raw_request(&held.0, transfer_operation::START, &[])?.await?;
+    raw_request(&held.0, transfer_operation::NEXT, &[])?.await?;
+    proxy.stop().await?;
+    proxy.start().await?;
+    assert_eq!(
+        raw_request(&held.0, transfer_operation::NEXT, &[])
+            .err()
+            .unwrap()
+            .code,
+        abi::status::CLOSED,
+    );
+    assert_eq!(
+        snapshots(&proxy.output_readers())
+            .snapshot()
+            .await?
+            .records()
+            .len(),
+        4098
+    );
+    drop(held);
+    proxy.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn transfer_release_cancels_unpolled_work_and_returns_capacity() -> anyhow::Result<()> {
+    use abi::output_reads::{capability, transfer_operation, MAX_TRANSFERS};
+    let table = unsafe {
+        *sdk::ExportedPlugin::new(definition(Kind::Both, &Created::default())?)?.output_reads()
+    };
+    let fixture = fixture(Kind::Both)?;
+    let (mut proxy, shared) = fixture.create("paged-release")?;
+    proxy.start().await?;
+    let provider = OwnedRead(raw_open(&table, &proxy, "out", capability::SNAPSHOT)?);
+    let mut held = Vec::new();
+    for _ in 0..MAX_TRANSFERS {
+        held.push(provider.transfer()?);
+    }
+    assert_eq!(provider.transfer().err().unwrap().code, abi::status::BUSY);
+    assert_eq!(
+        shared.active(),
+        0,
+        "opening a transfer must perform no provider I/O"
+    );
+    held.pop();
+    held.push(provider.transfer()?);
+    held.clear();
+
+    shared.block(true);
+    let transfer = provider.transfer()?;
+    let mut opening = raw_request(&transfer.0, transfer_operation::START, &[])?;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut opening)
+            .await
+            .is_err()
+    );
+    assert_eq!(shared.active(), 1);
+    drop(transfer);
+    assert_eq!(
+        shared.active(),
+        0,
+        "release must drop the provider's open future immediately"
+    );
+    assert_eq!(opening.await.unwrap_err().code, abi::status::CLOSED);
+    shared.block(false);
+    for _ in 0..MAX_TRANSFERS {
+        held.push(provider.transfer()?);
+    }
+    held.clear();
+    proxy.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stop_releases_an_abandoned_transfer_without_any_follow_lease() -> anyhow::Result<()> {
+    use abi::output_reads::{capability, transfer_operation};
+    let table = unsafe {
+        *sdk::ExportedPlugin::new(definition(Kind::Both, &Created::default())?)?.output_reads()
+    };
+    let fixture = fixture(Kind::Both)?;
+    let (mut proxy, shared) = fixture.create("stopped-transfer")?;
+    proxy.start().await?;
+    shared.block(true);
+    let provider = OwnedRead(raw_open(&table, &proxy, "out", capability::SNAPSHOT)?);
+    let transfer = provider.transfer()?;
+    let mut opening = raw_request(&transfer.0, transfer_operation::START, &[])?;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut opening)
+            .await
+            .is_err()
+    );
+    assert_eq!(shared.active(), 1);
+    proxy.stop().await?;
+    assert_eq!(
+        shared.active(),
+        0,
+        "stop must release provider work even when no follow lease exists"
+    );
+    assert_eq!(opening.await.unwrap_err().code, abi::status::CLOSED);
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -903,15 +1096,41 @@ async fn cancelled_reads_release_their_slots_and_cancel_the_provider() -> anyhow
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn oversized_answers_are_explicit_limit_errors() -> anyhow::Result<()> {
+async fn large_snapshots_and_replay_use_complete_bounded_transfers() -> anyhow::Result<()> {
     let fixture = fixture(Kind::Both)?;
     let (mut proxy, shared) = fixture.create("limits")?;
     proxy.start().await?;
     let readers = proxy.output_readers();
 
     shared.mode(Mode::Huge);
+    let snapshot = snapshots(&readers).snapshot().await?;
+    assert_eq!(
+        snapshot.records().len(),
+        abi::output_reads::MAX_SNAPSHOT_RECORDS + 1
+    );
+    for index in 1..=abi::output_reads::MAX_SNAPSHOT_RECORDS as u64 + 1 {
+        let expected = record(index);
+        assert_eq!(snapshot.records().get(expected.identity()), Some(&expected));
+    }
+
+    shared.mode(Mode::Wide);
+    let wide = snapshots(&readers).snapshot().await?;
+    assert_eq!(wide.records().len(), 8193);
+    assert!(
+        wide.records()
+            .values()
+            .map(|record| record.payload().len())
+            .sum::<usize>()
+            > abi::output_reads::MAX_READ_BYTES
+    );
+    for index in 1..=8193 {
+        let expected = record_with_padding(index, 2048);
+        assert_eq!(wide.records().get(expected.identity()), Some(&expected));
+    }
+
+    shared.mode(Mode::OversizedRecord);
     let Err(OutputReadError::Failed(error)) = snapshots(&readers).snapshot().await else {
-        panic!("an oversized snapshot must be an explicit limit error")
+        panic!("an individually oversized record must be rejected, never truncated");
     };
     assert!(error
         .downcast_ref::<sdk::output_reads::OutputReadLimit>()
@@ -920,12 +1139,16 @@ async fn oversized_answers_are_explicit_limit_errors() -> anyhow::Result<()> {
     shared.mode(Mode::Ready);
     shared.commit(abi::output_reads::MAX_REPLAY_ENVELOPES as u64 + 1);
     let replay = replays(&readers);
-    let Err(OutputReadError::Failed(error)) = replay.replay_after(&shared.cursor(0)).await else {
-        panic!("an oversized replay must be an explicit limit error")
-    };
-    assert!(error
-        .downcast_ref::<sdk::output_reads::OutputReadLimit>()
-        .is_some());
+    let retained = replay.replay_after(&shared.cursor(0)).await?;
+    assert_eq!(
+        retained.envelopes().len(),
+        abi::output_reads::MAX_REPLAY_ENVELOPES + 1
+    );
+    assert_eq!(retained.after(), &shared.cursor(0));
+    assert_eq!(
+        retained.head(),
+        &shared.cursor(abi::output_reads::MAX_REPLAY_ENVELOPES as u64 + 1)
+    );
     let within = shared.cursor(abi::output_reads::MAX_REPLAY_ENVELOPES as u64);
     assert_eq!(
         replay
@@ -1068,11 +1291,31 @@ async fn follow_lag_expiry_and_capacity_are_distinct_typed_errors() -> anyhow::R
         Err(OutputReadError::Invalid(_))
     ));
 
-    // An oversized snapshot is an explicit limit and keeps no lease.
     shared.mode(Mode::Huge);
+    let (large, mut tail) = provider
+        .snapshot_and_follow(open_limits())
+        .await?
+        .into_parts();
+    assert_eq!(
+        large.records().len(),
+        abi::output_reads::MAX_SNAPSHOT_RECORDS + 1
+    );
+    let sequence = large.cursor().sequence() + 1;
+    shared.publish_to(sequence);
+    let next = tail.next().await?;
+    assert_eq!(
+        GraphProducerProgress::from_envelope(&next)?
+            .unwrap()
+            .sequence(),
+        sequence
+    );
+    drop(tail);
+
+    // An individual oversized record remains an explicit limit and keeps no lease.
+    shared.mode(Mode::OversizedRecord);
     let Err(OutputReadError::Failed(error)) = provider.snapshot_and_follow(open_limits()).await
     else {
-        panic!("an oversized follow snapshot must be an explicit limit error")
+        panic!("an oversized follow record must be an explicit limit error")
     };
     assert!(error
         .downcast_ref::<sdk::output_reads::OutputReadLimit>()
@@ -1297,11 +1540,12 @@ async fn raw_lease_retains_an_unacknowledged_item_until_it_is_observed() -> anyh
     let (lease, opening) = begin(&limits)?;
     let reply = opening.await?;
     assert!(matches!(
-        sdk::wire::decode::<sdk::output_reads::Outcome<sdk::output_reads::WireSnapshot<'_>>>(
+        sdk::wire::decode::<sdk::output_reads::Outcome<sdk::output_reads::WireReadMetadata>>(
             &reply
         )?,
         sdk::output_reads::Outcome::Ok(_)
     ));
+    raw_snapshot_pages(&lease).await?;
 
     shared.publish_to(2);
     let first = raw_item(&lease, 0).await?;
@@ -1335,14 +1579,14 @@ async fn raw_lease_retains_an_unacknowledged_item_until_it_is_observed() -> anyh
 type RawLease = abi::output_follow::OutputFollowLeaseHandle;
 type RawProvider = abi::output_follow::OutputFollowProviderHandle;
 
-fn raw_follow_table() -> anyhow::Result<abi::output_follow::PluginOutputFollowV1> {
+fn raw_follow_table() -> anyhow::Result<abi::output_follow::PluginOutputFollowV2> {
     Ok(unsafe {
         *sdk::ExportedPlugin::new(definition(Kind::Follow, &Created::default())?)?.output_follow()
     })
 }
 
 fn raw_follow_provider(
-    table: &abi::output_follow::PluginOutputFollowV1,
+    table: &abi::output_follow::PluginOutputFollowV2,
     proxy: &NativeComponentProxy,
 ) -> anyhow::Result<RawProvider> {
     let mut provider = RawProvider::null();
@@ -1391,12 +1635,42 @@ async fn raw_open_lease(provider: &RawProvider) -> anyhow::Result<(RawLease, boo
     let (lease, opening) = raw_follow_begin(provider)?;
     let bytes = opening.await?;
     let granted = matches!(
-        sdk::wire::decode::<sdk::output_reads::Outcome<sdk::output_reads::WireSnapshot<'_>>>(
+        sdk::wire::decode::<sdk::output_reads::Outcome<sdk::output_reads::WireReadMetadata>>(
             &bytes
         )?,
         sdk::output_reads::Outcome::Ok(_)
     );
+    if granted {
+        raw_snapshot_pages(&lease).await?;
+    }
     Ok((lease, granted))
+}
+
+async fn raw_snapshot_pages(lease: &RawLease) -> anyhow::Result<()> {
+    let mut index = 0;
+    loop {
+        let mut operation = abi::OperationHandle::null();
+        let future = unsafe {
+            sdk::transport::take_status(((*lease.vtable).snapshot_page.unwrap())(
+                lease.state,
+                &mut operation,
+            ))?;
+            sdk::transport::OperationFuture::new(operation)?
+        };
+        let reply = future.await?;
+        let sdk::output_reads::Outcome::Ok(page) = sdk::wire::decode::<
+            sdk::output_reads::Outcome<sdk::output_reads::WireReadPage<'_>>,
+        >(&reply)?
+        else {
+            anyhow::bail!("snapshot page was rejected");
+        };
+        index += 1;
+        assert_eq!(page.index, index);
+        assert!(reply.len() <= abi::output_reads::MAX_READ_BYTES);
+        if page.done {
+            return Ok(());
+        }
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

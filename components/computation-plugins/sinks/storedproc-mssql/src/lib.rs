@@ -136,10 +136,7 @@ impl Factory for MsSqlStoredProcFactory {
             role: ComponentRole::Sink,
             configuration_version: 1,
             configuration,
-            ports: MsSqlStoredProcSink::describe(ComponentId::try_new("mssql").expect("id"))
-                .expect("descriptor")
-                .ports()
-                .to_vec(),
+            ports: MsSqlStoredProcSink::ports().expect("constant port descriptor"),
             completion: Some(SinkCompletion::Handled),
             capabilities: Capabilities {
                 binds_inputs: true,
@@ -175,16 +172,17 @@ pub struct MsSqlStoredProcSink {
     active_connection: Option<MsSqlSourceConfig>,
 }
 impl MsSqlStoredProcSink {
+    pub(crate) fn ports() -> Result<Vec<PortDescriptor>> {
+        Ok(vec![PortDescriptor::new(
+            PortId::try_new("in")?,
+            PortDirection::Input,
+            GraphChangeCodec::schema().descriptor().clone(),
+            PipeRequirements::default(),
+        )])
+    }
+
     pub fn describe(id: ComponentId) -> Result<ComponentDescriptor> {
-        Ok(ComponentDescriptor::try_new(
-            id,
-            vec![PortDescriptor::new(
-                PortId::try_new("in")?,
-                PortDirection::Input,
-                GraphChangeCodec::schema().descriptor().clone(),
-                PipeRequirements::default(),
-            )],
-        )?)
+        Ok(ComponentDescriptor::try_new(id, Self::ports()?)?)
     }
     /// `inputs` are the graph's declared incoming edges; they define the
     /// outputs this sink accepts.
@@ -386,6 +384,29 @@ mod tests {
             "outputs":{"q":{"component":"source.q","port":"out"}},"default_template":{"added":{"template":"EXEC p {{param after.id}}"}}})
     }
     #[test]
+    fn factory_metadata_constructs_without_database_io() -> Result<()> {
+        drasi_computation_plugin_sdk::ExportedPlugin::new(plugin()?)?;
+        #[cfg(feature = "dynamic-plugin")]
+        assert!(!drasi_computation_plugin_metadata().is_null());
+        let metadata = MsSqlStoredProcFactory.metadata();
+        assert_eq!(metadata.role, ComponentRole::Sink);
+        assert_eq!(metadata.completion, Some(SinkCompletion::Handled));
+        assert_eq!(metadata.ports, MsSqlStoredProcSink::ports()?);
+        assert_eq!(metadata.ports.len(), 1);
+        assert_eq!(metadata.ports[0].id().as_str(), "in");
+        assert_eq!(metadata.ports[0].direction(), PortDirection::Input);
+        assert_eq!(
+            metadata.ports[0].schema(),
+            GraphChangeCodec::schema().descriptor()
+        );
+        let id = ComponentId::generate();
+        let descriptor = MsSqlStoredProcSink::describe(id.clone())?;
+        assert_eq!(descriptor.id(), &id);
+        assert_eq!(descriptor.ports(), metadata.ports.as_slice());
+        assert!(metadata.configuration.fields["settings"].secret);
+        Ok(())
+    }
+    #[test]
     fn real_sink_factory_and_configuration_preserve_secrets() -> Result<()> {
         drasi_computation_plugin_sdk::ExportedPlugin::new(plugin()?)?;
         let sink = MsSqlStoredProcSink::new(
@@ -556,6 +577,7 @@ mod tests {
             configuration: serde_json::json!({"settings":config()}),
             scope: None,
             activation_credentials_bound: true,
+            update_directive: None,
         };
         let context = MsSqlStoredProcFactory.activation_credential_context(&request)?;
         assert_eq!(context.hostname, "no-network-at-construction");

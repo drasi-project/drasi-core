@@ -66,8 +66,12 @@ cargo() {
         mappings=/dev/null
         package=drasi-host-sdk
         profile=host-sdk
-        sources=(lib components/host-sdk/tests/integration_test.rs components/host-sdk/tests/native_computation_pipeline.rs components/host-sdk/tests/native_network_loopback.rs components/host-sdk/tests/native_network_wire.rs components/host-sdk/tests/bootstrap_provider_ffi_test.rs components/host-sdk/tests/lifecycle_observations.rs components/host-sdk/tests/initialization_failure.rs components/host-sdk/tests/native_admission.rs)
+        sources=(lib components/host-sdk/tests/integration_test.rs components/host-sdk/tests/native_computation_pipeline.rs components/host-sdk/tests/native_network_loopback.rs components/host-sdk/tests/native_network_wire.rs components/host-sdk/tests/bootstrap_provider_ffi_test.rs components/host-sdk/tests/lifecycle_observations.rs components/host-sdk/tests/initialization_failure.rs components/host-sdk/tests/native_admission.rs components/host-sdk/tests/native_scheduling.rs components/host-sdk/tests/native_view.rs components/host-sdk/tests/reconstruction_recipes.rs)
         sources+=(components/host-sdk/tests/native_metrics_telemetry.rs components/host-sdk/tests/native_telemetry.rs components/host-sdk/tests/native_execution_context.rs components/host-sdk/tests/logging_policy.rs)
+        if [[ " $* " == *" --test native_query_plugin "* ]]; then
+            profile=native-query
+            sources=(components/host-sdk/tests/native_query_plugin.rs)
+        fi
     elif [[ " $* " == *" -p drasi-computation-bridge-common "* ]]; then
         inventory=/dev/null
         mappings=/dev/null
@@ -302,6 +306,7 @@ cargo() {
                     if (omit == "mapping" && name == "full_pipeline_preserves_main_ownership_subscription_and_removal_results") continue;
                     if (omit == "template-mapping" && binary == "reaction_templates") continue;
                     if (omit == "requirement" && name == omitted_requirement) continue;
+                    if (omit == "native-query" && profile == "native-query") continue;
                     if (listing == "true") {
                         print name ": test";
                     } else if (omit != "execution" || binary != "lib" || omitted++) {
@@ -321,6 +326,8 @@ cargo() {
             printf 'test synthetic_runner_check - should panic ... \033[32m2026-09-22 INFO concurrent log\033[0m\nanother log\nok\033[32m2026-09-22 INFO more logging\033[0m\n'
         elif [[ "${RUNNER_CHECK_OMIT:-}" == lost-result ]]; then
             printf 'test synthetic_runner_check ... concurrent log without a result\n'
+        elif [[ "${RUNNER_CHECK_OMIT:-}" == nested-failure ]]; then
+            printf 'test synthetic_runner_check ... FAILED\nfailures:\n\n---- synthetic_runner_check stdout ----\nCaptured child output:\ntest synthetic_runner_check ... ok\n\nfailures:\n    synthetic_runner_check\n'
         else
             printf 'test synthetic_runner_check ... ok\n'
             if [[ "${RUNNER_CHECK_OMIT:-}" == duplicate ]]; then
@@ -330,7 +337,7 @@ cargo() {
     done
     if [[ "$listing" == false ]]; then
         printf 'test result: ok. Synthetic runner self-check; no Rust tests executed.\n'
-        if [[ "${RUNNER_CHECK_OMIT:-}" == failure ]]; then return 101; fi
+        if [[ "${RUNNER_CHECK_OMIT:-}" == failure || "${RUNNER_CHECK_OMIT:-}" == nested-failure ]]; then return 101; fi
     fi
     return 0
 }
@@ -343,13 +350,13 @@ grep -Fx $'processes\tnetwork::durable_tls_cross_os_faults_reopen_and_independen
     "$logs/network-enabled/native-instance-host.executed.tsv" > /dev/null
 RUNNER_CHECK_STYLE=interleaved bash lib/tests/run-runtime-parity.sh "$logs/interleaved" \
     >> "$logs/check.log" 2>&1
-for omitted in baseline suite discovery execution ignored failure capability mapping template-mapping worker-driver lost-result requirement moved-contract duplicate; do
+for omitted in baseline suite discovery execution ignored failure capability mapping template-mapping worker-driver lost-result requirement moved-contract duplicate native-query nested-failure; do
     if RUNNER_CHECK_OMIT="$omitted" bash lib/tests/run-runtime-parity.sh "$logs/missing-$omitted" \
         >> "$logs/check.log" 2>&1; then
         printf 'Runner accepted missing %s coverage.\n' "$omitted" >&2
         exit 1
     fi
-    for profile in core-types shared-contracts default no-default-features extra-capabilities integration plugin-factories host-sdk native-bridge native-instance-host configuration-store postgres-delivery postgres-transactions postgres-common postgres-native dashboard-lifecycle sse-lifecycle mcp-lifecycle cloudflare-radar-lifecycle open511-lifecycle here-traffic-lifecycle sqlite-lifecycle mysql-lifecycle mysql-common file-lifecycle log-lifecycle profiler-lifecycle http-lifecycle grpc-lifecycle application-lifecycle aws-sqs-lifecycle loki-lifecycle core-transactions rocksdb-backends garnet-backends; do
+    for profile in core-types shared-contracts default no-default-features extra-capabilities integration plugin-factories host-sdk native-query native-bridge native-instance-host configuration-store postgres-delivery postgres-transactions postgres-common postgres-native dashboard-lifecycle sse-lifecycle mcp-lifecycle cloudflare-radar-lifecycle open511-lifecycle here-traffic-lifecycle sqlite-lifecycle mysql-lifecycle mysql-common file-lifecycle log-lifecycle profiler-lifecycle http-lifecycle grpc-lifecycle application-lifecycle aws-sqs-lifecycle loki-lifecycle core-transactions rocksdb-backends garnet-backends; do
         test -f "$logs/missing-$omitted/$profile.exit-code"
         grep -Fx 0 "$logs/valid/$profile.exit-code" > /dev/null
     done
@@ -359,4 +366,10 @@ if DRASI_TEST_EXECUTION=component bash lib/tests/run-runtime-parity.sh "$logs/re
     printf 'Runner accepted the removed engine selector.\n' >&2
     exit 1
 fi
-printf 'Runner self-check passed: missing discovery/cases/suites/execution, public template mappings, moved dependency contracts, duplicate results, ignored regressions, failed execution, selector rejection, all 35 profiles attempted.\n'
+for evidence in "$logs/missing-nested-failure/"*.executed.tsv; do
+    awk -F '\t' '
+        seen[$1 SUBSEP $2]++ { exit 1 }
+        $2 == "synthetic_runner_check" && $3 != "FAILED" { exit 1 }
+    ' "$evidence"
+done
+printf 'Runner self-check passed: missing discovery/cases/suites/execution, native query coverage, public template mappings, moved dependency contracts, duplicate results, captured-child diagnostics, ignored regressions, failed execution, selector rejection, all 36 profiles attempted.\n'

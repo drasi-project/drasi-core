@@ -97,7 +97,7 @@ async fn test_postgres_source_logs_captured_on_success() {
         .expect("Failed to build PostgreSQL source");
 
     // Create DrasiLib and add the source
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .build()
         .await
@@ -187,7 +187,7 @@ async fn test_postgres_source_logs_captured_on_connection_failure() {
         .expect("Failed to build PostgreSQL source");
 
     // Create DrasiLib and add the source
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .build()
         .await
@@ -277,7 +277,7 @@ async fn test_postgres_source_log_streaming() {
         .build()
         .expect("Failed to build PostgreSQL source");
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .build()
         .await

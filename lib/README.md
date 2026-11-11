@@ -35,6 +35,8 @@ Add to your `Cargo.toml`:
 ```toml
 [dependencies]
 drasi-lib = { path = "../drasi-core/lib" }
+drasi-host-sdk = { path = "../drasi-core/components/host-sdk" }
+drasi-computation-transformer-query = { path = "../drasi-core/components/computation-plugins/transformers/query" }
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -43,6 +45,9 @@ The APIs in this branch are not necessarily available in published crate version
 The [development setup](docs/developer-guide/README.md#1-run-your-first-application)
 includes a complete native application, its dependencies, and the required
 toolchain. Non-jq examples do not need jq build tools.
+The Host/query dependencies supply the explicitly selected native query
+implementation; a source-only application or an explicitly composed linked
+reference example does not need them.
 
 ## ComputationGraph runtime
 
@@ -57,6 +62,18 @@ there is no compatibility module or second query executor. Snapshot/outbox
 response and stream types remain supported. Use the graph-owned construction,
 result and recovery APIs described below.
 
+**Ordinary queries require an explicitly registered query factory.** Supply it
+with `DrasiLibBuilder::with_query_factory`, or register it once on an existing
+instance with `DrasiLib::register_query_factory`. Empty/source-only instances do
+not need query support. An unregistered query fails clearly; the library does
+not silently choose a linked evaluator. The
+[native query plugin guide](../components/computation-plugins/transformers/query/README.md#registering-ordinary-queries)
+shows registration of the loaded or statically linked native plugin. It supports
+ordinary memory, persistent atomic and explicitly non-atomic providers and uses
+the existing Core evaluator. Non-atomic publication retains its existing weaker
+guarantees and recovery markers; it does not turn independent writers into an
+atomic transaction.
+
 `start()` reports requested component startup failures through a typed
 `PartialStartError` cause. Some independent components may already be running:
 inspect their status, then call `stop()` or `shutdown()` before retrying.
@@ -69,13 +86,18 @@ Start with the guide for your task:
 | [drasi-lib developer book](docs/developer-guide/README.md) | A linear path from a native application through queries, composition, recovery, deployment and operations |
 | [Maintainer's guide](docs/computation-graph-maintainers-guide.md) | Runtime ownership, execution and recovery design, ComponentGraph contrasts, and code navigation for engineers changing Drasi |
 | [Design](docs/computation-graph-design.md) | How components, execution, ordering, storage and cleanup fit together |
+| [Query transformer plugin design](docs/computation-graph-query-transformer-design.md) | Shared implementation, explicit native factory integration, remaining parity gaps and no-loss query/bootstrap/recovery gates |
 | [Schemas, ports, and pipes](docs/computation-graph-schemas-ports-pipes.md) | A layered explanation of data contracts, connections, pipe choices, guarantees, and limitations |
 | [Usage](docs/computation-graph-usage.md) | A runnable example, readiness, results and shutdown |
 | [Configuration](docs/computation-graph-configuration.md) | Exact settings, defaults, queue limits, source order and recovery choices |
 | [Middleware transformer](docs/computation-graph-middleware.md) | Reuse query middleware in graph-change pipelines without a query |
+| [Stateful view transformer](../components/computation-plugins/transformers/view/README.md) | Maintain memory-backed projected datasets, exact retractions and coherent output snapshots |
+| [Source-time merging](docs/computation-graph-time-merge.md) | Explicit ordering policies and versioned volatile/persistent reconstruction recipes |
+| [Native SDK services](../components/computation-plugin-sdk/README.md) | Borrowed transactional processing and optional persistent non-query scheduling |
 | [Transaction transformer](docs/computation-graph-transactions.md) | Run a linear transformer sequence with one commit and isolated per-step state |
 | [Implementation reference](docs/computation-graph-reference.md) | API types, state transitions, custom components, connections and code locations |
 | [Runtime architecture review](docs/runtime-architecture.md) | Ownership diagrams, complete type inventory, cardinality matrix, namespace LOC heatmap and repeatable drift review |
+| [Native plugin developer-experience review](docs/native-plugin-developer-experience-review.md) | External database-plugin authoring: onboarding blockers, integration risks and prioritized improvements |
 | [ComputationGraph remaining work](docs/computation-graph-remaining-work.md) | Single active list of validated issues, investigations, qualification gaps and improvements, with priorities, scope and completion criteria |
 | [Testing and qualification](#testing-and-qualification) | Executable requirements, mandatory feature profiles and interpretation of qualification evidence |
 | [Managed-query test controls](docs/query-test-control.md) | Opt-in independent physical clocks and actual due-work/output frontiers; no production clock or downstream completion substitution |
@@ -213,9 +235,13 @@ async fn main() -> anyhow::Result<()> {
     // Sources and reactions are plugins — create instances from plugin crates
     let source = my_source::MySource::new("sensors", config)?;
     let reaction = my_reaction::MyReaction::new("alerts", vec!["high-temp".into()]);
+    let query_plugin = drasi_host_sdk::computation::NativePlugin::from_definition(
+        drasi_computation_transformer_query::plugin()?,
+    )?;
 
     let core = DrasiLib::builder()
         .with_id("my-app")
+        .with_query_factory(query_plugin.query_factory()?)
         .with_source(source)
         .with_reaction(reaction)
         .with_query(
@@ -272,7 +298,8 @@ Create a DrasiLib instance with `DrasiLib::builder()`:
 
 ```rust
 let core = DrasiLib::builder()
-    .with_id("my-app")                          // Instance name (default: UUID)
+    .with_id("my-app")                           // Builder default: "drasi-lib"
+    .with_query_factory(query_plugin.query_factory()?) // Explicit native query selection
     .with_source(source1)                        // Add a source plugin
     .with_source(source2)                        // Add another source
     .with_reaction(reaction)                     // Add a reaction plugin
@@ -292,9 +319,10 @@ Sources and reactions are **owned by DrasiLib** after calling `with_source()` / 
 
 | Method | Type | Default |
 |--------|------|---------|
-| `with_id(impl Into<String>)` | Stable instance namespace; use distinct IDs for coexisting instances | `drasi-lib` |
+| `with_id(impl Into<String>)` | Stable instance identity; use distinct IDs for coexisting instances | `"drasi-lib"` (the config struct separately defaults to a UUID) |
 | `with_telemetry(TelemetryOptions)` | Runtime-only trace/metric collection policy | `Off` |
 | `with_component_logging(ComponentLogRuntime)` | Supply host-composed capture instead of automatic setup | Automatic default logging |
+| `with_query_factory(Arc<dyn ComponentFactory>)` | Explicit ordinary-query implementation | None; no linked fallback |
 | `with_source(impl Source + 'static)` | Source plugin (chainable) | — |
 | `with_reaction(impl Reaction + 'static)` | Reaction plugin (chainable) | — |
 | `with_query(QueryConfig)` | Query config from `Query` builder | — |
@@ -432,6 +460,13 @@ RETURN t.id, t.title, t.assignee
 
 ## Runtime Management
 
+String component selectors in the ordinary `DrasiLib` facade are exact current
+names. This includes names whose text looks like a UUID; no string method parses,
+falls back to, or guesses an identity. The name is resolved once when the
+operation is admitted, so a later rename or reuse of that name does not retarget
+the operation. Use the paired `*_by_id(&ComponentId)` method for explicit
+identity-based access.
+
 ### Lifecycle
 
 ```rust
@@ -465,6 +500,10 @@ core.start_query("my-query").await?;
 core.stop_query("my-query").await?;
 core.start_reaction("my-reaction").await?;
 core.stop_reaction("my-reaction").await?;
+
+// Explicit identity access uses a typed ComponentId, not a UUID string selector.
+let source_id = core.component_by_name("my-source")?.id().clone();
+core.start_source_by_id(&source_id).await?;
 ```
 
 `stop_query()` also cleans up queries in `Error`, including failures during
@@ -506,6 +545,10 @@ let info = core.get_reaction_info("my-reaction").await?;   // -> ReactionRuntime
 
 // Get current query result set as a JSON snapshot
 let results: Vec<serde_json::Value> = core.get_query_results("my-query").await?;
+
+// Use the typed identity variant when a ComponentId is already available
+let query_id = core.component_by_name("my-query")?.id().clone();
+let results = core.get_query_results_by_id(&query_id).await?;
 
 // Get query configuration
 let config: QueryConfig = core.get_query_config("my-query").await?;
@@ -671,6 +714,7 @@ let provider = RocksDbIndexProvider::new("/data/drasi-indexes", false, false)
 
 let core = DrasiLib::builder()
     .with_id("my-app")
+    .with_query_factory(query_plugin.query_factory()?) // Same explicit selection as above
     // 1. Register the provider under a name
     .with_index_provider("rocks", Arc::new(provider))
     .with_source(source)
@@ -1097,6 +1141,11 @@ actual owning graph's policy/scope through `ConstructionContext::telemetry()`,
 including additions and replacements; a temporary assembly graph is not the
 owner.
 
+Resource-only telemetry bindings derive stable UUID identities in a dedicated
+namespace from their resource IDs, scoped by the actual instance and graph.
+These transport identities do not create graph nodes or synthetic component
+measurements, and their lifetime remains owned by the resource.
+
 ## Portable execution context
 
 ### Shared native telemetry
@@ -1117,6 +1166,12 @@ resource; native IDs, parentage and timestamps are not recreated as new spans.
 Use bounded batch processors/exporters for production. After stopping producers,
 await collector shutdown and logging drain before shutting down the provider.
 Stopping an instance does not shut down a collector shared with another instance.
+
+The optional adapter is aligned with OpenTelemetry API/SDK 0.33.1 and
+`tracing-opentelemetry` 0.34.0 for the Server OBS-01 compatibility baseline.
+Exporter construction remains host-owned and is not enabled by this feature.
+Rebuild native context/telemetry fixtures after dependency or SDK changes;
+existing shared libraries are not rebuilt by a host's path dependencies.
 
 Component factories use `ConstructionContext::plugin_metrics(kind)` to cache a
 `ScopedMetricEmitter`. Native SDK factories use that same emitter API through
@@ -1586,7 +1641,8 @@ queries:
 
 ### Loading YAML
 
-Inside an async function, with the source/reaction objects already constructed:
+Inside an async function, with the source/reaction objects and selected native
+`query_plugin` already constructed:
 
 ```rust,ignore
 use drasi_lib::{DrasiLib, DrasiLibConfig};
@@ -1595,7 +1651,9 @@ let yaml = std::fs::read_to_string("config.yaml")?;
 let config: DrasiLibConfig = serde_yaml::from_str(&yaml)?;
 config.validate()?;
 
-let mut builder = DrasiLib::builder().with_id(&config.id);
+let mut builder = DrasiLib::builder()
+    .with_id(&config.id)
+    .with_query_factory(query_plugin.query_factory()?);
 if let Some(capacity) = config.priority_queue_capacity {
     builder = builder.with_priority_queue_capacity(capacity);
 }
@@ -1617,8 +1675,8 @@ let core = builder
 This excerpt uses in-memory indexes. Register actual named storage providers
 when using storage references; parsing `storage_backends` does not construct
 external providers. The three source objects must use the IDs referenced in
-the YAML above. Engine selection is also separate from `DrasiLibConfig`;
-see the [ComputationGraph configuration reference](docs/computation-graph-configuration.md).
+the YAML above. The query factory is supplied explicitly; there is no engine
+selector. See the [ComputationGraph configuration reference](docs/computation-graph-configuration.md).
 
 ### `DrasiLibConfig` Fields
 

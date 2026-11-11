@@ -7,7 +7,6 @@
 // CONDITIONS OF ANY KIND, either express or implied. See the License for the
 // specific language governing permissions and limitations under the License.
 
-#[allow(dead_code)]
 mod computation_support;
 #[path = "computation_support/pipe_profiles.rs"]
 mod profiles;
@@ -45,7 +44,7 @@ fn stage_descriptor(role: ComponentRole) -> ComponentDescriptor {
         ComponentRole::Source => descriptor("source", &[], &["out"]),
         ComponentRole::Transformer => descriptor("transform", &["in"], &["out"]),
         ComponentRole::Sink => descriptor("sink", &["in"], &[]),
-        ComponentRole::Query | ComponentRole::Service => unreachable!("synthetic pipeline roles"),
+        ComponentRole::Service => unreachable!("synthetic pipeline roles"),
     }
 }
 
@@ -181,9 +180,7 @@ impl ComponentFactory for Factory {
             ComponentRole::Source => ConstructedComponent::source(stage),
             ComponentRole::Transformer => ConstructedComponent::transformer(stage),
             ComponentRole::Sink => ConstructedComponent::sink(stage),
-            ComponentRole::Query | ComponentRole::Service => {
-                unreachable!("synthetic pipeline roles")
-            }
+            ComponentRole::Service => unreachable!("synthetic pipeline roles"),
         })
     }
 }
@@ -206,7 +203,7 @@ async fn matrix() {
                             ComponentRole::Source => builder.source(stage),
                             ComponentRole::Transformer => builder.transformer(stage),
                             ComponentRole::Sink => builder.sink(stage),
-                            ComponentRole::Query | ComponentRole::Service => unreachable!(),
+                            ComponentRole::Service => unreachable!(),
                         };
                     } else {
                         let implementation =

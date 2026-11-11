@@ -196,14 +196,9 @@ impl ObservedOperation {
         match self {
             Self::Start | Self::Stop | Self::Reconfigure => true,
             Self::Next | Self::Publish => role == ComponentRole::Source,
-            Self::Transform | Self::Continue | Self::Confirm => {
-                matches!(role, ComponentRole::Transformer | ComponentRole::Query)
-            }
+            Self::Transform | Self::Continue | Self::Confirm => role == ComponentRole::Transformer,
             Self::Handle | Self::HandleBatch => role == ComponentRole::Sink,
-            Self::Acknowledge => matches!(
-                role,
-                ComponentRole::Transformer | ComponentRole::Query | ComponentRole::Sink
-            ),
+            Self::Acknowledge => matches!(role, ComponentRole::Transformer | ComponentRole::Sink),
             Self::Run => role == ComponentRole::Service,
             Self::ServiceWork => role == ComponentRole::Service,
             _ => false,
@@ -349,10 +344,7 @@ impl ComponentObservations {
                 let role = config.scope().and_then(TelemetryScope::role);
                 let supported =
                     match completion {
-                        "transformed" => matches!(
-                            role,
-                            Some(ComponentRole::Transformer | ComponentRole::Query)
-                        ),
+                        "transformed" => matches!(role, Some(ComponentRole::Transformer)),
                         "handled" => role == Some(ComponentRole::Sink)
                             || config.scope().and_then(TelemetryScope::semantic_kind)
                                 == Some(
@@ -369,7 +361,7 @@ impl ComponentObservations {
             }
             if matches!(
                 config.scope().and_then(TelemetryScope::role),
-                Some(ComponentRole::Source | ComponentRole::Transformer | ComponentRole::Query)
+                Some(ComponentRole::Source | ComponentRole::Transformer)
             ) {
                 outputs = counter("drasi.component.outputs_emitted", vec![])?;
             }
@@ -478,6 +470,7 @@ impl ComponentObservations {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn query_observer(
         self: &Arc<Self>,
     ) -> Option<Arc<dyn drasi_core::computation::QueryObserver>> {
@@ -1277,7 +1270,7 @@ fn operation_span(
 mod tests {
     use super::*;
     use crate::observability::{TelemetryOptions, TelemetryProfile, TelemetrySettings};
-    use drasi_computation_contracts::{ComponentId, ComponentSemanticKind};
+    use drasi_computation_contracts::ComponentSemanticKind;
 
     #[test]
     fn confirmation_span_names_follow_component_identity() {
@@ -1291,11 +1284,6 @@ mod tests {
             TelemetryProfile::Persistence,
         ] {
             for (role, kind, expected) in [
-                (
-                    ComponentRole::Query,
-                    ComponentSemanticKind::Query,
-                    "query.confirm_outputs",
-                ),
                 (
                     ComponentRole::Transformer,
                     ComponentSemanticKind::Query,
@@ -1319,7 +1307,12 @@ mod tests {
                             .resolve("graph", None)
                             .unwrap();
                     let owner = graph
-                        .observations(ComponentId::try_new("component").unwrap(), role, kind, 1)
+                        .observations(
+                            crate::test_helpers::component_id("component"),
+                            role,
+                            kind,
+                            1,
+                        )
                         .unwrap();
                     let observation = owner
                         .begin(operation, &ExecutionContext::default(), Default::default())
@@ -1346,7 +1339,6 @@ mod tests {
             TelemetryProfile::Persistence,
         ] {
             for (role, kind) in [
-                (ComponentRole::Query, ComponentSemanticKind::Query),
                 (ComponentRole::Transformer, ComponentSemanticKind::Query),
                 (
                     ComponentRole::Transformer,
@@ -1367,7 +1359,12 @@ mod tests {
                         .resolve("graph", None)
                         .unwrap();
                         let owner = graph
-                            .observations(ComponentId::try_new("component").unwrap(), role, kind, 1)
+                            .observations(
+                                crate::test_helpers::component_id("component"),
+                                role,
+                                kind,
+                                1,
+                            )
                             .unwrap();
                         let expected = if kind == ComponentSemanticKind::Query
                             && matches!(
@@ -1413,7 +1410,7 @@ mod tests {
         let owner = |generation| {
             graph
                 .observations(
-                    ComponentId::try_new("transformer").unwrap(),
+                    crate::test_helpers::component_id("transformer"),
                     ComponentRole::Transformer,
                     ComponentSemanticKind::Transformer,
                     generation,
@@ -1483,7 +1480,7 @@ mod tests {
                 .unwrap();
                 let owner = graph
                     .observations(
-                        ComponentId::try_new("source").unwrap(),
+                        crate::test_helpers::component_id("source"),
                         ComponentRole::Source,
                         ComponentSemanticKind::Source,
                         1,
@@ -1525,8 +1522,8 @@ mod tests {
                 .unwrap();
                 let owner = graph
                     .observations(
-                        ComponentId::try_new("query").unwrap(),
-                        ComponentRole::Query,
+                        crate::test_helpers::component_id("query"),
+                        ComponentRole::Transformer,
                         ComponentSemanticKind::Query,
                         1,
                     )

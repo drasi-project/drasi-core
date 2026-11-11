@@ -1,0 +1,33 @@
+[package]
+rust-version.workspace = true
+name = "drasi-query-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared query-component behavior for linked and native hosting adapters"
+readme = "README.md"
+
+[dependencies]
+drasi-computation-contracts = { workspace = true }
+drasi-core = { workspace = true, features = ["computation"] }
+drasi-functions-cypher = { workspace = true }
+drasi-functions-gql = { workspace = true }
+drasi-query-ast = { workspace = true }
+drasi-query-cypher = { workspace = true }
+drasi-query-gql = { workspace = true }
+anyhow = "1"
+async-trait = "0.1"
+bytes = "1"
+fnv = "1"
+im = { workspace = true }
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "time"] }
+uuid = "1"
+chrono = "0.4"
+
+[lints]
+workspace = true

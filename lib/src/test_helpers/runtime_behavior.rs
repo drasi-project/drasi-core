@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::{managers, wait_for_component_status};
+use crate::test_helpers::creation::BuilderFixtures;
 use crate::{
     channels::{ComponentStatus, QueryResult, ResultDiff},
     queries::Query,
@@ -29,15 +30,28 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 async fn pipeline(text: &str, capacity: usize) -> (Arc<DrasiLib>, Arc<dyn Query>) {
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("runtime-parity")
-            .with_source(TestMockSource::new("source".into()).unwrap())
+            .with_source_fixture(TestMockSource::fixture("source", true))
             .with_query(
                 crate::Query::cypher("query")
                     .query(text)
                     .from_input("source")
                     .enable_bootstrap(false)
                     .with_dispatch_buffer_capacity(capacity)
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .await
@@ -63,7 +77,11 @@ async fn pipeline(text: &str, capacity: usize) -> (Arc<DrasiLib>, Arc<dyn Query>
         let snapshot = native.inspector().snapshot();
         let id = ComponentId::try_new("query").unwrap();
         let specification = &snapshot.desired.specifications[&id];
-        assert_eq!(specification.role, ComponentRole::Query);
+        assert_eq!(specification.role, ComponentRole::Transformer);
+        assert_eq!(
+            specification.descriptor.semantic_kind(),
+            Some(ComponentSemanticKind::Query)
+        );
         assert_eq!(
             specification.implementation.name.as_ref(),
             "drasi/continuous-query"
@@ -378,11 +396,11 @@ async fn scheduled_query_result_preserves_legacy_metadata_and_snapshot() {
 
 #[tokio::test]
 async fn partially_started_native_instance_can_stop_its_successful_components() {
-    struct FailingSource;
+    struct FailingSource(String);
     #[async_trait::async_trait]
     impl crate::Source for FailingSource {
         fn id(&self) -> &str {
-            "bad"
+            &self.0
         }
         fn type_name(&self) -> &str {
             "failure"
@@ -390,7 +408,7 @@ async fn partially_started_native_instance_can_stop_its_successful_components() 
         fn properties(&self) -> HashMap<String, serde_json::Value> {
             HashMap::new()
         }
-        async fn initialize(&self, _: crate::SourceRuntimeContext) {}
+        async fn bind_runtime_context(&self, _: crate::SourceRuntimeContext) {}
         async fn start(&self) -> anyhow::Result<()> {
             anyhow::bail!("injected failure")
         }
@@ -411,14 +429,27 @@ async fn partially_started_native_instance_can_stop_its_successful_components() 
         }
     }
     let core = DrasiLib::builder()
-        .with_source(FailingSource)
-        .with_source(TestMockSource::new("good".into()).unwrap())
+        .with_query_factory(
+            crate::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &crate::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
+        .with_source_factory("bad", true, |id| Ok(FailingSource(id.to_string())))
+        .with_source_fixture(TestMockSource::fixture("good", true))
         .with_query(
             crate::Query::cypher("query")
                 .query("MATCH (n:Person) RETURN n.name AS name")
                 .from_input("good")
                 .enable_bootstrap(false)
-                .build(),
+                .build()
+                .unwrap(),
         )
         .build()
         .await

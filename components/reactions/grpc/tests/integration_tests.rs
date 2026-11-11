@@ -1042,6 +1042,18 @@ async fn end_to_end_through_drasilib_delivers_to_grpc_server() {
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("e2e-core")
             .with_source(mock_source)
             .with_query(query)

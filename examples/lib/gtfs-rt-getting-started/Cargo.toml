@@ -9,6 +9,8 @@ description = "DrasiLib GTFS-Realtime dashboard example"
 [workspace]
 
 [dependencies]
+drasi-host-sdk = { path = "../../../components/host-sdk" }
+drasi-computation-transformer-query = { path = "../../../components/computation-plugins/transformers/query" }
 anyhow = "1.0"
 axum = { version = "0.7", features = ["json"] }
 chrono = { version = "0.4", features = ["serde"] }

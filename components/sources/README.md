@@ -5,6 +5,12 @@
 This document is a guide for software developers who create and maintain custom
 **Source plugins** in Rust for `drasi-lib`.
 
+This guide covers the **ordinary Source family**: `drasi_lib::Source`,
+`SourceBase`, and `drasi-plugin-sdk`. Native source plugins instead implement
+`NativeComponent` and `NativeSource` from the
+[native SDK](../computation-plugin-sdk/README.md); they do not use `SourceBase`
+or this family's vtables. Both families execute through ComputationGraph.
+
 Sources are the components of Drasi that connect to external systems and make the
 changes to data from those systems available to Continuous Queries.
 
@@ -142,51 +148,68 @@ context later and again in [Appendix B](#appendix-b--glossary).
    implemented by the same crate, but the runtime treats them as separate
    capabilities.
 
-6. **Ownership transfers to `DrasiLib`.** Once a Source is passed to
-   `DrasiLib::builder().with_source(...)`, the runtime owns its lifecycle and
-   calls `initialize`, `start`, `subscribe`, `stop`, and `deprovision` as needed.
+6. **The runtime owns admitted objects.** Use
+   `DrasiLib::builder().with_source_factory(...)` to construct a source with
+   a framework-assigned UUID. The runtime binds context, initializes that
+   actual object once, and owns its start/stop cycles and final disposal.
+   Destructive resource deletion requires a separate explicit request.
 
-7. **FFI safety matters.** Dynamic source plugins are loaded through a stable C
-   ABI vtable. Panics at the boundary are caught by the plugin SDK, but source
+7. **FFI safety matters.** Dynamic source plugins are loaded through a versioned C
+   ABI vtable. Supported unwinding panics are caught by the plugin SDK, but source
    implementations SHOULD return errors rather than panic.
 
 ### A source in context
 
 The Quickstart below builds `MySource`. In a real application, the source is one
 piece of a `drasi-lib` instance alongside at least one query and, usually, at
-least one reaction. The application creates those pieces, transfers ownership to
-`DrasiLib::builder()`, then starts the runtime.
+least one reaction. The application declares constructors/configuration through
+`DrasiLib::builder()`, which owns construction and lifecycle, then starts the runtime.
 
 The example below uses the source you build in this guide so the moving parts are
 visible without an external database, stream, or service.
 
 ```rust,ignore
+use std::sync::Arc;
 use drasi_lib::{DrasiLib, Query};
+use drasi_lib::computation::v1::ComponentFactory;
 use my_source::{MySource, MySourceConfig};
 
-async fn run() -> anyhow::Result<()> {
-    let source = MySource::builder("my-source")
-        .with_config(MySourceConfig::default())
-        .build()?;
-
+async fn run(query_factory: Arc<dyn ComponentFactory>) -> anyhow::Result<DrasiLib> {
     let query = Query::cypher("counter-query")
         .query("MATCH (c:Counter) RETURN c.value AS value")
         .from_input("my-source")
-        .build();
+        .enable_bootstrap(false)
+        .build()?;
 
     let drasi = DrasiLib::builder()
-        .with_source(source)
+        .with_query_factory(query_factory)
+        .with_source_factory("my-source", true, |id| {
+            MySource::new(id.to_string(), MySourceConfig::default())
+        })
         .with_query(query)
         .build()
         .await?;
 
     drasi.start().await?;
-    Ok(())
+    Ok(drasi)
 }
 ```
 
 This guide focuses on the source plugin itself. The query above is context: it
 shows where the source fits once you have built it.
+
+`"my-source"` and `"counter-query"` are editable graph names, not component IDs.
+The source constructor receives an immutable UUID and MUST return it unchanged
+from `Source::id()`. `Query::from_input` selects an upstream component by name.
+Preconstructed objects require explicit `with_allow_external_component_ids(true)`
+and `with_source(name, source)`; they are not the default admission path.
+
+The embedding application supplies an explicitly selected query factory that
+supports ordinary query authoring; see the
+[Core developer guide](../../lib/docs/developer-guide/README.md). Loading a
+source plugin alone neither selects that factory nor authorizes managed updates.
+Retain the returned runtime owner rather than dropping an active instance as a
+substitute for awaited lifecycle cleanup.
 
 ---
 
@@ -195,7 +218,7 @@ shows where the source fits once you have built it.
 This walkthrough creates a small Source that emits a `Counter` node every second.
 It is intentionally simple: no external database, no bootstrap provider, and no
 replay. Later sections add those capabilities, and [§8](#8-resilience--persistence-patterns)
-builds a complete, durable source that opens its own inbound port.
+illustrates a durable source that opens its own inbound port.
 
 > ⏱️ Budget about 15 minutes of *typing*, plus a first `cargo build` that
 > compiles `drasi-lib`, `drasi-core`, and their dependencies — that initial
@@ -203,13 +226,14 @@ builds a complete, durable source that opens its own inbound port.
 
 ### Prerequisites
 
-> ✅ A recent stable Rust toolchain (`rustc --version` ≥ 1.83).  
+> ✅ Rust 1.95.0 or a compatible newer toolchain matching your host build.<br>
 > ✅ Familiarity with async Rust and the `tokio` ecosystem.  
-> ✅ An internet connection so `cargo` can resolve `drasi-lib`,
->    `drasi-core`, and their transitive dependencies from crates.io.  
+> ✅ Matching Core/runtime/SDK sources or releases providing the APIs in this guide.
 
-You do **not** need a clone of the Drasi source tree. Your source lives in its
-own crate and depends on the published `drasi-lib` and `drasi-core` crates.
+Your source lives in its own crate. The path dependencies below assume
+`my-source/` is beside the host's matching `drasi-core/` checkout. Published
+dependencies are also possible when they provide this lifecycle/UUID API and
+the required ordinary ABI; an unrelated older release is not interchangeable.
 
 ### Step 1: Create the crate
 
@@ -244,11 +268,9 @@ license = "Apache-2.0"
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
-# Pin to one drasi-lib/drasi-core pair across your project. The versions
-# below were current at the time this guide was written; check crates.io
-# for the latest compatible releases.
-drasi-lib = "0.8"
-drasi-core = "0.5"
+# Use the Core checkout that matches the embedding application.
+drasi-lib = { path = "../drasi-core/lib" }
+drasi-core = { path = "../drasi-core/core" }
 anyhow = "1"
 async-trait = "0.1"
 chrono = "0.4"
@@ -265,9 +287,9 @@ bytes = "1"
 > 🔵 **MAY** — A source that opens its own inbound port (see [§8](#sources-that-open-an-inbound-port-ingress))
 > also needs tokio's `"net"` feature (and usually `"io-util"` for buffered reads).
 
-> 🔴 **MUST** — Depend on `drasi-lib` and `drasi-core` from crates.io
-> and pin compatible versions. Dynamic plugins must also use the same
-> `drasi-plugin-sdk` version as the host that will load them.
+> 🔴 **MUST** — Select compatible `drasi-lib`, `drasi-core`, and SDK builds.
+> Dynamic plugins must satisfy the host's ordinary ABI/version and target checks;
+> crate package versions are not the ABI version.
 
 > 🟡 **SHOULD** — Declare `crate-type = ["lib", "cdylib"]` even if you
 > only need the static `lib` path today. Adding `cdylib` later requires
@@ -338,6 +360,7 @@ pub struct MySource {
 }
 
 impl MySource {
+    /// `id` is the UUID supplied by the framework, not the source's graph name.
     pub fn new(id: impl Into<String>, config: MySourceConfig) -> Result<Self> {
         Self::builder(id).with_config(config).build()
     }
@@ -465,8 +488,8 @@ impl Source for MySource {
         false
     }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -560,6 +583,11 @@ Key points:
    settings, creates the streaming receiver, and handles optional bootstrap.
 4. **The source does not template output.** It maps external data into the fixed
    Drasi `SourceChange` graph contract.
+5. **Binding is not initialization.** The required binding hook always wires
+   `SourceBase`. This example needs no additional instance-lifetime setup, so it
+   uses the default no-op `initialize()` and `dispose()`. Its worker belongs to
+   each start/stop cycle. It does not advertise temporary-pause or live-update
+   support merely by inheriting no-op hooks.
 
 ### Step 5: `lib.rs` — public exports
 
@@ -595,25 +623,29 @@ cargo build
 ### Step 7: Use it
 
 ```rust,ignore
+use std::sync::Arc;
 use drasi_lib::{DrasiLib, Query};
+use drasi_lib::computation::v1::ComponentFactory;
 use my_source::{MySource, MySourceConfig};
 
-async fn run() -> anyhow::Result<()> {
-    let source = MySource::new("my-source", MySourceConfig::default())?;
-
+async fn run(query_factory: Arc<dyn ComponentFactory>) -> anyhow::Result<DrasiLib> {
     let query = Query::cypher("counter-query")
         .query("MATCH (c:Counter) RETURN c.value AS value")
         .from_input("my-source")
-        .build();
+        .enable_bootstrap(false)
+        .build()?;
 
     let drasi = DrasiLib::builder()
-        .with_source(source)
+        .with_query_factory(query_factory)
+        .with_source_factory("my-source", true, |id| {
+            MySource::new(id.to_string(), MySourceConfig::default())
+        })
         .with_query(query)
         .build()
         .await?;
 
     drasi.start().await?;
-    Ok(())
+    Ok(drasi)
 }
 ```
 
@@ -629,42 +661,77 @@ external system.
 
 ### 4.1 The Component Lifecycle
 
-Sources follow the same lifecycle model as other Drasi components:
+Separate the lifetime of an owned source object from its repeatable activations:
 
 ```
-Added → Starting → Running → Stopping → Stopped
-           ↓                         ↓
-         Error                    Removed
+construct → bind_runtime_context(context) → initialize()
+              start() → stop() → start() → stop()
+              [delete_owned_resources(), only when explicitly requested]
+              dispose() → final object release
 ```
 
-`SourceBase::new()` creates the local status handle. `initialize(context)` wires
-that handle to the component graph update channel. After that, every
-`SourceBase::set_status(...)` call updates local status and notifies the runtime.
+`SourceBase::new()` creates the local status handle.
+`bind_runtime_context(context)` is a **required async method returning `()`**.
+It wires that handle and the framework services independently of optional
+developer initialization. Sources using `SourceBase` MUST delegate to
+`self.base.bind_runtime_context(context).await`, even when `initialize()` is not
+overridden. Subsequent `set_status(...)` calls update local status and notify
+the runtime.
 
 Typical Source lifecycle:
 
 1. **Construct** — validate typed config and create `SourceBase`.
-2. **Initialize** — runtime calls `initialize(SourceRuntimeContext)`.
-3. **Start** — connect to external systems and spawn ingestion tasks.
-4. **Subscribe** — queries call `subscribe(settings)` and receive event channels.
-5. **Stream** — source dispatches live `SourceEventWrapper` values with required
-    sequence numbers through `SourceBase`.
-6. **Stop** — signal and join tasks, returning an error if cleanup remains
-   incomplete; then clear stale channel-mode dispatchers.
-7. **Deprovision** — optional permanent cleanup when a source is deleted with
-   cleanup enabled.
+2. **Bind context** — perform mandatory framework wiring.
+3. **Initialize** — call the zero-argument, fallible `initialize()` once for
+   instance-lifetime setup. Its default is `Ok(())`.
+4. **Start / subscribe / stream** — acquire activation-scoped resources,
+   attach subscriptions, and publish source events.
+5. **Stop** — signal and join workers, then release activation-scoped resources
+   and stale channel-mode dispatchers. Keep the initialized object and retained
+   state for another start.
+6. **Delete owned resources, if requested** — perform explicitly authorized
+   destructive cleanup after a successful stop.
+7. **Dispose** — await remaining instance-lifetime cleanup before final release,
+   including when the object was initialized but never started.
+
+`initialize`, `start`, `stop`, `dispose`, `pause_processing`, and
+`resume_processing` are no-argument async `Result<()>` hooks with no-op defaults.
+Sources with their own resources or ingestion work MUST override the hooks
+needed to manage that work. No-op defaults do not certify drainage, safe pausing,
+state retention, or permanent deletion.
+
+**Once means once per actual constructed object**, not once per UUID, library,
+port, or subscriber. Restarting a stopped object does not repeat initialization
+or disposal. A newly constructed object with the same UUID has its own lifetime.
+Borrowed objects remain their owner's responsibility; removing one subscription
+does not dispose a shared source.
+
+Failed initialization MUST prevent start and lead to disposal of that partially
+initialized object, not another initialization attempt on it. A failed start may
+already own work and therefore still requires stop. Failed or interrupted
+stop/dispose/deletion MUST retain the actual cleanup owner and unfinished work
+for inspection/retry; they MUST NOT permit conflicting restart or final release.
+A successful transition is not repeated; incomplete cleanup must be retry-safe.
+
+Use `pause_processing()` / `resume_processing()` only for a temporary processing
+boundary that retains the activation. Do not insert them around normal
+start/stop, or resume a paused source merely to stop it. Independently running
+sources must implement a real pause before relying on one.
 
 #### Who calls what
 
 | Method | Called by | Implementer responsibility |
 |--------|-----------|----------------------------|
 | `new(...)` / builder | Application or plugin descriptor | Validate config and create `SourceBase`. |
-| `initialize(context)` | `DrasiLib` | Delegate to `self.base.initialize(context).await`. |
-| `start()` | `DrasiLib` lifecycle or `start_source()` | Start ingestion and set status. |
+| `bind_runtime_context(context)` | `DrasiLib` | Always wire `SourceBase`, independently of custom setup. |
+| `initialize()` | `DrasiLib` | Optional fallible instance setup, once before the first start. |
+| `start()` | `DrasiLib` graph lifecycle | Start ingestion and set status for each activation. |
 | `subscribe(settings)` | Query manager | Return streaming receiver and optional bootstrap receiver. |
 | `on_subscriptions_complete()` | Lifecycle after startup subscriptions | Release startup fences if the source uses them. |
-| `stop()` | `DrasiLib` lifecycle or `stop_source()` | Stop tasks, release resources, clear stale dispatchers. |
-| `deprovision()` | `remove_source(id, cleanup: true)` | Remove persistent state or external resources. |
+| `stop()` | `DrasiLib` graph lifecycle | Join activation work, including after a partial start; retain restartable state. |
+| `pause_processing()` / `resume_processing()` | An explicitly coordinated processing pause | Pause/resume existing work without replacing the activation. |
+| `delete_owned_resources()` | Explicit permanent removal with cleanup enabled | Delete only owned persistent state/external artifacts; the default is unsupported. |
+| `dispose()` | Final retirement | Await remaining object-lifetime cleanup; do not delete persistent data implicitly. |
 
 ### 4.2 Runtime-Owned Query Subscriptions
 
@@ -714,7 +781,7 @@ Configure this through `SourceBaseParams`:
 
 ```rust,ignore
 let base = SourceBase::new(
-    SourceBaseParams::new("orders")
+    SourceBaseParams::new(source_id) // UUID supplied to your constructor
         .with_dispatch_mode(DispatchMode::Channel)
         .with_dispatch_buffer_capacity(1_000),
 )?;
@@ -786,7 +853,7 @@ then replays retained events on restart.
 ### 4.6 The Runtime Context
 
 `SourceRuntimeContext` is the runtime dependency-injection mechanism for Sources.
-It is provided during `initialize()` and includes:
+It is provided during `bind_runtime_context(context)`, before `initialize()`, and includes:
 
 - `source_id`
 - component graph update channel for status events
@@ -802,8 +869,8 @@ Use the context through `SourceBase`:
 ```rust,ignore
 #[async_trait]
 impl Source for MySource {
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 }
 
@@ -817,7 +884,10 @@ let context = self.base.context().await;
 
 ## 5. The `Source` Trait
 
-All Sources implement `drasi_lib::sources::Source`.
+All ordinary Sources implement `drasi_lib::sources::Source`. The lifecycle and
+delivery surface is shown below; see the [trait definition](../../lib/src/sources/traits.rs)
+for the complete API. Optional Rust update hooks do not imply an ordinary ABI
+update capability.
 
 ```rust,ignore
 #[async_trait]
@@ -842,8 +912,13 @@ pub trait Source: Send + Sync {
         None
     }
 
-    async fn start(&self) -> anyhow::Result<()>;
-    async fn stop(&self) -> anyhow::Result<()>;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext);
+    async fn initialize(&self) -> anyhow::Result<()> { Ok(()) }
+    async fn start(&self) -> anyhow::Result<()> { Ok(()) }
+    async fn stop(&self) -> anyhow::Result<()> { Ok(()) }
+    async fn dispose(&self) -> anyhow::Result<()> { Ok(()) }
+    async fn pause_processing(&self) -> anyhow::Result<()> { Ok(()) }
+    async fn resume_processing(&self) -> anyhow::Result<()> { Ok(()) }
     async fn status(&self) -> ComponentStatus;
 
     async fn subscribe(
@@ -853,11 +928,9 @@ pub trait Source: Send + Sync {
 
     fn as_any(&self) -> &dyn std::any::Any;
 
-    async fn deprovision(&self) -> anyhow::Result<()> {
-        Ok(())
+    async fn delete_owned_resources(&self) -> anyhow::Result<()> {
+        anyhow::bail!("owned-resource deletion is unsupported")
     }
-
-    async fn initialize(&self, context: SourceRuntimeContext);
 
     async fn set_bootstrap_provider(
         &self,
@@ -908,7 +981,8 @@ channel types live under `drasi_lib::channels`.
 
 #### `id` — **MUST**
 
-Return the unique source instance ID. This value is used in
+Return the immutable component UUID supplied to the constructor, unchanged.
+The editable graph name is separate and MUST NOT be substituted here. This ID is used in
 `ElementReference.source_id`, component status, checkpoint state, WAL partitions,
 and config snapshots.
 
@@ -929,7 +1003,7 @@ Return the full persisted configuration map for this source.
 Prefer `SourceBase::properties_or_serialize(&dto)` in dynamic plugins so raw
 `ConfigValue` envelopes survive config snapshot roundtrips.
 
-#### `start` — **MUST**
+#### `start` — **MUST override when the source owns ingestion work**
 
 Begin ingestion. This usually means:
 
@@ -979,9 +1053,10 @@ belongs around real bounded work, not an idle listener lifetime. Legacy
 Source cdylibs without portable context support remain a documented boundary;
 this does not change their ABI or log routing.
 
-#### `stop` — **MUST**
+#### `stop` — **MUST override when the source owns activation resources**
 
-Stop ingestion and clean up local resources. Use `SourceBase::stop_common()` if
+Stop ingestion and clean up activation resources, not the whole object's
+lifetime or persistent data. Use `SourceBase::stop_common()` if
 your source stores a `oneshot::Sender<()>` and task handle in `SourceBase`.
 Sources with custom task slots MUST join those workers before calling
 `stop_common()`, which also clears channel dispatchers and subscriber position
@@ -1041,15 +1116,24 @@ to `subscribe_with_bootstrap()` or `subscribe_with_replay()`.
 
 Return `self` for downcasting in tests.
 
-#### `initialize(context)` — **MUST**
+#### `bind_runtime_context(context)` — **MUST**
 
 Delegate to `SourceBase`:
 
 ```rust,ignore
-async fn initialize(&self, context: SourceRuntimeContext) {
-    self.base.initialize(context).await;
+async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+    self.base.bind_runtime_context(context).await;
 }
 ```
+
+#### `initialize()` / `dispose()` — optional instance-lifetime hooks
+
+Override `initialize() -> Result<()>` for fallible setup that needs bound
+services and must survive start/stop cycles. Do not start normal ingestion or
+wait for the graph's live bootstrap here. Override `dispose() -> Result<()>`
+to release those resources at final retirement, including partial initialization.
+Both default to `Ok(())`; mandatory base wiring has already run, and neither
+implicitly performs destructive cleanup.
 
 ### 5.2 Lifecycle — the runtime call sequence
 
@@ -1058,7 +1142,9 @@ Fresh start:
 ```
 new / descriptor create_source
     ↓
-initialize(context)
+bind_runtime_context(context)
+    ↓
+initialize()
     ↓
 start()
     ↓
@@ -1071,10 +1157,10 @@ on_subscriptions_complete()
 dispatch live SourceEventWrapper values with required sequence numbers
 ```
 
-Restart with query checkpoint:
+Restart the same initialized object with a query checkpoint:
 
 ```
-initialize(context)
+successful stop()
     ↓
 start()
     ↓
@@ -1087,15 +1173,33 @@ bootstrap is skipped
 live stream resumes
 ```
 
+This restart does not call `initialize()` or `dispose()`. Reconstruction after
+process restart or an explicitly approved replacement creates a new object,
+which must bind context and initialize independently.
+
 Removal with cleanup:
 
 ```
 stop()
     ↓
-deprovision()
+delete_owned_resources()
     ↓
-component removed
+dispose()
+    ↓
+final object release
 ```
+
+Removal without destructive cleanup skips `delete_owned_resources`, not
+`dispose`. Any cleanup failure keeps the owner available for retry rather than
+claiming removal completed.
+
+**Managed updates require explicit author support.** The ordinary ABI 0.18
+descriptor/FFI path is creation-only for managed updates: it exports no factory
+`plan_update` or component `apply_update` bridge. A creation descriptor, a
+restartable object, or no-op lifecycle hooks do not authorize live replacement,
+state reset, or a pause-based update. In-process author-supplied planning must
+implement the actual Core contract; an opaque same-UUID replacement callback is
+not a substitute. See the [plugin architecture](../plugin-architecture.md).
 
 ### 5.3 Optional capability overrides
 
@@ -1112,7 +1216,7 @@ fn dispatch_mode(&self) -> DispatchMode {
 
 #### `auto_start` — **MAY**
 
-Return `false` if the Source should only start when `start_source(id)` is called.
+Return `false` if the Source should only start on an explicit runtime request.
 
 #### `supports_replay` — **MUST for volatile sources**
 
@@ -1128,16 +1232,20 @@ Return a best-effort `SourceSchema` describing node and relation labels.
 Database-like sources can derive this from configured tables or introspection;
 webhook-style sources can derive it from route mappings.
 
-#### `deprovision` — **MAY**
+#### `delete_owned_resources` — **MAY**
 
-Clean up durable state or external resources:
+The default returns an unsupported error, not success. Override it for
+explicitly requested deletion of owned durable state or external resources:
 
 - delete Drasi WAL data
 - clear state-store partitions
 - drop replication slots or cursors
 - unregister consumers or leases
 
-Use `SourceBase::deprovision_common()` for state-store cleanup.
+Use `SourceBase::delete_owned_resources_common()` for the source's state-store
+partition. It does not delete WAL partitions or external artifacts for you.
+Propagate failures and make retries safe; stop/dispose MUST NOT call this
+destructive hook implicitly.
 
 #### `set_bootstrap_provider` — **SHOULD**
 
@@ -1164,11 +1272,14 @@ registered their position handles.
 
 Sources that authenticate with external systems MAY accept an
 `IdentityProvider`. Delegate to `SourceBase::set_identity_provider(provider)` if
-you use `SourceBase`.
+you use `SourceBase`. For ordinary FFI sources, set it before context binding:
+the programmatic provider takes precedence over the context provider, but there
+is no late provider-replacement callback.
 
 ### 5.4 Error handling
 
-Source trait methods return `anyhow::Result` for implementor ergonomics. Add
+Fallible lifecycle/data methods return `anyhow::Result`; mandatory context
+binding returns `()`. Add
 context at the point where the failure is meaningful:
 
 ```rust,ignore
@@ -1207,8 +1318,9 @@ very specific reason not to.
 |------|---------|
 | Construction | `SourceBase::new(SourceBaseParams)` |
 | Configuration persistence | `set_raw_config`, `raw_config`, `properties_or_serialize` |
-| Runtime context | `initialize`, `context`, `state_store`, `identity_provider`, `set_identity_provider` |
-| Status and lifecycle | `get_status`, `set_status`, `status_handle`, `set_task_handle`, `set_shutdown_tx`, `stop_common`, `abort_and_join_task`, `clear_dispatchers`, `deprovision_common` |
+| Runtime context | `bind_runtime_context`, `context`, `state_store`, `identity_provider`, `set_identity_provider` |
+| Status and lifecycle | `get_status`, `set_status`, `status_handle`, `set_task_handle`, `set_shutdown_tx`, `stop_common`, `abort_and_join_task`, `clear_dispatchers` |
+| Explicit destructive cleanup | `delete_owned_resources_common` |
 | Subscription | `apply_subscription_settings`, `create_streaming_receiver`, `wait_for_subscribers`, `subscribe_with_bootstrap`, `subscribe_with_bootstrap_context`, `create_bootstrap_receiver`, `subscribe_with_replay` |
 | Dispatch | `dispatch_source_change`, `dispatch_event`, `dispatch_events_batch` |
 | Replay positions | `create_position_handle`, `remove_position_handle`, `compute_confirmed_position`, `compute_confirmed_source_position`, `prune_position_map`, `clear_sequence_position_map`, `set_next_sequence`, `set_position_comparator` |
@@ -1229,7 +1341,7 @@ pub struct SourceBaseParams {
 Builder methods:
 
 ```rust,ignore
-let params = SourceBaseParams::new("source-id")
+let params = SourceBaseParams::new(source_id) // framework-supplied UUID
     .with_dispatch_mode(DispatchMode::Channel)
     .with_dispatch_buffer_capacity(1_000)
     .with_auto_start(true)
@@ -1562,7 +1674,7 @@ use drasi_lib::{WalProvider, WriteAheadLogConfig};
 
 if self.config.durable {
     let ctx = self.base.context().await
-        .ok_or_else(|| anyhow::anyhow!("initialize() must run before start()"))?;
+        .ok_or_else(|| anyhow::anyhow!("runtime context must be bound before start()"))?;
     let wal = ctx.wal_provider
         .ok_or_else(|| anyhow::anyhow!("durable source requires a WAL provider on DrasiLib"))?;
     wal.register(self.base.get_id(), WriteAheadLogConfig::default()).await?;
@@ -1630,7 +1742,8 @@ Rules:
 - Use `subscribe_with_replay()` when `resume_from` is present; fall back to
   `subscribe_with_bootstrap()` otherwise.
 - Return `true` from `supports_replay()` only when durability is enabled.
-- Delete WAL data in `deprovision()` via `wal.delete_wal(id)`.
+- Delete owned WAL data only in explicitly requested `delete_owned_resources()`
+  via `wal.delete_wal(id)`, never as part of stop or disposal.
 
 > 🟢 A complete, compiling durable ingress source that uses this exact pattern is
 > in [Worked example: a durable ingress source](#worked-example-a-durable-ingress-source)
@@ -1799,8 +1912,7 @@ it small — it is for resumption metadata, not for the data itself.
 
 ### Worked example: a durable ingress source
 
-This is a complete, compiling source (verified against `drasi-lib` 0.8 /
-`drasi-core` 0.5) that ties the section together: it **opens its own inbound TCP
+This source sketch ties the section together: it **opens its own inbound TCP
 port**, writes every event to the **WAL** for durability and replay, and keeps a
 restart-surviving cursor in the **state store**. The protocol is deliberately
 trivial (one newline-delimited payload per event) so the Drasi wiring stays
@@ -1952,8 +2064,8 @@ impl Source for FeedSource {
         self.config.durable
     }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -1971,7 +2083,7 @@ impl Source for FeedSource {
                 .base
                 .context()
                 .await
-                .ok_or_else(|| anyhow!("initialize() must run before start()"))?;
+                .ok_or_else(|| anyhow!("runtime context must be bound before start()"))?;
             let wal = ctx
                 .wal_provider
                 .ok_or_else(|| anyhow!("durable feed requires a WAL provider on DrasiLib"))?;
@@ -2323,7 +2435,7 @@ errors instead of cryptic driver failures:
   SQL Server / Oracle CDC enabled per table.
 - **Verify privileges and prerequisites** at startup.
 - **Own the slot/publication lifecycle**: create-or-reuse on start; decide whether
-  to drop it in `deprovision()`.
+  to drop it only in an explicitly requested `delete_owned_resources()`.
 - **Introspect schema** (columns, primary key / replica identity) and keep a
   fallback for when introspection has not run yet or a DDL change races a read.
 - **Decide a DDL / schema-change policy**: skip, error, or re-introspect.
@@ -2508,9 +2620,9 @@ default = []
 dynamic-plugin = []
 
 [dependencies]
-drasi-lib = "0.8"
-drasi-core = "0.5"
-drasi-plugin-sdk = "0.8"
+drasi-lib = { path = "../drasi-core/lib" }
+drasi-core = { path = "../drasi-core/core" }
+drasi-plugin-sdk = { path = "../drasi-core/components/plugin-sdk" }
 utoipa = { version = "4", features = ["chrono"] }
 bytes = "1"
 ```
@@ -2518,8 +2630,9 @@ bytes = "1"
 Keeping `"lib"` alongside `"cdylib"` lets the crate be used in tests and static
 embedding scenarios while still producing a plugin library.
 
-> 🔴 **MUST** — The host and dynamic plugin must use the same
-> `drasi-plugin-sdk` version. Treat the SDK version as part of the ABI.
+> 🔴 **MUST** — Build the host and plugin with matching ordinary ABI 0.18
+> interfaces and the same target/toolchain. `FFI_SDK_VERSION` is independent of
+> the SDK's crate release version. See the compatibility rules below.
 
 ### Configuration DTOs
 
@@ -2630,8 +2743,8 @@ pub mod descriptor;
 #[cfg(feature = "dynamic-plugin")]
 drasi_plugin_sdk::export_plugin!(
     plugin_id = "my-source",
-    core_version = "0.5.3",
-    lib_version = "0.8.5",
+    core_version = "0.5.10",
+    lib_version = "0.9.3",
     plugin_version = env!("CARGO_PKG_VERSION"),
     source_descriptors = [descriptor::MySourceDescriptor],
     reaction_descriptors = [],
@@ -2649,7 +2762,7 @@ If the crate also provides a bootstrap provider, implement
 
 `create_bootstrap_provider` receives **two** JSON values: the bootstrap plugin's
 own config and the parent source's config (use the latter for shared connection
-details). It compiles against `drasi-plugin-sdk` 0.8:
+details). Its interface is part of the ordinary SDK:
 
 ```rust,ignore
 pub struct MySourceBootstrapDescriptor;
@@ -2683,8 +2796,8 @@ Then list both descriptors in `export_plugin!`:
 #[cfg(feature = "dynamic-plugin")]
 drasi_plugin_sdk::export_plugin!(
     plugin_id = "my-source",
-    core_version = "0.5.3",
-    lib_version = "0.8.5",
+    core_version = "0.5.10",
+    lib_version = "0.9.3",
     plugin_version = env!("CARGO_PKG_VERSION"),
     source_descriptors = [descriptor::MySourceDescriptor],
     reaction_descriptors = [],
@@ -2712,18 +2825,43 @@ Copy the shared library into the server's plugin directory.
 
 ### FFI compatibility — what source authors need to know
 
-The following types and traits cross the dynamic plugin boundary:
+The ordinary binary contract is **`FFI_SDK_VERSION = "0.18.0"`**. Hosts accept
+ordinary 0.18.x tables on the same target and reject 0.16/0.17 component layouts
+before initialization. Rebuild old plugins; the unchanged state-store layout
+does not make their Source lifecycle tables compatible.
+
+The following contracts cross the dynamic plugin boundary:
 
 - `Source` trait methods through `SourceVtable`
 - `SourceSubscriptionSettings` fields deconstructed into FFI arguments
 - `SubscriptionResponse` reconstructed field-by-field
-- `SourceEventWrapper`, `BootstrapEvent`, and `SourceChange` as opaque pointers
+- source/bootstrap events as serialized MessagePack in C-compatible envelopes,
+  not pointers to foreign Rust-layout values
 - `ComponentStatus` and `DispatchMode` as FFI enums
 - `BootstrapProvider` through cross-plugin vtables
 
 If you are only implementing a Source plugin, do not change these core types. If
 you are modifying `drasi-lib`, `drasi-core`, or the plugin SDK itself, the plugin
 SDK vtables, host proxies, and FFI SDK version must be updated together.
+
+Context binding has its own callback; `initialize`, `start`, `stop`, `dispose`,
+pause/resume, and `delete_owned_resources` report completion/failure through
+`FfiResult`. Binding errors are preserved for the fallible initialization call.
+The host runs lifecycle callbacks on retained blocking workers rather than
+blocking a `current_thread` executor. Cancellation or timeout of the waiter
+does not cancel a synchronous plugin callback. The actual object, library and
+worker remain owned; retry cleanup instead of restarting or discarding them.
+Dropping an undisposed proxy retains unfinished ownership with a diagnostic,
+not successful cleanup.
+
+Supported unwinding initialization panics prevent reuse of that object and still
+require disposal. Neither the bridge nor no-op hooks can contain `panic=abort`,
+memory corruption, or force-cancel arbitrary non-yielding code.
+
+ABI 0.18 source descriptors support creation, not managed update planning or
+application. Loading a plugin does not authorize reconstruction, state loss,
+or a same-UUID replacement callback. Native source authoring uses the
+[separate native SDK](../computation-plugin-sdk/README.md).
 
 ---
 
@@ -2769,58 +2907,71 @@ fn maps_order_row_to_order_node() {
 
 Use direct source instances to test lifecycle and subscription behavior:
 
+- mandatory context binding precedes optional initialization
+- initialization occurs once across repeated start/stop cycles
 - `start()` transitions to Running
 - `stop()` transitions to Stopped and clears channel-mode dispatchers
 - `subscribe()` returns a receiver
 - `supports_replay()` matches configured durability or native capabilities
 - `set_bootstrap_provider()` delegates to `SourceBase`
+- final disposal is separate from persistent resource deletion
 
 The one piece the trait does not hand you is a `SourceSubscriptionSettings` — the
-runtime normally builds it. Construct it directly in tests. This skeleton compiles
-and runs with no external system (`tokio` test flavor, `bytes`):
+runtime normally builds it. Construct it directly in tests. This example uses
+the volatile counter scaffold and fixed UUIDs for test-only identity:
 
 ```rust,ignore
-use std::collections::HashSet;
-use drasi_lib::{ComponentStatus, Source, SourceSubscriptionSettings};
+use std::{collections::HashSet, time::Duration};
+use tokio::sync::mpsc;
+use drasi_lib::{ComponentStatus, Source, SourceRuntimeContext, SourceSubscriptionSettings};
+use crate::{MySource, MySourceConfig};
+
+const SOURCE_ID: &str = "11111111-1111-4111-8111-111111111111";
+const QUERY_ID: &str = "22222222-2222-4222-8222-222222222222";
+const INSTANCE_ID: &str = "44444444-4444-4444-8444-444444444444";
 
 fn settings(query_id: &str) -> SourceSubscriptionSettings {
     SourceSubscriptionSettings {
-        source_id: "orders".to_string(),
+        source_id: SOURCE_ID.to_string(),
         enable_bootstrap: false,
         query_id: query_id.to_string(),
-        nodes: HashSet::from(["Order".to_string()]),
+        nodes: HashSet::from(["Counter".to_string()]),
         relations: HashSet::new(),
         resume_from: None,
         resume_sequence: None,
-        request_position_handle: true,
+        request_position_handle: false,
     }
 }
 
 #[tokio::test]
-async fn lifecycle_and_subscription() {
-    let source = MySource::new("orders", test_config()).unwrap();
+async fn lifecycle_and_subscription() -> anyhow::Result<()> {
+    let source = MySource::new(SOURCE_ID, MySourceConfig::default())?;
+    let (update_tx, _updates) = mpsc::channel(32);
+    source.bind_runtime_context(SourceRuntimeContext::new(
+        INSTANCE_ID, SOURCE_ID, None, update_tx, None,
+    )).await;
+    source.initialize().await?;
 
-    let response = source.subscribe(settings("q1")).await.unwrap();
-    assert_eq!(response.query_id, "q1");
-    assert!(response.position_handle.is_some()); // requested above
-
-    source.start().await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    assert_eq!(source.status().await, ComponentStatus::Running);
-
-    source.stop().await.unwrap();
-    assert_eq!(source.status().await, ComponentStatus::Stopped);
-}
-
-#[tokio::test]
-async fn rejects_unavailable_resume() {
-    let source = MySource::new("orders", test_config()).unwrap();
-    let mut s = settings("q_gap");
-    s.resume_from = Some(bytes::Bytes::from(0_u64.to_be_bytes().to_vec()));
-    // A replay-capable source returns Err(SourceError::PositionUnavailable).
-    assert!(source.subscribe(s).await.is_err());
+    for _ in 0..2 {
+        // Prewire this unit test so the volatile first event is observable.
+        let mut response = source.subscribe(settings(QUERY_ID)).await?;
+        assert_eq!(response.query_id, QUERY_ID);
+        source.start().await?;
+        tokio::time::timeout(Duration::from_secs(2), response.receiver.recv()).await??;
+        assert_eq!(source.status().await, ComponentStatus::Running);
+        source.stop().await?;
+        assert_eq!(source.status().await, ComponentStatus::Stopped);
+    }
+    source.dispose().await?;
+    Ok(())
 }
 ```
+
+For replay-capable sources, separately assert `SourceError::PositionUnavailable`
+for a pruned position; the volatile counter is not a replay fixture. Add
+call-count/resource assertions for initialization without start, failed
+initialization, partial start, cleanup failure, cancellation and retry. Exercise
+real FFI vtables on both Tokio runtime flavors when shipping a dynamic plugin.
 
 ### Replay and checkpoint tests
 
@@ -2876,11 +3027,11 @@ For documentation-only changes to this guide, no cargo build or test is required
 
 - [ ] Crate name follows a stable, publishable convention such as
       `drasi-source-*`.
-- [ ] Pins compatible `drasi-lib`, `drasi-core`, and `drasi-plugin-sdk`
-      versions from crates.io.
+- [ ] Selects compatible `drasi-lib`, `drasi-core`, and `drasi-plugin-sdk`
+      builds, using matching path dependencies or released APIs.
 - [ ] Dynamic plugins include `crate-type = ["lib", "cdylib"]`.
-- [ ] Optional plugin export is gated behind a `dynamic-plugin` feature when
-      that improves test ergonomics.
+- [ ] Plugin export is gated behind `dynamic-plugin` so static builds do not
+      define duplicate FFI entry points.
 - [ ] `bytes` is a dependency if the source emits `source_position`, uses replay,
       or uses the WAL.
 - [ ] Ingress sources enable tokio's `"net"` (and usually `"io-util"`) features.
@@ -2888,7 +3039,14 @@ For documentation-only changes to this guide, no cargo build or test is required
 #### Source trait
 
 - [ ] Implements every required `Source` method.
-- [ ] Delegates `initialize()` to `SourceBase`.
+- [ ] Delegates required `bind_runtime_context(context)` to `SourceBase`,
+      even when optional `initialize()` is not overridden.
+- [ ] Preserves the framework-assigned UUID; graph names are not used as IDs.
+- [ ] Initializes once per actual object and supports repeated start/stop
+      without implicit reconstruction.
+- [ ] Disposes initialized-but-never-started and partially initialized objects.
+- [ ] Retains unfinished cleanup and prevents conflicting restart/release;
+      interrupted cleanup can be retried.
 - [ ] `properties()` returns all persisted configuration, including secrets or
       secret references.
 - [ ] Volatile sources override `supports_replay() -> false`.
@@ -2926,7 +3084,10 @@ For documentation-only changes to this guide, no cargo build or test is required
 - [ ] Startup/restart does not dispatch events before subscribers are attached
       when that would create gaps.
 - [ ] Stop logic clears channel-mode dispatchers.
-- [ ] Deprovision removes durable state when cleanup is requested.
+- [ ] `delete_owned_resources` deletes only explicitly requested owned state,
+      returns unsupported when not implemented, and propagates cleanup failures.
+- [ ] Stop and disposal do not delete persistent state or external artifacts.
+- [ ] No-op pause/resume hooks are not advertised as proof of paused ingestion.
 
 #### Bootstrap
 
@@ -2944,6 +3105,8 @@ For documentation-only changes to this guide, no cargo build or test is required
 - [ ] Descriptor preserves raw config via `source.base_mut().set_raw_config(...)`
       or an equivalent source helper.
 - [ ] `export_plugin!` lists the source descriptor and any bootstrap descriptors.
+- [ ] Host/plugin ordinary ABI is 0.18.x; old 0.16/0.17 layouts are rejected.
+- [ ] Creation descriptors are not treated as managed-update authorization.
 
 #### Testing
 

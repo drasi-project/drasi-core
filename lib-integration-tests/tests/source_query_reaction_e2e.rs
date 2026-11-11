@@ -268,7 +268,10 @@ async fn dependencies_arriving_out_of_order_activate_the_complete_pipeline(
     };
     use drasi_lib::computation::v1::{ComponentId, DependencyWait, RealizationState};
 
-    let drasi = DrasiLib::builder().build().await.expect("instance");
+    let drasi = lib_integration_tests::query_builder()
+        .build()
+        .await
+        .expect("instance");
     if !declare_before_start {
         drasi.start().await.expect("start instance");
     }
@@ -485,7 +488,7 @@ async fn test_source_to_query_to_reaction_data_flow() {
     let captured = reaction.captured();
     let notify = reaction.notify();
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .with_query(
             Query::cypher("test-query")
@@ -571,7 +574,7 @@ async fn test_multiple_events_flow_through() {
     let captured = reaction.captured();
     let notify = reaction.notify();
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .with_query(
             Query::cypher("multi-query")
@@ -649,7 +652,7 @@ async fn test_aggregation_results_stored_in_current_results() {
     let reaction = CapturingReaction::new("agg-rx", vec!["agg-query".to_string()]);
     let captured = reaction.captured();
 
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_source(source)
         .with_query(
             Query::cypher("agg-query")

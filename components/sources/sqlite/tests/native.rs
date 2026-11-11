@@ -424,7 +424,7 @@ async fn query_deprovision_cannot_silently_resume_after_sqlite_history_retiremen
     producer.stop().await?;
     assert_eq!(journal_state(directory.path())?, (1, 1, 0));
     consumer.stop().await?;
-    consumer.deprovision().await?;
+    consumer.delete_owned_resources().await?;
     drop(consumer);
     drop(producer);
 
@@ -552,7 +552,7 @@ async fn native_sqlite_connected_graph_delivers_only_the_final_transaction_resul
             Endpoint::new(id(component), PortId::try_new(port).expect("test port"))
         };
         let graph = ComputationGraph::builder("native-sqlite")
-            .query(Box::new(query))
+            .transformer(Box::new(query))
             .sink(Box::new(sink));
         let graph = if factory_created {
             let factory = Arc::new(SqliteSourceFactory::default());

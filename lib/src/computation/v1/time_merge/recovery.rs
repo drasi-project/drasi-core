@@ -178,7 +178,7 @@ impl SourceTimeMergeTransformer {
                     identity.persistent()
                         && identity.stream() == stream
                         && identity.graph_id() == self.definition.graph_id
-                        && identity.construction_scope() == self.definition.graph_id
+                        && identity.construction_scope() == self.construction_scope.as_ref()
                         && identity.component_id() == &self.definition.id,
                     "invalid persistent merge producer identity"
                 );
@@ -302,7 +302,7 @@ impl SourceTimeMergeTransformer {
                 "duplicate retained merge event"
             );
             anyhow::ensure!(
-                saved.last_emitted.map_or(true, |last| key.0 >= last) || saved.held == Some(key),
+                saved.last_emitted.is_none_or(|last| key.0 >= last) || saved.held == Some(key),
                 "retained merge event precedes output frontier without a hold"
             );
         }

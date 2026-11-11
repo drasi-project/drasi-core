@@ -6,8 +6,8 @@ use crate::computation::v1::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-fn id(value: &str) -> ComponentId {
-    ComponentId::try_new(value).unwrap()
+fn id(value: u128) -> ComponentId {
+    ComponentId::from_uuid(uuid::Uuid::from_u128(value))
 }
 
 struct DrainingProgressProducer {
@@ -89,11 +89,11 @@ async fn cleanup_preserves_actual_progress_owners() -> anyhow::Result<()> {
 
     for mode in ["cancelled", "failed", "timed-out", "normal-failed"] {
         let graph_id = "cleanup-progress-owners";
-        let owners = ["first", "second"]
-            .map(|name| Arc::new(QuerySourceProgress::new(graph_id, id(name)).unwrap()));
+        let owners =
+            [1, 2].map(|number| Arc::new(QuerySourceProgress::new(graph_id, id(number)).unwrap()));
         let progress = Arc::new(ConsumerProgressSet::new(
             graph_id,
-            id("producer"),
+            id(3),
             owners.iter().cloned(),
         )?);
         let entered = Arc::new(tokio::sync::Notify::new());
@@ -105,7 +105,7 @@ async fn cleanup_preserves_actual_progress_owners() -> anyhow::Result<()> {
             } else {
                 Duration::from_secs(2)
             });
-        for owner in &owners {
+        for (index, owner) in owners.iter().enumerate() {
             let query = ContinuousQueryTransformer::new(
                 ContinuousQueryDefinition {
                     graph_id: graph_id.into(),
@@ -120,14 +120,17 @@ async fn cleanup_preserves_actual_progress_owners() -> anyhow::Result<()> {
             .await?
             .with_source_progress(owner.clone())?;
             builder = builder
-                .query(Box::new(query))
+                .transformer(
+                    ComponentName::try_new(format!("query-{index}"))?,
+                    Box::new(query),
+                )
                 .bind_stream(
                     Endpoint::new(owner.component_id().clone(), PortId::try_new("out")?),
                     StreamId::try_new(format!("{}/out", owner.component_id()))?,
                 )
                 .connect(
                     EdgeDefinition::new(
-                        Endpoint::new(id("producer"), PortId::try_new("out")?),
+                        Endpoint::new(id(3), PortId::try_new("out")?),
                         Endpoint::new(owner.component_id().clone(), PortId::try_new("in")?),
                     ),
                     Box::new(BoundedPipeConfig { capacity: 4 }),
@@ -135,39 +138,45 @@ async fn cleanup_preserves_actual_progress_owners() -> anyhow::Result<()> {
                 .connect(
                     EdgeDefinition::new(
                         Endpoint::new(owner.component_id().clone(), PortId::try_new("out")?),
-                        Endpoint::new(id("results"), PortId::try_new("in")?),
+                        Endpoint::new(id(4), PortId::try_new("in")?),
                     ),
                     Box::new(BoundedPipeConfig { capacity: 4 }),
                 );
         }
         let mut graph = builder
-            .sink(Box::new(ProgressResultsSink(ComponentDescriptor::try_new(
-                id("results"),
-                vec![PortDescriptor::new(
-                    PortId::try_new("in")?,
-                    PortDirection::Input,
-                    QueryChangeCodec::schema().descriptor().clone(),
-                    PipeRequirements::default(),
-                )],
-            )?)))
-            .source(Box::new(DrainingProgressProducer {
-                descriptor: ComponentDescriptor::try_new(
-                    id("producer"),
+            .sink(
+                ComponentName::try_new("results")?,
+                Box::new(ProgressResultsSink(ComponentDescriptor::try_new(
+                    id(4),
                     vec![PortDescriptor::new(
-                        PortId::try_new("out")?,
-                        PortDirection::Output,
-                        GraphChangeCodec::schema().descriptor().clone(),
+                        PortId::try_new("in")?,
+                        PortDirection::Input,
+                        QueryChangeCodec::schema().descriptor().clone(),
                         PipeRequirements::default(),
                     )],
-                )?,
-                progress,
-                entered: entered.clone(),
-                release: release.clone(),
-                stops: stops.clone(),
-                fail_once: mode.ends_with("failed"),
-            }))
+                )?)),
+            )
+            .source(
+                ComponentName::try_new("producer")?,
+                Box::new(DrainingProgressProducer {
+                    descriptor: ComponentDescriptor::try_new(
+                        id(3),
+                        vec![PortDescriptor::new(
+                            PortId::try_new("out")?,
+                            PortDirection::Output,
+                            GraphChangeCodec::schema().descriptor().clone(),
+                            PipeRequirements::default(),
+                        )],
+                    )?,
+                    progress,
+                    entered: entered.clone(),
+                    release: release.clone(),
+                    stops: stops.clone(),
+                    fail_once: mode.ends_with("failed"),
+                }),
+            )
             .bind_stream(
-                Endpoint::new(id("producer"), PortId::try_new("out")?),
+                Endpoint::new(id(3), PortId::try_new("out")?),
                 StreamId::try_new("input")?,
             )
             .build()?;
@@ -317,11 +326,14 @@ impl Drop for RetiredMetadata {
 async fn cleanup_independent_retirement_and_pipe_tasks() {
     for panic in [false, true] {
         let mut graph = ComputationGraph::builder("independent-cleanup")
-            .service(Box::new(Service {
-                descriptor: ComponentDescriptor::try_new(id("service"), vec![]).unwrap(),
-                calls: Arc::new(AtomicUsize::new(0)),
-                handler: None,
-            }))
+            .service(
+                ComponentName::try_new("service").unwrap(),
+                Box::new(Service {
+                    descriptor: ComponentDescriptor::try_new(id(5), vec![]).unwrap(),
+                    calls: Arc::new(AtomicUsize::new(0)),
+                    handler: None,
+                }),
+            )
             .build()
             .unwrap();
         let dropped = Arc::new(AtomicBool::new(false));
@@ -368,7 +380,7 @@ async fn cleanup_independent_retirement_and_pipe_tasks() {
         if panic {
             assert!(errors.iter().any(GraphError::damages_generation));
             assert_eq!(
-                graph.observed().components[&id("service")].lifecycle,
+                graph.observed().components[&id(5)].lifecycle,
                 ComponentLifecycle::Failed
             );
         } else {
@@ -452,31 +464,33 @@ async fn start_completion_race() {
     for during_publication in [false, true] {
         let bad_calls = Arc::new(AtomicUsize::new(0));
         let healthy_calls = Arc::new(AtomicUsize::new(0));
-        let service = |name: &str, calls, handler| {
+        let service = |number: u128, calls, handler| {
             Box::new(Service {
-                descriptor: ComponentDescriptor::try_new(id(name), vec![]).unwrap(),
+                descriptor: ComponentDescriptor::try_new(id(number), vec![]).unwrap(),
                 calls,
                 handler,
             })
         };
         let mut graph = ComputationGraph::builder("start-panic-race")
-            .service(service(
-                "bad",
-                bad_calls.clone(),
-                Some(Arc::new(PanicHandler)),
-            ))
-            .service(service("healthy", healthy_calls.clone(), None))
+            .service(
+                ComponentName::try_new("bad").unwrap(),
+                service(6, bad_calls.clone(), Some(Arc::new(PanicHandler))),
+            )
+            .service(
+                ComponentName::try_new("healthy").unwrap(),
+                service(7, healthy_calls.clone(), None),
+            )
             .build()
             .unwrap();
-        graph.snapshot.control_connections = vec![(id("healthy"), id("bad"))].into();
+        graph.snapshot.control_connections = vec![(id(7), id(6))].into();
         let (_cancel, mut cancel) = watch::channel(false);
         let mut operations = Operations::default();
         let controls = deploy(&mut graph, &mut cancel, &mut operations)
             .await
             .unwrap();
         operations.refresh_connections(&graph).unwrap();
-        let bad = graph.ids[&id("bad")];
-        let healthy = graph.ids[&id("healthy")];
+        let bad = graph.ids[&id(6)];
+        let healthy = graph.ids[&id(7)];
         operations.begin_start(&graph, BTreeSet::from([bad]), None, true);
         operations.advance_start(&graph).unwrap();
         let completed = operations.futures.next().await.unwrap();
@@ -492,7 +506,7 @@ async fn start_completion_race() {
         } else {
             operations.peer_controls[&healthy]
                 .notify_neighbor(
-                    &id("bad"),
+                    &id(6),
                     ControlNotification::Custom {
                         kind: "panic".into(),
                         payload: serde_json::Value::Null,
@@ -513,14 +527,14 @@ async fn start_completion_race() {
             .expect("a quarantined start is a local outcome, not driver failure");
         operations.advance_start(&graph).unwrap();
         assert!(matches!(
-            graph.observed().startup.as_ref().unwrap().components[&id("bad")],
+            graph.observed().startup.as_ref().unwrap().components[&id(6)],
             StartOutcome::StartFailed(_)
         ));
         assert_eq!(
-            graph.observed().components[&id("bad")].lifecycle,
+            graph.observed().components[&id(6)].lifecycle,
             ComponentLifecycle::Failed
         );
-        assert!(graph.observed().components[&id("bad")]
+        assert!(graph.observed().components[&id(6)]
             .failure
             .as_ref()
             .unwrap()
@@ -538,9 +552,7 @@ async fn start_completion_race() {
         })
         .await
         .unwrap();
-        assert!(graph.observed().components[&id("healthy")]
-            .failure
-            .is_none());
+        assert!(graph.observed().components[&id(7)].failure.is_none());
         drop(observer);
         drop(operations);
         drop(controls);
@@ -744,11 +756,14 @@ async fn unconsumed_resource_without_drains_is_settled_multi_thread() {
 #[test]
 fn force_scope_rejects_unfinished_resource_cleanup_before_effects() {
     let mut graph = ComputationGraph::builder("unfinished-resource-scope")
-        .service(Box::new(Service {
-            descriptor: ComponentDescriptor::try_new(id("user"), vec![]).unwrap(),
-            calls: Arc::default(),
-            handler: None,
-        }))
+        .service(
+            ComponentName::try_new("user").unwrap(),
+            Box::new(Service {
+                descriptor: ComponentDescriptor::try_new(id(8), vec![]).unwrap(),
+                calls: Arc::default(),
+                handler: None,
+            }),
+        )
         .build()
         .unwrap();
     let resource = ResourceId::try_new("resource").unwrap();
@@ -764,8 +779,8 @@ fn force_scope_rejects_unfinished_resource_cleanup_before_effects() {
     graph
         .snapshot
         .component_resources
-        .insert(id("user"), BTreeSet::from([resource.clone()]));
-    let selected = BTreeSet::from([graph.ids[&id("user")]]);
+        .insert(id(8), BTreeSet::from([resource.clone()]));
+    let selected = BTreeSet::from([graph.ids[&id(8)]]);
     assert!(Operations::force_scope(&graph, &selected).is_ok());
     graph.pending_resource_cleanup.insert(
         resource.clone(),

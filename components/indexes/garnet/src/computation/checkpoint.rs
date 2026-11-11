@@ -69,6 +69,10 @@ impl CheckpointStore for ComputationCheckpointStore {
         self.inner.clear_checkpoints().await
     }
 
+    async fn stage_clear_checkpoints(&self) -> Result<(), IndexError> {
+        self.inner.stage_clear_checkpoints().await
+    }
+
     async fn write_config_hash(&self, hash: u64) -> Result<(), IndexError> {
         self.inner.write_config_hash(hash).await
     }

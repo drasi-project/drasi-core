@@ -381,7 +381,7 @@ async fn factory_graph() -> Result<()> {
             )?;
             receivers.push(receiver);
             builder = builder
-                .query(Box::new(query))
+                .transformer(Box::new(query))
                 .sink(Box::new(sink))
                 .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
                 .connect(

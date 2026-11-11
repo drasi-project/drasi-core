@@ -34,6 +34,7 @@ pub mod callbacks;
 pub mod durability;
 pub mod identity;
 pub mod identity_proxy;
+mod lifecycle;
 pub mod metadata;
 pub use durability::FfiStorageDurability;
 pub mod payload;

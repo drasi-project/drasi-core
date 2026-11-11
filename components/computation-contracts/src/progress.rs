@@ -7,7 +7,7 @@ use drasi_core_types::interface::SourceCheckpoint;
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::watch;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum SourceProgressKey {
     Source(String),
     Stream(StreamId),

@@ -12,7 +12,7 @@ use super::Runtime;
 use crate::{
     channels::{ChangeReceiver, QueryResult, QuerySubscriptionResponse},
     computation::v1::*,
-    config::QueryConfig,
+    config::AssignedQueryConfig as QueryConfig,
     metrics::QueryOutputMetrics,
     queries::{FetchError, OutboxResponse, Query, SnapshotResponse},
     ComponentStatus,
@@ -83,18 +83,6 @@ pub(super) fn query_needs_stop(publication: &GraphRegistrySnapshot, id: &Compone
         .any(|member| member_needs_stop(&publication.observed.components[member]))
 }
 
-pub(super) fn query_activation_requested(
-    publication: &GraphRegistrySnapshot,
-    id: &ComponentId,
-) -> bool {
-    let state = &publication.observed.components[id];
-    super::is_active(state)
-        || !publication.activation_is_deferred(id)
-            && state.failure.is_none()
-            && !state.waiting_for.is_empty()
-            && (state.lifecycle_requested || publication.desired.lifecycle_policies[id].auto_start)
-}
-
 pub(super) async fn start_query(
     control: &GraphControl,
     id: &ComponentId,
@@ -139,7 +127,7 @@ async fn request_query_start(
         .get(id)
         .ok_or(GraphError::StaleGeneration)?;
     anyhow::ensure!(
-        expected.map_or(true, |expected| expected == state.generation),
+        expected.is_none_or(|expected| expected == state.generation),
         GraphError::StaleGeneration
     );
     anyhow::ensure!(
@@ -157,12 +145,7 @@ async fn request_query_start(
         .desired
         .specifications
         .get(id)
-        .filter(|spec| {
-            spec.implementation
-                == ContinuousQueryFactory::default()
-                    .descriptor()
-                    .implementation
-        })
+        .filter(|spec| publication.has_query_authoring(spec))
         .and_then(|spec| spec.dependencies.get("declaration"))
         .and_then(|resources| resources.first())
         .map(|resource| {
@@ -241,7 +224,7 @@ pub(super) async fn stop_query(
         .get(id)
         .ok_or(GraphError::StaleGeneration)?;
     anyhow::ensure!(
-        expected.map_or(true, |expected| expected == state.generation),
+        expected.is_none_or(|expected| expected == state.generation),
         GraphError::StaleGeneration
     );
     let members = query_members(&publication, id);
@@ -427,172 +410,17 @@ pub(super) fn query_resource_changes(
     Ok(changes)
 }
 
-pub(super) struct NativeQueryUpdate {
-    pub(super) members: BTreeMap<ComponentId, ComponentGeneration>,
-    pub(super) changes: Vec<DesiredMutation>,
-    pub(super) bindings: TopologyBindings,
-    pub(super) running: bool,
-}
-
-impl NativeQueryUpdate {
-    pub(super) fn merge(&mut self, other: Self) -> anyhow::Result<()> {
-        for (id, generation) in other.members {
-            if let Some(existing) = self.members.insert(id, generation) {
-                anyhow::ensure!(existing == generation, GraphError::StaleGeneration);
-            }
-        }
-        self.changes.extend(other.changes);
-        self.bindings.merge(other.bindings)?;
-        Ok(())
-    }
+pub(crate) struct NativeQueryUpdate {
+    pub(crate) members: BTreeMap<ComponentId, ComponentGeneration>,
+    pub(crate) changes: Vec<DesiredMutation>,
+    pub(crate) bindings: TopologyBindings,
 }
 
 impl Runtime {
-    pub(super) async fn remove_native_component(
+    pub(crate) async fn native_query_update_plan(
         &self,
         id: &str,
-        kind: &str,
-        cleanup: bool,
-    ) -> anyhow::Result<()> {
-        let control = self.control()?;
-        let publication = control.registry_snapshot();
-        let kind = match kind {
-            "source" => "source",
-            "query" => "query",
-            "reaction" => "reaction",
-            _ => anyhow::bail!("unsupported component kind {kind}"),
-        };
-        let observation = self.component_observation_at(&publication, id, kind)?;
-        let log_key = self.component_log_key(&publication, id)?;
-        let query = ComponentId::try_new(id)?;
-        let members = if kind == "query" {
-            query_members(&publication, &query)
-        } else {
-            BTreeMap::from([(query.clone(), observation.generation)])
-        };
-        let selected: BTreeSet<_> = members.keys().cloned().collect();
-        let outlet = QueryResultsOutletFactory::default()
-            .descriptor()
-            .implementation
-            .clone();
-        let shared_outlets: BTreeSet<_> = publication
-            .desired
-            .edges
-            .iter()
-            .filter(|edge| kind == "query" && edge.definition.from.component == query)
-            .filter_map(|edge| {
-                let target = &edge.definition.to.component;
-                publication
-                    .desired
-                    .specifications
-                    .get(target)
-                    .is_some_and(|spec| spec.implementation == outlet)
-                    .then(|| target.clone())
-            })
-            .collect();
-        let dependents: BTreeSet<_> = selected
-            .iter()
-            .flat_map(|id| publication.desired.data_dependents(id))
-            .filter(|id| !selected.contains(id) && !shared_outlets.contains(id))
-            .collect();
-        anyhow::ensure!(
-            dependents.is_empty(),
-            "Depended on by: {}",
-            dependents
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        let candidates = publication
-            .desired
-            .select(GraphSelection::Exact(selected.iter().cloned().collect()))?
-            .resources;
-        let mut target = publication.desired.select(GraphSelection::All)?;
-        let mut changes = Vec::new();
-        target.relationships.retain(|edge| {
-            if selected.contains(&edge.definition.from.component)
-                || selected.contains(&edge.definition.to.component)
-            {
-                changes.push(DesiredMutation::Unbind {
-                    edge: edge.definition.clone(),
-                    policy: RemovalPolicy::Reject,
-                });
-                false
-            } else {
-                true
-            }
-        });
-        target.boundary_relationships.retain(|edge| {
-            !selected.contains(&edge.definition.from.component)
-                && !selected.contains(&edge.definition.to.component)
-        });
-        target
-            .components
-            .retain(|node| !selected.contains(node.descriptor.id()));
-        target
-            .component_resources
-            .retain(|id, _| !selected.contains(id));
-        changes.push(DesiredMutation::RemoveComponents {
-            selection: GraphSelection::Exact(selected.iter().cloned().collect()),
-            policy: RemovalPolicy::Reject,
-        });
-        let infrastructure = self.infrastructure_resources(&publication, &BTreeSet::new())?;
-        changes.extend(remove_unused_resources(
-            &mut target,
-            candidates,
-            &infrastructure,
-        )?);
-        let report = control
-            .mutate_members(
-                members,
-                changes,
-                TopologyBindings::default(),
-                if cleanup {
-                    BTreeSet::from([query])
-                } else {
-                    BTreeSet::new()
-                },
-            )
-            .await?;
-        anyhow::ensure!(
-            report.committed && report.summary == OperationSummary::Completed,
-            "{kind} removal is incomplete: {report:?}"
-        );
-        self.logs.remove_component_by_key(&log_key).await?;
-        self.notify();
-        Ok(())
-    }
-
-    pub(super) async fn update_native_query(
-        self: &Arc<Self>,
-        id: &str,
-        config: QueryConfig,
-    ) -> anyhow::Result<()> {
-        let plan = self.native_query_update_plan(id, config).await?;
-        let resume = self.pause_consumers(&[id.to_owned()]).await?;
-        let control = self.control()?;
-        let report = control
-            .mutate_members(plan.members, plan.changes, plan.bindings, BTreeSet::new())
-            .await?;
-        anyhow::ensure!(
-            report.committed && report.summary == OperationSummary::Completed,
-            "query replacement is incomplete: {report:?}"
-        );
-        if plan.running {
-            if let Some(started) =
-                request_query_start(&control, &ComponentId::try_new(id)?, None).await?
-            {
-                super::accept_waiting_start(started, &control.observed())?;
-            }
-        }
-        self.resume_records(resume).await
-    }
-
-    pub(super) async fn native_query_update_plan(
-        &self,
-        id: &str,
-        config: QueryConfig,
+        mut config: QueryConfig,
     ) -> anyhow::Result<NativeQueryUpdate> {
         anyhow::ensure!(
             config.id == id,
@@ -601,13 +429,18 @@ impl Runtime {
         );
         let control = self.control()?;
         let publication = control.registry_snapshot();
+        let waiting = super::query_assembly::bind_inputs(&mut config, &publication);
+        anyhow::ensure!(
+            waiting.is_empty(),
+            "native query replacement requires resolved input names"
+        );
         self.query_observation_at(&publication, id)?;
         if self
             .ordinary_queries_at(&publication)?
             .contains_key(&ComponentId::try_new(id)?)
         {
             return self
-                .ordinary_query_update_plan(&publication, id, config, true)
+                .ordinary_query_update_plan(&publication, id, config)
                 .await;
         }
         let query_id = ComponentId::try_new(id)?;
@@ -618,11 +451,11 @@ impl Runtime {
             .ok_or_else(|| {
                 anyhow::anyhow!("query '{id}' has no reconstructible factory configuration")
             })?;
+        let factory = publication
+            .factory(&original.implementation)
+            .ok_or_else(|| anyhow::anyhow!("query '{id}' factory is unavailable"))?;
         anyhow::ensure!(
-            original.implementation
-                == ContinuousQueryFactory::default()
-                    .descriptor()
-                    .implementation,
+            factory.query_authoring().is_some(),
             "query '{id}' does not support QueryConfig replacement"
         );
         let original_config: QueryConfig = match original.configuration.get("query_config") {
@@ -646,6 +479,7 @@ impl Runtime {
             self.config.global_priority_queue_capacity.unwrap_or(10_000),
             self.config.global_dispatch_buffer_capacity.unwrap_or(1_000),
         )?
+        .query_factory(factory)
         .with_catalog(catalog.as_ref().clone())
         .with_output_catalogue(
             self.config.id.clone(),
@@ -701,9 +535,9 @@ impl Runtime {
             let mut native_input = None;
             for (rank, input) in original_config.inputs.iter().enumerate() {
                 let pending =
-                    ComputationPipelineBuilder::pending_native_endpoint(id, &input.component)?;
-                if input.component == edge.from.component.as_str() || edge.from == pending {
-                    native_input = Some((rank, &input.component, edge.from != pending));
+                    ComputationPipelineBuilder::pending_native_endpoint(id, input.id_str()?)?;
+                if input.component.as_id() == Some(&edge.from.component) || edge.from == pending {
+                    native_input = Some((rank, input.id_str()?, edge.from != pending));
                     break;
                 }
             }
@@ -722,7 +556,8 @@ impl Runtime {
                                 ..Default::default()
                             })
                 {
-                    native_sources.insert(component.clone(), resolved.then(|| edge.from.clone()));
+                    native_sources
+                        .insert(component.to_owned(), resolved.then(|| edge.from.clone()));
                     continue;
                 }
             }
@@ -751,8 +586,8 @@ impl Runtime {
             .map(|output| output.component.clone())
             .collect();
         for source in &config.inputs {
-            if let Some(output) = native_sources.remove(&source.component) {
-                let component = ComponentId::try_new(source.component.as_str())?;
+            if let Some(output) = native_sources.remove(source.id_str()?) {
+                let component = source.id()?.clone();
                 let explicit = source.port.as_deref().map(PortId::try_new).transpose()?;
                 let output = if publication
                     .desired
@@ -768,12 +603,12 @@ impl Runtime {
                 };
                 builder = match output {
                     Some(output) => builder.native_source(output)?,
-                    None => builder.pending_native_source(&source.component)?,
+                    None => builder.pending_native_source(source.id_str()?)?,
                 };
                 continue;
             }
             let native_output = publication.desired.nodes.iter().any(|node| {
-                node.descriptor.id().as_str() == source.component
+                source.component.as_id() == Some(node.descriptor.id())
                     && node
                         .descriptor
                         .ports()
@@ -781,21 +616,21 @@ impl Runtime {
                         .any(|port| port.direction() == PortDirection::Output)
             });
             if native_output || native_only {
-                let component = ComponentId::try_new(source.component.as_str())?;
+                let component = source.id()?.clone();
                 let explicit = source.port.as_deref().map(PortId::try_new).transpose()?;
                 builder = match (native_output, explicit) {
                     (false, Some(port)) => builder.native_source(Endpoint::new(component, port))?,
-                    (false, None) => builder.pending_native_source(&source.component)?,
+                    (false, None) => builder.pending_native_source(source.id_str()?)?,
                     (true, explicit) => builder.native_source(
                         publication.output_endpoint(&component, explicit.as_ref())?,
                     )?,
                 };
                 continue;
             }
-            let (mut host, options) = match sources.remove(&source.component) {
+            let (mut host, options) = match sources.remove(source.id_str()?) {
                 Some(existing) => existing,
                 None => (
-                    self.source_host(&source.component).await?,
+                    self.source_host(source.id_str()?).await?,
                     SourceSubscriptionOptions {
                         borrowed_recovery: true,
                         allow_broadcast_loss: true,
@@ -807,9 +642,9 @@ impl Runtime {
                 .desired
                 .subscriptions
                 .iter()
-                .any(|(from, to)| from.as_str() == source.component && to == &query_id)
+                .any(|(from, to)| source.component.as_id() == Some(from) && to == &query_id)
             {
-                host = self.source_host(&source.component).await?;
+                host = self.source_host(source.id_str()?).await?;
             }
             builder = builder.source(host, options)?;
         }
@@ -881,12 +716,6 @@ impl Runtime {
                         *resource = existing.clone();
                     }
                 }
-                if node.descriptor.id() == &query_id {
-                    spec.configuration.insert(
-                        "reset_configuration".into(),
-                        ConfigurationValue::Literal(true.into()),
-                    );
-                }
             }
         }
         let mut members = query_members(&publication, &query_id);
@@ -895,7 +724,7 @@ impl Runtime {
                 .desired
                 .specifications
                 .get(member)
-                .map_or(true, |spec| spec.implementation != outlet)
+                .is_none_or(|spec| spec.implementation != outlet)
         });
         let selected: BTreeSet<_> = members.keys().cloned().collect();
         let mut target = publication.desired.select(GraphSelection::All)?;
@@ -1002,7 +831,6 @@ impl Runtime {
             candidates,
             &BTreeSet::new(),
         )?);
-        let was_running = query_activation_requested(&publication, &query_id);
         batch.bindings.defer_activation = true;
         for (source, _) in &batch.definition.subscriptions {
             if let Some(observed) = publication.observed.components.get(source) {
@@ -1029,7 +857,6 @@ impl Runtime {
             members,
             changes,
             bindings: batch.bindings,
-            running: was_running,
         })
     }
 }
@@ -1042,10 +869,12 @@ pub(crate) struct NativeQuery {
 }
 
 impl NativeQuery {
+    #[cfg(test)]
     pub(crate) fn inspector(&self) -> ComputationInspector {
         self.control.inspector()
     }
 
+    #[cfg(test)]
     pub(crate) fn checkpoint_store(
         &self,
     ) -> anyhow::Result<Option<Arc<dyn drasi_core::interface::CheckpointStore>>> {
@@ -1103,7 +932,7 @@ impl NativeQuery {
             &self.config.id,
             &api,
         )?;
-        let (receiver, _) = catalog.subscribe_query_at_head(&self.config.id)?;
+        let (receiver, _) = catalog.subscribe_query_at_head(&self.config.id).await?;
         self.handle.observed()?;
         Ok(NativeReceiver {
             receiver,
@@ -1130,6 +959,7 @@ impl NativeQuery {
             query: self.clone(),
             receiver,
             generation: head.generation,
+            head,
             sequence: snapshot.as_of_sequence,
             replay: Vec::new().into_iter(),
         };
@@ -1146,6 +976,18 @@ impl NativeQuery {
         &self,
         operation: impl std::future::Future<Output = Result<T, FetchError>>,
     ) -> Result<T, FetchError> {
+        tokio::time::timeout(
+            Duration::from_secs(self.config.bootstrap_timeout_secs),
+            self.guard_read(operation),
+        )
+        .await
+        .map_err(|_| FetchError::TimedOut)?
+    }
+
+    async fn guard_read<T>(
+        &self,
+        operation: impl std::future::Future<Output = Result<T, FetchError>>,
+    ) -> Result<T, FetchError> {
         let mut observed = self.control.subscribe_observed();
         tokio::pin!(operation);
         loop {
@@ -1157,6 +999,21 @@ impl NativeQuery {
                     | ComponentStatus::Reconfiguring
             ) {
                 return Err(FetchError::NotRunning { status });
+            }
+            if status == ComponentStatus::Starting {
+                let api = self.access().map_err(|error| {
+                    log::warn!("Query result access failed during activation: {error:#}");
+                    FetchError::NotRunning { status }
+                })?;
+                if api.reads_require_activation() {
+                    observed
+                        .changed()
+                        .await
+                        .map_err(|_| FetchError::NotRunning {
+                            status: ComponentStatus::Stopped,
+                        })?;
+                    continue;
+                }
             }
             tokio::select! {
                 result = &mut operation => {
@@ -1202,28 +1059,62 @@ struct QueryResultReader {
     query: Arc<NativeQuery>,
     receiver: NativeReceiver,
     generation: u64,
+    head: QuerySubscriptionHead,
     sequence: u64,
     replay: std::vec::IntoIter<Arc<QueryResult>>,
 }
 
 impl QueryResultReader {
-    fn require_current(&self) -> anyhow::Result<()> {
-        self.receiver.require_current()?;
-        anyhow::ensure!(
-            self.query.access()?.generation()? == self.generation,
-            "query output generation changed; recreate the subscription"
-        );
-        Ok(())
+    async fn require_current(&self) -> anyhow::Result<()> {
+        let mut observed = self.query.control.subscribe_observed();
+        loop {
+            self.receiver.require_current()?;
+            if matches!(
+                self.query.status_now(),
+                ComponentStatus::Running | ComponentStatus::Reconfiguring
+            ) {
+                let api = self.query.access()?;
+                tokio::select! {
+                    result = api.validate_subscription(&self.head) => {
+                        self.receiver.require_current()?;
+                        if matches!(self.query.status_now(), ComponentStatus::Running | ComponentStatus::Reconfiguring) {
+                            return result;
+                        }
+                    }
+                    changed = observed.changed() => { changed?; }
+                }
+            } else {
+                match self.query.status_now() {
+                    ComponentStatus::Error => {
+                        if let Some(failure) = self.query.handle.observed()?.failure {
+                            return Err(GraphError::Reported {
+                                cause: failure.cause,
+                            }
+                            .into());
+                        }
+                        anyhow::bail!("query failed while its result subscription was active");
+                    }
+                    ComponentStatus::Removed => return Err(GraphError::StaleGeneration.into()),
+                    _ => {}
+                }
+                observed.changed().await?;
+            }
+        }
     }
 
     async fn recv(&mut self) -> anyhow::Result<Arc<QueryResult>> {
+        let mut observed = self.query.control.subscribe_observed();
         loop {
-            self.require_current()?;
+            self.require_current().await?;
             if let Some(result) = self.replay.next() {
                 self.sequence = result.sequence;
                 return Ok(result);
             }
-            let result = match self.receiver.recv().await {
+            let received = tokio::select! {
+                result = self.receiver.recv() => result,
+                changed = observed.changed() => { changed?; continue; }
+            };
+            let result = match received {
                 Ok(result) => Some(result),
                 Err(error)
                     if matches!(
@@ -1235,7 +1126,7 @@ impl QueryResultReader {
                 }
                 Err(error) => return Err(error),
             };
-            self.require_current()?;
+            self.require_current().await?;
             if let Some(result) = result {
                 if result.sequence <= self.sequence {
                     continue;
@@ -1246,7 +1137,7 @@ impl QueryResultReader {
                 }
             }
             let replay = self.query.fetch_outbox(self.sequence).await?;
-            self.require_current()?;
+            self.require_current().await?;
             anyhow::ensure!(
                 replay.output_generation == self.generation,
                 "query output generation changed during subscription recovery"
@@ -1322,11 +1213,11 @@ impl Query for NativeQuery {
     }
     async fn subscription_count(&self) -> usize {
         let publication = self.control.registry_snapshot();
-        if !publication
+        if publication
             .observed
             .components
             .get(self.handle.id())
-            .is_some_and(|state| state.generation == self.handle.generation())
+            .is_none_or(|state| state.generation != self.handle.generation())
         {
             return 0;
         }
@@ -1430,7 +1321,11 @@ impl Query for NativeQuery {
         .await
     }
     async fn output_generation(&self) -> u64 {
-        match self.access().and_then(|api| api.generation()) {
+        let generation = match self.access() {
+            Ok(api) => api.generation().await,
+            Err(error) => Err(error),
+        };
+        match generation {
             Ok(generation) => generation,
             Err(error) => {
                 log::warn!("Query generation is unavailable: {error:#}");
@@ -1440,7 +1335,7 @@ impl Query for NativeQuery {
     }
     fn output_metrics(&self) -> Option<Arc<QueryOutputMetrics>> {
         match self.access() {
-            Ok(api) => Some(api.metrics.clone()),
+            Ok(api) => api.output_metrics(),
             Err(error) => {
                 log::warn!("Query metrics are unavailable: {error:#}");
                 None

@@ -14,6 +14,40 @@ use std::path::Path;
 
 const GRAPH: &str = "native-consumer";
 
+#[tokio::test]
+async fn disposing_an_unstarted_consumer_releases_constructor_owned_storage() -> anyhow::Result<()>
+{
+    let plugin = plugin()?;
+    let directory = tempfile::tempdir()?;
+    let provider = provider(directory.path())?;
+    let factory = factory(&plugin, sdk::ConsumerMode::Transactional);
+    let component_id = ComponentId::try_new("ad3878c1-f442-4990-b613-779cb3900083")?;
+    let mut first = factory
+        .create_consumer(
+            component_id.clone(),
+            json!({"mode": "normal"}),
+            scope(),
+            provider.clone(),
+            options(),
+        )
+        .await?;
+    first.initialize().await?;
+    first.dispose().await?;
+    assert!(first.start().await.is_err());
+    let mut second = factory
+        .create_consumer(
+            component_id,
+            json!({"mode": "normal"}),
+            scope(),
+            provider,
+            options(),
+        )
+        .await?;
+    second.initialize().await?;
+    second.dispose().await?;
+    Ok(())
+}
+
 #[path = "consumer_handoff_tests.rs"]
 mod handoff_tests;
 
@@ -405,14 +439,17 @@ async fn native_consumer_graph_factory_requires_and_resolves_delivery_resource(
                 }),
             ),
         )?
-        .component(specification, factory)
-        .source(Box::new(BatchSource {
-            descriptor: ComponentDescriptor::try_new(
-                id("source"),
-                vec![super::port(PortDirection::Output)],
-            )?,
-            input: Some(batch()?.envelope),
-        }))
+        .component(ComponentName::try_new("consumer")?, specification, factory)
+        .source(
+            ComponentName::try_new("source")?,
+            Box::new(BatchSource {
+                descriptor: ComponentDescriptor::try_new(
+                    id("source"),
+                    vec![super::port(PortDirection::Output)],
+                )?,
+                input: Some(batch()?.envelope),
+            }),
+        )
         .bind_stream(
             Endpoint::new(id("source"), PortId::try_new("out")?),
             StreamId::try_new("out")?,

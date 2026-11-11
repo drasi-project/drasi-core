@@ -1081,8 +1081,8 @@ impl Source for PostgresReplicationSource {
         self
     }
 
-    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
         // Source positions are uniformly 16-byte big-endian
         // `[ commit_lsn (8) | offset (8) ]` (CDC events and the
         // `[snapshot_lsn | u64::MAX]` bootstrap boundary), so byte-lexicographic
@@ -1517,6 +1517,18 @@ mod tests {
                     .build()
                     .unwrap();
                 let core = DrasiLib::builder()
+                    .with_query_factory(
+                        drasi_lib::computation::v1::FactoryRegistry::standard()
+                            .get(
+                                &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                                    "drasi/continuous-query",
+                                    "1",
+                                )
+                                .expect("reference query identity"),
+                            )
+                            .expect("reference query factory")
+                            .clone(),
+                    )
                     .with_source(source)
                     .build()
                     .await

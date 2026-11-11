@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
+use drasi_computation_contracts::{ComponentId, PortDirection};
 use drasi_computation_plugin_sdk::{ActivationCredentials, ExportedPlugin, NativeComponent};
 use drasi_reaction_common::OperationType;
 use serde_json::{json, Value};
@@ -42,6 +43,7 @@ async fn activation_credentials_are_explicit_transient_and_not_constructor_io() 
         configuration: json!({"settings":settings}),
         scope: None,
         activation_credentials_bound: false,
+        update_directive: None,
     };
     assert!(factory.create(&request, ControlSender::default()).is_err());
     request.activation_credentials_bound = true;
@@ -71,6 +73,30 @@ async fn activation_credentials_are_explicit_transient_and_not_constructor_io() 
     assert_eq!(sink.configuration()?, original);
     assert!(!sink.configuration()?.to_string().contains("transient-only"));
     sink.stop().await?;
+    Ok(())
+}
+
+#[test]
+fn factory_metadata_constructs_without_database_io() -> Result<()> {
+    ExportedPlugin::new(plugin()?)?;
+    #[cfg(feature = "dynamic-plugin")]
+    assert!(!drasi_computation_plugin_metadata().is_null());
+    let metadata = MySqlStoredProcFactory.metadata();
+    assert_eq!(metadata.role, ComponentRole::Sink);
+    assert_eq!(metadata.completion, Some(SinkCompletion::Handled));
+    assert_eq!(metadata.ports, MySqlStoredProcSink::ports()?);
+    assert_eq!(metadata.ports.len(), 1);
+    assert_eq!(metadata.ports[0].id().as_str(), "in");
+    assert_eq!(metadata.ports[0].direction(), PortDirection::Input);
+    assert_eq!(
+        metadata.ports[0].schema(),
+        GraphChangeCodec::schema().descriptor()
+    );
+    let id = ComponentId::generate();
+    let descriptor = MySqlStoredProcSink::describe(id.clone())?;
+    assert_eq!(descriptor.id(), &id);
+    assert_eq!(descriptor.ports(), metadata.ports.as_slice());
+    assert!(metadata.configuration.fields["settings"].secret);
     Ok(())
 }
 

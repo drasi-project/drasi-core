@@ -169,12 +169,11 @@ impl ComputationGraph {
                 observed
                     .components
                     .get(id)
-                    .map_or(true, |component| component.generation != *old)
+                    .is_none_or(|component| component.generation != *old)
             })
             && retirement.resources.iter().all(|(id, old)| {
-                self.resource_handles.get(id).map_or(true, |current| {
-                    old.upgrade()
-                        .map_or(true, |old| !current.same_instance(&old))
+                self.resource_handles.get(id).is_none_or(|current| {
+                    old.upgrade().is_none_or(|old| !current.same_instance(&old))
                 })
             })
         {
@@ -215,11 +214,14 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn loss_authorized_retirement_only_allows_processing_failure_after_completed_stop() {
-        let id = ComponentId::try_new("service").unwrap();
+        let id = ComponentId::generate();
         let mut graph = ComputationGraph::builder("freeze")
-            .service(Box::new(Service(
-                ComponentDescriptor::try_new(id.clone(), vec![]).unwrap(),
-            )))
+            .service(
+                crate::config::ComponentName::try_new("service").unwrap(),
+                Box::new(Service(
+                    ComponentDescriptor::try_new(id.clone(), vec![]).unwrap(),
+                )),
+            )
             .build()
             .unwrap();
         for phase in [
@@ -296,7 +298,14 @@ mod tests {
                     .unwrap();
                 let result = control
                     .management_control()
-                    .reconcile_components(desired.clone(), desired, TopologyBindings::default())
+                    .reconcile_components(
+                        desired.clone(),
+                        desired,
+                        TopologyBindings::default(),
+                        BTreeMap::new(),
+                        BTreeSet::new(),
+                        BTreeMap::new(),
+                    )
                     .await;
                 assert_eq!(result.is_ok(), resolution != 2);
                 let started = control

@@ -30,6 +30,18 @@ async fn build_instance(
     let (source, source_handle) = MockSource::new("source").expect("mock source");
     let input = reaction.input();
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("native-application-query")
         .with_source(source)
         .build()

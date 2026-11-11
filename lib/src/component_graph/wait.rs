@@ -53,7 +53,21 @@ mod tests {
 
     async fn instance() -> DrasiLib {
         DrasiLib::builder()
-            .with_source(TestMockSource::with_auto_start("source-1".into(), false).unwrap())
+            .with_query_factory(
+                crate::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &crate::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
+            .with_source_factory("source-1", false, |id| {
+                TestMockSource::with_auto_start(id.to_string(), false)
+            })
             .build()
             .await
             .unwrap()
@@ -62,9 +76,10 @@ mod tests {
     #[tokio::test]
     async fn test_wait_for_status_already_reached() {
         let core = instance().await;
+        let source = core.component_by_name("source-1").unwrap();
         let status = wait_for_status(
             &core.component_graph(),
-            "source-1",
+            source.id().as_str(),
             &[ComponentStatus::Added],
             Duration::from_millis(100),
         )
@@ -77,9 +92,10 @@ mod tests {
     #[tokio::test]
     async fn test_wait_for_status_component_not_found() {
         let core = instance().await;
+        let missing = crate::config::ComponentId::generate();
         let error = wait_for_status(
             &core.component_graph(),
-            "nonexistent",
+            missing.as_str(),
             &[ComponentStatus::Running],
             Duration::from_millis(100),
         )
@@ -92,9 +108,10 @@ mod tests {
     #[tokio::test]
     async fn test_wait_for_status_timeout() {
         let core = instance().await;
+        let source = core.component_by_name("source-1").unwrap();
         let error = wait_for_status(
             &core.component_graph(),
-            "source-1",
+            source.id().as_str(),
             &[ComponentStatus::Running],
             Duration::from_millis(50),
         )
@@ -107,16 +124,17 @@ mod tests {
     #[tokio::test]
     async fn test_wait_for_status_reaches_target_via_update() {
         let core = instance().await;
+        let source = core.component_by_name("source-1").unwrap();
         let graph = core.component_graph();
         let waiter = wait_for_status(
             &graph,
-            "source-1",
+            source.id().as_str(),
             &[ComponentStatus::Running],
             Duration::from_secs(2),
         );
         tokio::pin!(waiter);
         assert!(futures::poll!(&mut waiter).is_pending());
-        core.start_source("source-1").await.unwrap();
+        core.start_source_by_id(source.id()).await.unwrap();
         assert_eq!(waiter.await.unwrap(), ComponentStatus::Running);
         core.shutdown().await.unwrap();
     }
@@ -124,9 +142,10 @@ mod tests {
     #[tokio::test]
     async fn test_wait_for_status_multiple_targets() {
         let core = instance().await;
+        let source = core.component_by_name("source-1").unwrap();
         let status = wait_for_status(
             &core.component_graph(),
-            "source-1",
+            source.id().as_str(),
             &[ComponentStatus::Running, ComponentStatus::Added],
             Duration::from_millis(100),
         )

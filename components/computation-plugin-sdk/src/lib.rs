@@ -4,7 +4,10 @@
 //! Native ComputationGraph SDK. See the crate README for the ownership, scheduling
 //! and capability contracts. No legacy Source/Reaction interfaces are involved.
 
-pub use drasi_computation_contracts::{PortFormatAlternative, PortFormatCatalogue, SinkBatching};
+pub use drasi_computation_contracts::{
+    ComponentUpdateData, ComponentUpdateMode, ComponentUpdatePlan, PortFormatAlternative,
+    PortFormatCatalogue, SinkBatching,
+};
 pub use drasi_computation_plugin_abi as abi;
 /// Shared scoped telemetry APIs for static and native components.
 pub mod telemetry {
@@ -27,7 +30,9 @@ pub mod metadata;
 pub mod output_reads;
 pub mod output_snapshots;
 mod port_formats;
+pub mod processing;
 pub mod progress;
+pub mod scheduling;
 #[doc(hidden)]
 pub mod telemetry_bridge;
 mod telemetry_capture;
@@ -59,9 +64,11 @@ pub use metadata::{
 pub use output_snapshots::{
     NativeOutputSnapshot, NativeOutputSnapshots, OutputSnapshotHeader, SnapshotOpen,
 };
+pub use processing::{NativeProcessing, NativeProcessingContext};
 pub use progress::NativeSourceProgress;
+pub use scheduling::NativeScheduling;
 pub use transaction::{NativeTransactionContext, TransactionalComponent};
-pub use wire::{CreateRequest, Scope};
+pub use wire::{ApplyUpdateRequest, CreateRequest, Scope, UpdateDirective, UpdateRequest};
 
 /// Export only under a plugin crate's `dynamic-plugin` feature. The expression is
 /// evaluated once and must return `anyhow::Result<PluginDefinition>`. It must be
@@ -164,6 +171,17 @@ macro_rules! export_computation_plugin {
             .unwrap_or(std::ptr::null())
         }
         #[no_mangle]
+        pub extern "C" fn drasi_computation_plugin_processing_v1(
+        ) -> *const $crate::abi::processing::PluginProcessingV1 {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match __drasi_computation_export() {
+                    Ok(export) => export.processing(),
+                    Err(_) => std::ptr::null(),
+                }
+            }))
+            .unwrap_or(std::ptr::null())
+        }
+        #[no_mangle]
         pub extern "C" fn drasi_computation_plugin_recovery_v1(
         ) -> *const $crate::abi::recovery::PluginRecoveryV1 {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -208,8 +226,8 @@ macro_rules! export_computation_plugin {
             .unwrap_or(std::ptr::null())
         }
         #[no_mangle]
-        pub extern "C" fn drasi_computation_plugin_output_reads_v1(
-        ) -> *const $crate::abi::output_reads::PluginOutputReadsV1 {
+        pub extern "C" fn drasi_computation_plugin_output_reads_v2(
+        ) -> *const $crate::abi::output_reads::PluginOutputReadsV2 {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match __drasi_computation_export() {
                     Ok(export) => export.output_reads(),
@@ -219,8 +237,8 @@ macro_rules! export_computation_plugin {
             .unwrap_or(std::ptr::null())
         }
         #[no_mangle]
-        pub extern "C" fn drasi_computation_plugin_output_follow_v1(
-        ) -> *const $crate::abi::output_follow::PluginOutputFollowV1 {
+        pub extern "C" fn drasi_computation_plugin_output_follow_v2(
+        ) -> *const $crate::abi::output_follow::PluginOutputFollowV2 {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match __drasi_computation_export() {
                     Ok(export) => export.output_follow(),

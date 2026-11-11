@@ -137,20 +137,21 @@ impl SqliteSource {
         self
     }
 
-    pub fn describe(id: ComponentId, output: SqliteOutput) -> Result<ComponentDescriptor> {
+    pub(crate) fn ports(output: SqliteOutput) -> Result<Vec<PortDescriptor>> {
         let schema = match output {
             SqliteOutput::Changes => GraphChangeCodec::schema(),
             SqliteOutput::Transactions => SourceTransactionCodec::schema(),
         };
-        Ok(ComponentDescriptor::try_new(
-            id,
-            vec![PortDescriptor::new(
-                PortId::try_new("out")?,
-                PortDirection::Output,
-                schema.descriptor().clone(),
-                PipeRequirements::default(),
-            )],
-        )?)
+        Ok(vec![PortDescriptor::new(
+            PortId::try_new("out")?,
+            PortDirection::Output,
+            schema.descriptor().clone(),
+            PipeRequirements::default(),
+        )])
+    }
+
+    pub fn describe(id: ComponentId, output: SqliteOutput) -> Result<ComponentDescriptor> {
+        Ok(ComponentDescriptor::try_new(id, Self::ports(output)?)?)
     }
 
     pub fn handle(&self) -> SqliteHandle {

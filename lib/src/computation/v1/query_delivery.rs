@@ -254,18 +254,8 @@ impl ContinuousQueryTransformer {
             .state
             .read()
             .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
-        let pending: VecDeque<_> = state
-            .outbox
-            .iter()
-            .filter(|envelope| envelope.system().sequence() > delivered)
-            .cloned()
-            .collect();
-        if state.sequence > delivered
-            && pending.front().map(|envelope| envelope.system().sequence())
-                != delivered.checked_add(1)
-        {
-            anyhow::bail!("query handoff history was retired before durable acceptance");
-        }
+        let pending =
+            drasi_query_common::pending_query_outputs(&state.outbox, state.sequence, delivered)?;
         drop(state);
         self.pending_output = pending;
         self.replay_pending
@@ -362,27 +352,12 @@ impl ContinuousQueryTransformer {
     }
 
     async fn confirm_durable_delivery(&mut self, outputs: &[OutputEnvelope]) -> anyhow::Result<()> {
-        let mut confirmed = self.delivered_output.load(Ordering::Acquire);
-        for output in outputs {
-            let sequence = QueryChangeCodec::query_sequence(&output.envelope)?;
-            anyhow::ensure!(
-                output.port.as_str() == "out"
-                    && output.envelope.system().stream() == &self.definition.output_stream
-                    && super::super::QueryRecoveryIdentity::from_envelope(&output.envelope)?
-                        == self.recovery_identity()?
-                    && QueryChangeCodec::query_generation(&output.envelope)?
-                        == self.results.snapshot()?.generation,
-                "query delivery confirmation belongs to another output lifetime"
-            );
-            if sequence > confirmed {
-                anyhow::ensure!(
-                    confirmed.checked_add(1) == Some(sequence)
-                        && sequence <= self.results.snapshot()?.as_of_sequence,
-                    "query delivery confirmation would skip pending output"
-                );
-                confirmed = sequence;
-            }
-        }
+        let confirmed = self.results.validate_delivery(
+            &self.definition.output_stream,
+            outputs,
+            self.delivered_output.load(Ordering::Acquire),
+            None,
+        )?;
         let query = self.query()?;
         let checkpoint = query
             .resources()

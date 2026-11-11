@@ -177,7 +177,7 @@ async fn graph_mode(
         outputs.push(receiver);
         let capture = format!("{name}-capture");
         builder = builder
-            .query(Box::new(query))
+            .transformer(Box::new(query))
             .sink(Box::new(Capture {
                 descriptor: ComponentDescriptor::try_new(
                     id(&capture),
@@ -205,6 +205,18 @@ async fn graph_mode(
             );
     }
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id(INSTANCE)
         .with_components(builder.build()?)
         .build()

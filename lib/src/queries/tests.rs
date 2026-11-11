@@ -14,16 +14,13 @@
 
 #[cfg(test)]
 mod manager_tests {
-    use super::super::*;
     use crate::channels::*;
     use crate::config::{QueryConfig, QueryInputConfig, QueryLanguage};
-    use crate::queries::output_state::FetchError;
+
     use crate::sources::tests::{create_test_bootstrap_mock_source, create_test_mock_source};
     use crate::test_helpers::managers::{QueryManager, SourceManager};
     use crate::test_helpers::wait_for_component_status;
-    use drasi_core::models::{
-        Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
-    };
+
     use std::sync::Arc;
 
     /// Creates a test query configuration
@@ -38,7 +35,8 @@ mod manager_tests {
         auto_start: bool,
     ) -> QueryConfig {
         QueryConfig {
-            id: id.to_string(),
+            id: None,
+            name: id.to_string(),
             query: "MATCH (n) RETURN n".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
@@ -47,7 +45,7 @@ mod manager_tests {
                 .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    component: source_id,
+                    component: crate::config::ComponentReference::by_name(source_id).unwrap(),
                     pipeline: vec![],
                     port: None,
                 })
@@ -69,7 +67,8 @@ mod manager_tests {
     /// Creates a test GQL query configuration
     fn create_test_gql_query_config(id: &str, sources: Vec<String>) -> QueryConfig {
         QueryConfig {
-            id: id.to_string(),
+            id: None,
+            name: id.to_string(),
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::GQL,
             middleware: vec![],
@@ -78,7 +77,7 @@ mod manager_tests {
                 .map(|source_id| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    component: source_id,
+                    component: crate::config::ComponentReference::by_name(source_id).unwrap(),
                     pipeline: vec![],
                     port: None,
                 })
@@ -123,7 +122,7 @@ mod manager_tests {
     async fn add_source(
         source_manager: &SourceManager,
         _graph: &crate::component_graph::ComponentGraphView,
-        source: impl crate::sources::Source + 'static,
+        source: crate::test_helpers::creation::SourceFixture<impl crate::sources::Source + 'static>,
     ) -> anyhow::Result<()> {
         source_manager.add(source).await
     }
@@ -149,7 +148,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_add_query() {
-        let (manager, source_manager, graph) = create_test_manager().await;
+        let (manager, _source_manager, graph) = create_test_manager().await;
 
         let config = create_test_query_config("test-query", vec!["source1".to_string()]);
         let result = add_query(&manager, &graph, config.clone()).await;
@@ -164,7 +163,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_add_duplicate_query() {
-        let (manager, source_manager, graph) = create_test_manager().await;
+        let (manager, _source_manager, graph) = create_test_manager().await;
 
         let config = create_test_query_config("test-query", vec![]);
 
@@ -196,7 +195,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_delete_query() {
-        let (manager, source_manager, graph) = create_test_manager().await;
+        let (manager, _source_manager, graph) = create_test_manager().await;
 
         let config = create_test_query_config("test-query", vec![]);
         add_query(&manager, &graph, config).await.unwrap();
@@ -381,7 +380,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_add_gql_query() {
-        let (manager, source_manager, graph) = create_test_manager().await;
+        let (manager, _source_manager, graph) = create_test_manager().await;
 
         let config = create_test_gql_query_config("test-gql-query", vec!["source1".to_string()]);
         let result = add_query(&manager, &graph, config.clone()).await;
@@ -438,7 +437,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_mixed_language_queries() {
-        let (manager, source_manager, graph) = create_test_manager().await;
+        let (manager, _source_manager, graph) = create_test_manager().await;
 
         // Add a Cypher query
         let cypher_config = create_test_query_config("cypher-query", vec!["source1".to_string()]);
@@ -459,38 +458,58 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_get_query_config() {
-        let (manager, source_manager, graph) = create_test_manager().await;
+        let (manager, _source_manager, graph) = create_test_manager().await;
 
         let config = create_test_query_config("test-query", vec!["source1".to_string()]);
         add_query(&manager, &graph, config.clone()).await.unwrap();
 
-        let retrieved = manager.get_query_config("test-query").await;
+        let id = manager
+            .0
+            .component_by_name("test-query")
+            .unwrap()
+            .id()
+            .to_string();
+        let retrieved = manager.get_query_config(&id).await;
         assert!(retrieved.is_ok());
 
         let retrieved = retrieved.unwrap();
-        assert_eq!(retrieved.id, config.id);
+        assert_eq!(retrieved.id, id);
+        assert_eq!(retrieved.name, config.name);
         assert_eq!(retrieved.query, config.query);
         assert_eq!(retrieved.inputs.len(), config.inputs.len());
     }
 
     #[tokio::test]
-    async fn test_update_query() {
-        let (manager, source_manager, graph) = create_test_manager().await;
+    async fn test_update_query_requires_factory_assessment() {
+        let (manager, _source_manager, graph) = create_test_manager().await;
 
         let mut config = create_test_query_config("test-query", vec![]);
         add_query(&manager, &graph, config.clone()).await.unwrap();
+        let handle = manager.0.component_by_name("test-query").unwrap();
+        let before = manager.0.desired_configuration().unwrap();
 
         // Update config
         config.query = "MATCH (n:Updated) RETURN n".to_string();
 
-        manager
-            .update_query("test-query".into(), config.clone())
+        let error = manager
+            .update_query(handle.id().to_string(), config.clone())
             .await
-            .unwrap();
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("does not support"));
 
         // Verify update
-        let retrieved = manager.get_query_config("test-query").await.unwrap();
-        assert_eq!(retrieved.query, config.query);
+        let retrieved = manager.0.get_query_config_by_id(handle.id()).await.unwrap();
+        assert_ne!(retrieved.query, config.query);
+        assert_eq!(manager.0.desired_configuration().unwrap(), before);
+        assert_eq!(
+            manager
+                .0
+                .component_by_name("test-query")
+                .unwrap()
+                .generation(),
+            handle.generation()
+        );
+        manager.0.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -565,7 +584,7 @@ mod manager_tests {
     /// Test that query with auto_start=false can be added and remains stopped
     #[tokio::test]
     async fn test_query_auto_start_false_not_started_on_add() {
-        let (manager, source_manager, graph) = create_test_manager().await;
+        let (manager, _source_manager, graph) = create_test_manager().await;
 
         // Add query with auto_start=false (no sources needed since we won't start it)
         let config = create_test_query_config_with_auto_start("no-auto-start-query", vec![], false);
@@ -641,7 +660,7 @@ mod manager_tests {
     /// Test that get_query_config preserves auto_start value
     #[tokio::test]
     async fn test_query_config_preserves_auto_start() {
-        let (manager, source_manager, graph) = create_test_manager().await;
+        let (manager, _source_manager, graph) = create_test_manager().await;
 
         // Add query with auto_start=false
         let config = create_test_query_config_with_auto_start("test-query", vec![], false);
@@ -672,7 +691,7 @@ mod manager_tests {
     /// Test that deleting a query cleans up its event history
     #[tokio::test]
     async fn test_delete_query_cleans_up_event_history() {
-        let (manager, source_manager, graph) = create_test_manager().await;
+        let (manager, _source_manager, graph) = create_test_manager().await;
 
         // Add a query
         let config = create_test_query_config("cleanup-events-query", vec![]);
@@ -777,7 +796,7 @@ mod manager_tests {
     /// Test that deleting a query cleans up its log history
     #[tokio::test]
     async fn test_delete_query_cleans_up_log_history() {
-        let (manager, source_manager, graph) = create_test_manager().await;
+        let (manager, _source_manager, graph) = create_test_manager().await;
 
         // Add a query
         let config = create_test_query_config("cleanup-logs-query", vec![]);
@@ -812,8 +831,9 @@ mod query_core_tests {
         ];
 
         for query in valid_queries {
-            let config = QueryConfig {
-                id: "test".to_string(),
+            let config: QueryConfig = QueryConfig {
+                id: None,
+                name: "test".to_string(),
                 query: query.to_string(),
                 query_language: crate::config::QueryLanguage::Cypher,
                 middleware: vec![],
@@ -838,8 +858,9 @@ mod query_core_tests {
 
     #[tokio::test]
     async fn test_empty_query_validation() {
-        let config = QueryConfig {
-            id: "test".to_string(),
+        let config: QueryConfig = QueryConfig {
+            id: None,
+            name: "test".to_string(),
             query: "".to_string(),
             query_language: crate::config::QueryLanguage::Cypher,
             middleware: vec![],
@@ -867,7 +888,6 @@ mod query_core_tests {
 // =========================================================================
 #[cfg(test)]
 mod output_state_integration_tests {
-    use super::super::*;
     use crate::channels::*;
     use crate::config::{QueryConfig, QueryInputConfig, QueryLanguage};
     use crate::queries::output_state::FetchError;
@@ -882,7 +902,8 @@ mod output_state_integration_tests {
     /// Creates a test query configuration
     fn create_test_query_config(id: &str, sources: Vec<String>) -> QueryConfig {
         QueryConfig {
-            id: id.to_string(),
+            id: None,
+            name: id.to_string(),
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
@@ -891,7 +912,7 @@ mod output_state_integration_tests {
                 .map(|s| QueryInputConfig {
                     nodes: vec![],
                     relations: vec![],
-                    component: s.clone(),
+                    component: crate::config::ComponentReference::by_name(s.as_str()).unwrap(),
                     pipeline: vec![],
                     port: None,
                 })
@@ -926,7 +947,7 @@ mod output_state_integration_tests {
     async fn add_source(
         source_manager: &SourceManager,
         _graph: &crate::component_graph::ComponentGraphView,
-        source: impl crate::sources::Source + 'static,
+        source: crate::test_helpers::creation::SourceFixture<impl crate::sources::Source + 'static>,
     ) -> anyhow::Result<()> {
         source_manager.add(source).await
     }
@@ -1114,14 +1135,15 @@ mod output_state_integration_tests {
 
         // Use a very small outbox capacity to trigger eviction
         let config = QueryConfig {
-            id: "gap-query".to_string(),
+            id: None,
+            name: "gap-query".to_string(),
             query: "MATCH (n) RETURN n".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
             inputs: vec![QueryInputConfig {
                 nodes: vec![],
                 relations: vec![],
-                component: "gap-src".to_string(),
+                component: crate::config::ComponentReference::by_name("gap-src").unwrap(),
                 pipeline: vec![],
                 port: None,
             }],
@@ -1326,14 +1348,15 @@ mod output_state_integration_tests {
 
         // Query that only matches Person nodes specifically
         let config = QueryConfig {
-            id: "noop-query".to_string(),
+            id: None,
+            name: "noop-query".to_string(),
             query: "MATCH (n:Person) RETURN n.name".to_string(),
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
             inputs: vec![QueryInputConfig {
                 nodes: vec![],
                 relations: vec![],
-                component: "noop-src".to_string(),
+                component: crate::config::ComponentReference::by_name("noop-src").unwrap(),
                 pipeline: vec![],
                 port: None,
             }],

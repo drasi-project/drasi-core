@@ -625,7 +625,7 @@ fn shared_graph_with_pipes(
     let storage = ResourceId::try_new("shared-storage")?;
     let specification = ComponentSpecification {
         descriptor: definition.descriptor(),
-        role: ComponentRole::Query,
+        role: ComponentRole::Transformer,
         completion: None,
         implementation: factory.descriptor().implementation.clone(),
         configuration_version: 1,

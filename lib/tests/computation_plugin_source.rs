@@ -189,8 +189,8 @@ impl drasi_lib::Source for TrackedApplication {
     fn supports_replay(&self) -> bool {
         self.source.supports_replay()
     }
-    async fn initialize(&self, context: drasi_lib::SourceRuntimeContext) {
-        self.source.initialize(context).await;
+    async fn bind_runtime_context(&self, context: drasi_lib::SourceRuntimeContext) {
+        self.source.bind_runtime_context(context).await;
     }
     async fn start(&self) -> anyhow::Result<()> {
         self.source.start().await
@@ -260,13 +260,25 @@ impl drasi_lib::Source for TrackedApplication {
 
 async fn scenario() {
     let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("plugin-source-instance")
         .build()
         .await
         .expect("instance");
     let services = drasi.computation_plugin_services().expect("services");
     let factory = Arc::new(ApplicationFactory::default());
-    let host = SourcePluginHost::recreatable(factory.clone(), services.clone())
+    let host = SourcePluginHost::from_constructor(factory.clone(), services.clone())
         .await
         .expect("real source factory");
     let input = factory
@@ -355,7 +367,7 @@ async fn scenario() {
             },
             source_factory,
         )
-        .query(Box::new(query))
+        .transformer(Box::new(query))
         .sink(Box::new(Sink {
             descriptor: ComponentDescriptor::try_new(
                 id("sink"),
@@ -611,6 +623,18 @@ async fn persistent_shared_source() {
     let mut deliveries = BTreeMap::new();
     for generation in 0..2 {
         let drasi = DrasiLib::builder()
+            .with_query_factory(
+                drasi_lib::computation::v1::FactoryRegistry::standard()
+                    .get(
+                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                            "drasi/continuous-query",
+                            "1",
+                        )
+                        .expect("reference query identity"),
+                    )
+                    .expect("reference query factory")
+                    .clone(),
+            )
             .with_id("durable-plugin-instance")
             .with_wal_provider(wal.clone())
             .with_default_index_provider("persistent", backend.clone())
@@ -621,7 +645,7 @@ async fn persistent_shared_source() {
         let services = pipeline.services();
         let catalog = pipeline.catalog();
         let mut output = catalog.subscribe();
-        let host = SourcePluginHost::recreatable(factory.clone(), services.clone())
+        let host = SourcePluginHost::from_constructor(factory.clone(), services.clone())
             .await
             .expect("source");
         let mut pipeline = pipeline
@@ -770,13 +794,28 @@ async fn actual_wal_plugin_replays_shared_source_and_recovers_reconstructed_nati
 }
 
 async fn volatile_restart(subscription_control: bool) {
-    let drasi = DrasiLib::builder().build().await.expect("instance");
+    let drasi = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
+        .build()
+        .await
+        .expect("instance");
     let pipeline = drasi.computation_pipeline().expect("pipeline");
     let factory = Arc::new(ApplicationFactory {
         subscription_control,
         ..Default::default()
     });
-    let source = SourcePluginHost::recreatable(factory.clone(), pipeline.services())
+    let source = SourcePluginHost::from_constructor(factory.clone(), pipeline.services())
         .await
         .expect("source");
     let catalog = pipeline.catalog();

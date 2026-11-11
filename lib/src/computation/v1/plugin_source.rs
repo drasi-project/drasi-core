@@ -27,7 +27,7 @@ use async_trait::async_trait;
 use std::{
     collections::{BTreeSet, HashSet},
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -43,7 +43,9 @@ struct SourceLife {
     users: BTreeSet<String>,
     subscribed: BTreeSet<String>,
     closed: bool,
-    replace_on_start: bool,
+    disposed: bool,
+    paused: bool,
+    paused_users: BTreeSet<String>,
 }
 
 #[async_trait]
@@ -66,7 +68,7 @@ impl crate::bootstrap::BootstrapProvider for SharedBootstrap {
 }
 
 /// One lifecycle owner for a legacy source, shared by native subscription nodes.
-/// Borrowed hosts never initialize, start, stop, or deprovision the legacy source.
+/// Borrowed hosts never initialize, start, stop, dispose, or delete the source's resources.
 #[async_trait]
 pub(crate) trait SourceSubscriptionObserver: Send + Sync {
     fn begin_subscriptions(&self);
@@ -76,7 +78,6 @@ pub(crate) trait SourceSubscriptionObserver: Send + Sync {
 pub struct SourcePluginHost {
     id: String,
     source: Mutex<Arc<dyn Source>>,
-    constructor: Option<Arc<dyn SourcePluginConstructor>>,
     bootstrap: Mutex<Option<Arc<dyn crate::bootstrap::BootstrapProvider>>>,
     services: LegacyPluginServices,
     owned: bool,
@@ -85,9 +86,140 @@ pub struct SourcePluginHost {
     expected_subscriptions: AtomicUsize,
     subscription_observer: Option<Arc<dyn SourceSubscriptionObserver>>,
     log_binding: Mutex<Option<crate::observability::ComponentLogBinding>>,
+    preparation: Option<Arc<dyn SourcePreparation>>,
+}
+
+#[async_trait]
+pub(crate) trait SourcePreparation: Send + Sync {
+    fn is_prepared(&self) -> bool;
+    async fn wait_prepared(&self) -> anyhow::Result<()>;
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    struct Probe {
+        id: String,
+        calls: Arc<Mutex<Vec<&'static str>>>,
+        fail_initialize: bool,
+    }
+
+    #[async_trait]
+    impl Source for Probe {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn type_name(&self) -> &str {
+            "lifecycle-probe"
+        }
+        fn properties(&self) -> HashMap<String, serde_json::Value> {
+            HashMap::new()
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        async fn status(&self) -> ComponentStatus {
+            ComponentStatus::Running
+        }
+        async fn bind_runtime_context(&self, _: SourceRuntimeContext) {
+            self.calls.lock().unwrap().push("bind");
+        }
+        async fn initialize(&self) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push("initialize");
+            anyhow::ensure!(!self.fail_initialize, "partial initialization");
+            Ok(())
+        }
+        async fn start(&self) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push("start");
+            Ok(())
+        }
+        async fn stop(&self) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push("stop");
+            Ok(())
+        }
+        async fn dispose(&self) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push("dispose");
+            Ok(())
+        }
+        async fn subscribe(
+            &self,
+            _: SourceSubscriptionSettings,
+        ) -> anyhow::Result<crate::channels::SubscriptionResponse> {
+            anyhow::bail!("lifecycle probe has no data subscription")
+        }
+    }
+
+    fn probe(fail_initialize: bool) -> (Probe, Arc<Mutex<Vec<&'static str>>>) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        (
+            Probe {
+                id: ComponentId::generate().to_string(),
+                calls: calls.clone(),
+                fail_initialize,
+            },
+            calls,
+        )
+    }
+
+    #[tokio::test]
+    async fn shared_owned_source_has_one_lifetime_and_restartable_activation() {
+        let (source, calls) = probe(false);
+        let host = SourcePluginHost::owned(Box::new(source), LegacyPluginServices::empty("shared"));
+        host.initialize_component().await.unwrap();
+        host.initialize_component().await.unwrap();
+        host.acquire("subscription-a").await.unwrap();
+        host.acquire("subscription-b").await.unwrap();
+        host.release("subscription-a").await.unwrap();
+        assert_eq!(*calls.lock().unwrap(), ["bind", "initialize", "start"]);
+        host.release("subscription-b").await.unwrap();
+        host.acquire("subscription-a").await.unwrap();
+        host.release("subscription-a").await.unwrap();
+        host.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["bind", "initialize", "start", "stop", "start", "stop", "dispose"]
+        );
+    }
+
+    #[tokio::test]
+    async fn borrowed_source_does_not_acquire_its_owners_lifecycle() {
+        let (source, calls) = probe(false);
+        let host = SourcePluginHost::borrowed(Arc::new(source));
+        host.initialize_component().await.unwrap();
+        host.acquire("subscription").await.unwrap();
+        host.release("subscription").await.unwrap();
+        host.shutdown().await.unwrap();
+        assert!(host.delete_owned_resources().await.is_err());
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_source_initialization_never_reinitializes_or_starts_the_object() {
+        let (source, calls) = probe(true);
+        let host = SourcePluginHost::owned(Box::new(source), LegacyPluginServices::empty("failed"));
+        assert!(host.initialize_component().await.is_err());
+        assert!(host.initialize_component().await.is_err());
+        assert!(host.acquire("subscription").await.is_err());
+        host.shutdown().await.unwrap();
+        assert_eq!(*calls.lock().unwrap(), ["bind", "initialize", "dispose"]);
+    }
 }
 
 impl SourcePluginHost {
+    pub(crate) fn is_prepared(&self) -> bool {
+        self.preparation
+            .as_ref()
+            .is_none_or(|preparation| preparation.is_prepared())
+    }
+    pub(crate) async fn wait_prepared(&self) -> anyhow::Result<()> {
+        if let Some(preparation) = &self.preparation {
+            preparation.wait_prepared().await?;
+        }
+        Ok(())
+    }
     pub fn owned(source: Box<dyn Source>, services: LegacyPluginServices) -> Arc<Self> {
         Self::new(source.into(), services, true)
     }
@@ -97,39 +229,26 @@ impl SourcePluginHost {
     pub(crate) fn borrowed_with_subscription_observer(
         source: Arc<dyn Source>,
         observer: Arc<dyn SourceSubscriptionObserver>,
+        preparation: Option<Arc<dyn SourcePreparation>>,
     ) -> Arc<Self> {
         let mut host = Self::borrowed(source);
-        Arc::get_mut(&mut host)
-            .expect("new source host")
-            .subscription_observer = Some(observer);
+        let borrowed = Arc::get_mut(&mut host).expect("new source host");
+        borrowed.subscription_observer = Some(observer);
+        borrowed.preparation = preparation;
         host
     }
-    pub async fn recreatable(
+    pub async fn from_constructor(
         constructor: Arc<dyn SourcePluginConstructor>,
         services: LegacyPluginServices,
     ) -> anyhow::Result<Arc<Self>> {
         let source = constructor.create().await?;
-        Ok(Self::new_with_constructor(
-            source.into(),
-            services,
-            true,
-            Some(constructor),
-        ))
+        Ok(Self::new(source.into(), services, true))
     }
     fn new(source: Arc<dyn Source>, services: LegacyPluginServices, owned: bool) -> Arc<Self> {
-        Self::new_with_constructor(source, services, owned, None)
-    }
-    fn new_with_constructor(
-        source: Arc<dyn Source>,
-        services: LegacyPluginServices,
-        owned: bool,
-        constructor: Option<Arc<dyn SourcePluginConstructor>>,
-    ) -> Arc<Self> {
         let observations = PluginObservations::new(source.id());
         Arc::new(Self {
             id: source.id().to_owned(),
             source: Mutex::new(source),
-            constructor,
             bootstrap: Mutex::new(None),
             services,
             owned,
@@ -138,6 +257,7 @@ impl SourcePluginHost {
             expected_subscriptions: AtomicUsize::new(1),
             subscription_observer: None,
             log_binding: Mutex::new(None),
+            preparation: None,
         })
     }
     pub fn id(&self) -> &str {
@@ -147,6 +267,11 @@ impl SourcePluginHost {
         self.owned
     }
     pub fn source(&self) -> anyhow::Result<Arc<dyn Source>> {
+        anyhow::ensure!(
+            self.is_prepared(),
+            "Source '{}' is awaiting construction",
+            self.id
+        );
         Ok(self
             .source
             .lock()
@@ -229,6 +354,76 @@ impl SourcePluginHost {
     ) -> anyhow::Result<T> {
         self.observations.drive(future, cleanup).await
     }
+    async fn initialize_component(&self) -> anyhow::Result<()> {
+        if !self.owned {
+            return Ok(());
+        }
+        let mut life = self.life.lock().await;
+        anyhow::ensure!(!life.closed, "source host is closed");
+        if life.initialized {
+            anyhow::ensure!(
+                life.initialization_complete,
+                "failed source initialization requires a new object"
+            );
+            return Ok(());
+        }
+        life.initialized = true;
+        let mut context = SourceRuntimeContext::new(
+            self.services.scope.as_ref(),
+            self.id(),
+            self.services.state_store.clone(),
+            self.observations.channel().await,
+            self.services.identity.clone(),
+        );
+        context.wal_provider = self.services.wal.clone();
+        context.log_binding = self
+            .log_binding
+            .lock()
+            .map_err(|_| anyhow::anyhow!("source log binding poisoned"))?
+            .clone();
+        let source = self.source()?;
+        self.with_observations(async {
+            source.bind_runtime_context(context).await;
+            source.initialize().await
+        })
+        .await?;
+        life.initialization_complete = true;
+        Ok(())
+    }
+
+    async fn pause_subscription(&self, id: &str) -> anyhow::Result<()> {
+        let mut life = self.life.lock().await;
+        life.paused_users.insert(id.to_owned());
+        if self.owned && life.running && !life.paused && life.users.is_subset(&life.paused_users) {
+            self.with_observations(self.source()?.pause_processing())
+                .await?;
+            life.paused = true;
+        }
+        Ok(())
+    }
+
+    async fn resume_subscription(&self, id: &str) -> anyhow::Result<()> {
+        let mut life = self.life.lock().await;
+        if self.owned && life.paused {
+            self.with_observations(self.source()?.resume_processing())
+                .await?;
+            life.paused = false;
+        }
+        life.paused_users.remove(id);
+        Ok(())
+    }
+
+    async fn dispose_failed_initialization(&self) -> anyhow::Result<()> {
+        let failed = {
+            let life = self.life.lock().await;
+            life.initialized && !life.initialization_complete
+        };
+        if failed {
+            self.shutdown().await?;
+        }
+        Ok(())
+    }
+
     async fn acquire(&self, id: &str) -> anyhow::Result<()> {
         let mut life = self.life.lock().await;
         if life.closed {
@@ -238,62 +433,10 @@ impl SourcePluginHost {
             return Ok(());
         }
         if self.owned {
-            if life.replace_on_start {
-                let constructor = self
-                    .constructor
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("source has no reconstruction factory"))?;
-                let source = constructor.create().await?;
-                if source.id() != self.id() {
-                    anyhow::bail!("source reconstruction changed its identity");
-                }
-                let bootstrap = self
-                    .bootstrap
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("bootstrap ownership poisoned"))?
-                    .clone();
-                if let Some(bootstrap) = bootstrap {
-                    source
-                        .set_bootstrap_provider(Box::new(SharedBootstrap(bootstrap)))
-                        .await;
-                }
-                *self
-                    .source
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("source instance ownership poisoned"))? =
-                    source.into();
-                life.initialized = false;
-                life.initialization_complete = false;
-                life.replace_on_start = false;
-            }
-            if life.initialized && !life.initialization_complete {
-                anyhow::bail!("source initialization was interrupted; replace the source host");
-            }
-            if !life.initialized {
-                life.initialized = true;
-                life.needs_stop = true;
-                let sender = self.observations.channel().await;
-                let mut context = SourceRuntimeContext::new(
-                    self.services.scope.as_ref(),
-                    self.id(),
-                    self.services.state_store.clone(),
-                    sender,
-                    self.services.identity.clone(),
-                );
-                context.wal_provider = self.services.wal.clone();
-                context.log_binding = self
-                    .log_binding
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("source log binding poisoned"))?
-                    .clone();
-                let source = self.source()?;
-                self.with_observations(async {
-                    source.initialize(context).await;
-                    Ok(())
-                })
-                .await?;
-                life.initialization_complete = true;
-            }
+            anyhow::ensure!(
+                life.initialization_complete,
+                "source must be initialized before start"
+            );
             if !life.running {
                 if life.activation_incomplete {
                     anyhow::bail!("source has an incomplete prior activation");
@@ -328,12 +471,13 @@ impl SourcePluginHost {
         let mut life = self.life.lock().await;
         life.users.remove(id);
         life.subscribed.remove(id);
+        life.paused_users.remove(id);
         if self.owned && life.users.is_empty() && life.needs_stop {
             self.drive_observations(self.source()?.stop(), true).await?;
             life.running = false;
             life.needs_stop = false;
             life.activation_incomplete = false;
-            life.replace_on_start = self.constructor.is_some();
+            life.paused = false;
         }
         Ok(())
     }
@@ -348,12 +492,16 @@ impl SourcePluginHost {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     }
-    pub async fn deprovision_owned(&self) -> anyhow::Result<()> {
+    pub async fn delete_owned_resources(&self) -> anyhow::Result<()> {
         if !self.owned {
-            anyhow::bail!("cannot deprovision a borrowed source");
+            anyhow::bail!("cannot delete a borrowed source's resources");
         }
-        self.shutdown().await?;
-        self.source()?.deprovision().await
+        let life = self.life.lock().await;
+        anyhow::ensure!(
+            !life.disposed && !life.needs_stop && life.users.is_empty(),
+            "source resource deletion requires a stopped, undisposed owner"
+        );
+        self.source()?.delete_owned_resources().await
     }
 }
 #[async_trait]
@@ -371,6 +519,11 @@ impl ResourceCleanup for SourcePluginHost {
             self.drive_observations(self.source()?.stop(), true).await?;
             life.needs_stop = false;
             life.running = false;
+        }
+        if !life.disposed {
+            self.drive_observations(self.source()?.dispose(), true)
+                .await?;
+            life.disposed = true;
         }
         self.observations.close().await;
         Ok(())
@@ -460,7 +613,8 @@ impl LegacySourceSubscription {
         {
             anyhow::bail!("bootstrap timeout must be nonzero and representable");
         }
-        if host.source()?.dispatch_mode() == crate::DispatchMode::Broadcast
+        if host.is_prepared()
+            && host.source()?.dispatch_mode() == crate::DispatchMode::Broadcast
             && !options.allow_broadcast_loss
         {
             anyhow::bail!("broadcast source requires explicit source-side loss permission");
@@ -606,7 +760,7 @@ impl LegacySourceSubscription {
                         "durable middleware source recovery requires a replay-capable owned or explicitly recoverable borrowed source"
                     );
                     anyhow::ensure!(
-                        saved.as_ref().map_or(true, |saved| saved.source_position.is_some()),
+                        saved.as_ref().is_none_or(|saved| saved.source_position.is_some()),
                         "durable middleware source checkpoint has no replay cursor"
                     );
                 }
@@ -769,7 +923,7 @@ impl LegacySourceSubscription {
                     match current {
                         SubscriptionPhase::Ready
                             if generation
-                                .map_or(true, |generation| binding_generation == generation) =>
+                                .is_none_or(|generation| binding_generation == generation) =>
                         {
                             return Ok(BootstrapPreparation::Ready)
                         }
@@ -825,6 +979,24 @@ impl SourcePluginAdapter {
 impl ComputationComponent for SourcePluginAdapter {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
+    }
+    async fn initialize(&mut self) -> anyhow::Result<()> {
+        self.subscription.host.initialize_component().await
+    }
+    async fn dispose(&mut self) -> anyhow::Result<()> {
+        self.subscription.host.dispose_failed_initialization().await
+    }
+    async fn pause_processing(&mut self) -> anyhow::Result<()> {
+        self.subscription
+            .host
+            .pause_subscription(&self.subscription.id)
+            .await
+    }
+    async fn resume_processing(&mut self) -> anyhow::Result<()> {
+        self.subscription
+            .host
+            .resume_subscription(&self.subscription.id)
+            .await
     }
     async fn start(&mut self) -> anyhow::Result<()> {
         self.subscription
@@ -1278,6 +1450,21 @@ impl ComponentFactory for SourcePluginAdapterFactory {
             .ok_or_else(|| {
                 ComponentCreationError::terminal(anyhow::anyhow!("missing source subscription"))
             })?;
+        source
+            .wait_prepared()
+            .await
+            .map_err(ComponentCreationError::terminal)?;
+        if source
+            .source()
+            .map_err(ComponentCreationError::terminal)?
+            .dispatch_mode()
+            == crate::DispatchMode::Broadcast
+            && !subscription.options.allow_broadcast_loss
+        {
+            return Err(ComponentCreationError::terminal(anyhow::anyhow!(
+                "broadcast source requires explicit source-side loss permission"
+            )));
+        }
         if !Arc::ptr_eq(&source, &subscription.host)
             || context
                 .configuration()

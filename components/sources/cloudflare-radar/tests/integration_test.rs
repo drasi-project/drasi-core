@@ -212,6 +212,18 @@ async fn test_cloudflare_radar_hijack_changes() -> Result<()> {
         .build();
 
     let core = DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
         .with_id("radar-integration-test")
         .with_source(source)
         .with_query(query)

@@ -303,17 +303,23 @@ async fn graph_connected_replay_reuses_one_multicast_acceptance() {
         .unwrap()
         .provide_resource(resource.clone(), channel.resource())
         .unwrap()
-        .source(Box::new(ReplaySource {
-            descriptor: describe("producer", "out", PortDirection::Output),
-            outputs: [output, replayed].into(),
-        }))
+        .source(
+            crate::computation::v1::ComponentName::try_new("producer").unwrap(),
+            Box::new(ReplaySource {
+                descriptor: describe("producer", "out", PortDirection::Output),
+                outputs: [output, replayed].into(),
+            }),
+        )
         .bind_stream(source.clone(), definition.stream.clone());
     for (id, seen) in [("first", first.clone()), ("second", second.clone())] {
         builder = builder
-            .sink(Box::new(ReplaySink {
-                descriptor: describe(id, "in", PortDirection::Input),
-                seen,
-            }))
+            .sink(
+                crate::computation::v1::ComponentName::try_new(id).unwrap(),
+                Box::new(ReplaySink {
+                    descriptor: describe(id, "in", PortDirection::Input),
+                    seen,
+                }),
+            )
             .connect(
                 EdgeDefinition::new(
                     source.clone(),

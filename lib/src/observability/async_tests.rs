@@ -42,8 +42,8 @@ async fn record_filtered(
         .unwrap();
     let owner = config
         .observations(
-            ComponentId::try_new("query").unwrap(),
-            ComponentRole::Query,
+            crate::test_helpers::component_id("query"),
+            ComponentRole::Transformer,
             ComponentSemanticKind::Query,
             1,
         )
@@ -54,8 +54,8 @@ async fn record_filtered(
                 TelemetryScope::graph("async-tests", "async-tests")
                     .unwrap()
                     .component(
-                        ComponentId::try_new("query").unwrap(),
-                        ComponentRole::Query,
+                        crate::test_helpers::component_id("query"),
+                        ComponentRole::Transformer,
                         ComponentSemanticKind::Query,
                     ),
                 1,
@@ -88,7 +88,7 @@ async fn record_filtered(
 fn definition(text: &str) -> ContinuousQueryDefinition {
     ContinuousQueryDefinition {
         graph_id: "async-tests".into(),
-        id: ComponentId::try_new("query").unwrap(),
+        id: crate::test_helpers::component_id("query"),
         query: text.into(),
         language: ComputationQueryLanguage::Cypher,
         output_stream: StreamId::try_new("query/out").unwrap(),
@@ -505,7 +505,7 @@ async fn worker_handling_keeps_parentage_and_batch_links_without_metrics_or_star
                         .component_id()
                         .unwrap()
                         .as_str(),
-                    "query"
+                    crate::test_helpers::component_id("query").as_str()
                 );
                 Ok::<_, anyhow::Error>(())
             })

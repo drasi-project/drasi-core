@@ -379,7 +379,10 @@ impl<T: Send + 'static> Tasks<T> {
             .unwrap_or_else(|error| error.into_inner())
             .values()
         {
-            if task.identity.phase() != FailurePhase::Stop {
+            if !matches!(
+                task.identity.phase(),
+                FailurePhase::Stop | FailurePhase::Removal
+            ) {
                 task.abort.abort();
             }
         }
