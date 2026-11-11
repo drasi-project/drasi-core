@@ -8,8 +8,9 @@ use crate::{
     NativeSink as EnvelopeSink, NativeSource as EnvelopeSource, NativeTransformer as Transformer,
 };
 use drasi_computation_contracts::{
-    BinaryEnvelopeCodec, ConsumerProgressView, PluginIdentity, PortDirection, Record, RecordImage,
-    RecordReference, Schema, SourceProgressView, WakeupSource,
+    BinaryEnvelopeCodec, ComponentRole, ComponentSemanticKind, ConsumerProgressView,
+    PluginIdentity, PortDirection, Record, RecordImage, RecordReference, Schema,
+    SourceProgressView, WakeupSource,
 };
 use std::{
     ffi::c_void,
@@ -30,6 +31,8 @@ mod lifecycle;
 mod lifecycle_tests;
 mod output_follow;
 mod output_reads;
+#[cfg(test)]
+mod query_telemetry_tests;
 mod source_schema;
 mod update;
 #[cfg(test)]
@@ -52,6 +55,11 @@ use crate::{
 /// standalone and transactional construction use this same immutable contract.
 pub trait Factory: Send + Sync + 'static {
     fn metadata(&self) -> FactoryMetadata;
+    /// Pure opt-in to implemented evaluator/phase instrumentation, queried only
+    /// through telemetry V4. This does not change frozen base factory metadata.
+    fn supports_query_instrumentation(&self) -> bool {
+        false
+    }
     /// Must agree with a nonempty Capabilities::update_modes declaration.
     fn supports_update_planning(&self) -> bool {
         false
@@ -454,6 +462,9 @@ impl ExportedPlugin {
     }
     pub fn telemetry_v3(&self) -> *const abi::telemetry::PluginTelemetryV3 {
         &PLUGIN_TELEMETRY_V3
+    }
+    pub fn telemetry_v4(&self) -> *const abi::telemetry::PluginTelemetryV4 {
+        &PLUGIN_TELEMETRY_V4
     }
     pub fn output_snapshots(&self) -> *const abi::output_snapshots::PluginOutputSnapshotsV1 {
         &PLUGIN_OUTPUT_SNAPSHOTS
@@ -2063,6 +2074,38 @@ static PLUGIN_TELEMETRY_V3: abi::telemetry::PluginTelemetryV3 = abi::telemetry::
     reserved: 0,
     begin: Some(begin_timing),
 };
+
+static PLUGIN_TELEMETRY_V4: abi::telemetry::PluginTelemetryV4 = abi::telemetry::PluginTelemetryV4 {
+    header: Header::new::<abi::telemetry::PluginTelemetryV4>(),
+    version: abi::telemetry::VERSION_V4,
+    capabilities: abi::telemetry::CONTEXT | abi::telemetry::QUERY_OBSERVATIONS,
+    reserved: 0,
+    supports_factory: Some(supports_query_factory),
+    with_scope: Some(crate::telemetry_bridge::with_query_scope),
+};
+
+unsafe extern "C" fn supports_query_factory(state: *mut c_void, out: *mut u32) -> Status {
+    transport::status_boundary(|| {
+        let state = unsafe { state_ref::<FactoryState>(state)? };
+        let factory = state
+            .plugin
+            .definition
+            .factories
+            .get(state.index)
+            .ok_or_else(|| Failure::protocol("invalid native query factory index"))?;
+        let supported = factory.supports_query_instrumentation();
+        let metadata = &state.plugin.definition.metadata.factories[state.index];
+        if supported
+            && (metadata.role != ComponentRole::Transformer
+                || metadata.semantic_kind() != ComponentSemanticKind::Query)
+        {
+            return Err(Failure::protocol(
+                "query instrumentation requires a semantic query transformer",
+            ));
+        }
+        unsafe { transport::write_out(out, u32::from(supported)) }
+    })
+}
 
 unsafe extern "C" fn begin_timing(
     state: *mut c_void,

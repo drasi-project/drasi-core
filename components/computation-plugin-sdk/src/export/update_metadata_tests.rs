@@ -114,6 +114,7 @@ impl QueryReader {
         Ok(OutputEnvelope {
             port: PortId::try_new("out")?,
             envelope: output,
+            execution_context: Default::default(),
         })
     }
 }
@@ -486,6 +487,7 @@ async fn query_metadata_reflection() -> anyhow::Result<()> {
     let input = InputEnvelope {
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_changes(&[], StreamId::try_new("source/out")?, 1, None)?,
+        execution_context: Default::default(),
     };
     let output = fixture
         .call(

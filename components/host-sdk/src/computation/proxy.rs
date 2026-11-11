@@ -1198,6 +1198,9 @@ impl NativeComponentProxy {
         input: &[u8],
         contexts: &[ExecutionContext],
     ) -> anyhow::Result<Vec<OutputEnvelope>> {
+        if let Some(binding) = &self.telemetry_binding {
+            binding.reset_processing_context()?;
+        }
         let _query_timer = self
             .query_api
             .as_ref()
@@ -1841,6 +1844,19 @@ impl EnvelopeSource for NativeComponentProxy {
 }
 #[async_trait]
 impl Transformer for NativeComponentProxy {
+    fn processing_context(&self) -> Option<ExecutionContext> {
+        self.telemetry_binding
+            .as_ref()
+            .and_then(|binding| binding.processing_context())
+    }
+
+    fn observes_input(&self, input: &InputEnvelope) -> bool {
+        self.telemetry_binding
+            .as_ref()
+            .is_some_and(|binding| binding.query_observations_active())
+            && GraphChangeCodec::is_futures_due(&input.envelope)
+    }
+
     async fn bind_output_destinations(
         &mut self,
         bindings: &drasi_lib::computation::v1::OutputBindings,
@@ -2116,6 +2132,14 @@ impl ComputationComponent for NativeTransactionalProxy {
 }
 #[async_trait]
 impl Transformer for NativeTransactionalProxy {
+    fn processing_context(&self) -> Option<ExecutionContext> {
+        self.component.processing_context()
+    }
+
+    fn observes_input(&self, input: &InputEnvelope) -> bool {
+        self.component.observes_input(input)
+    }
+
     async fn transform(&mut self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
         self.component.transform(input).await
     }

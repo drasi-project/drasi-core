@@ -277,37 +277,66 @@ impl ComputationTransaction {
         }
     }
 
-    pub async fn run<T>(&self, operation: impl Future<Output = Result<T>>) -> Result<T> {
+    pub fn run<'a, T: 'a>(
+        &'a self,
+        operation: impl Future<Output = Result<T>> + 'a,
+    ) -> impl Future<Output = Result<T>> + 'a {
+        self.run_observed(operation, None)
+    }
+
+    /// Observe this operation's actual session commit without changing the
+    /// owner's observer or extending observation over staging/lock acquisition.
+    pub async fn run_observed<T>(
+        &self,
+        operation: impl Future<Output = Result<T>>,
+        observer: Option<&Arc<dyn super::QueryObserver>>,
+    ) -> Result<T> {
         let _lock = self.lock_operation().await?;
-        let observer = self
-            .observer
-            .read()
-            .map_err(|_| crate::interface::IndexError::CorruptedData)?
-            .clone();
+        let configured = if observer.is_none() {
+            self.observer
+                .read()
+                .map_err(|_| crate::interface::IndexError::CorruptedData)?
+                .clone()
+        } else {
+            None
+        };
         in_operation(
             &self.resources,
             &self.recovery_required,
             self.atomic,
-            observer.as_ref(),
+            observer.or(configured.as_ref()),
             operation,
         )
         .await
     }
 
-    pub async fn run_with_mutations<T>(
+    pub fn run_with_mutations<'a, T: 'a>(
+        &'a self,
+        operation: impl Future<Output = Result<(T, Vec<Box<dyn super::TransactionGroupMutation>>)>> + 'a,
+    ) -> impl Future<Output = Result<T>> + 'a {
+        self.run_with_mutations_observed(operation, None)
+    }
+
+    /// Stage shared mutations under the same gate, observing the one actual
+    /// provider commit rather than each participating journal separately.
+    pub async fn run_with_mutations_observed<T>(
         &self,
         operation: impl Future<Output = Result<(T, Vec<Box<dyn super::TransactionGroupMutation>>)>>,
+        observer: Option<&Arc<dyn super::QueryObserver>>,
     ) -> Result<T> {
         let group = self
             .resources
             .group_session
             .as_ref()
             .ok_or(ComputationQueryError::TransactionMismatch)?;
-        self.run(async {
-            let (value, mutations) = operation.await?;
-            group.stage_mutations(mutations).await?;
-            Ok(value)
-        })
+        self.run_observed(
+            async {
+                let (value, mutations) = operation.await?;
+                group.stage_mutations(mutations).await?;
+                Ok(value)
+            },
+            observer,
+        )
         .await
     }
 

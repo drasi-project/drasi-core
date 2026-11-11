@@ -22,6 +22,18 @@ pub trait PluginTelemetryBackend: std::fmt::Debug + Send + Sync {
     ) -> Result<Option<PluginMetricHandle>>;
     fn update_metric(&self, update: PluginMetricUpdate) -> Result<()>;
     fn has_span_collector(&self) -> bool;
+    fn supports_query_observations(&self) -> bool {
+        false
+    }
+    fn begin_query_observation(
+        &self,
+        _request: &super::QueryObservationRequest,
+    ) -> Result<Option<Box<dyn super::QueryObservation>>> {
+        Err(super::TelemetryError::Unsupported("native query observations"))
+    }
+    fn query_observation_event(&self, _event: super::QueryObservationEvent) -> Result<()> {
+        Err(super::TelemetryError::Unsupported("native query observations"))
+    }
     fn is_active(&self) -> Result<bool> {
         Err(super::TelemetryError::Unsupported(
             "host-only binding lifetime inspection",
@@ -71,6 +83,18 @@ impl PluginTelemetry {
     }
     pub fn has_span_collector(&self) -> bool {
         self.0.has_span_collector()
+    }
+    pub fn supports_query_observations(&self) -> bool {
+        self.0.supports_query_observations()
+    }
+    pub fn begin_query_observation(
+        &self,
+        request: &super::QueryObservationRequest,
+    ) -> Result<Option<Box<dyn super::QueryObservation>>> {
+        self.0.begin_query_observation(request)
+    }
+    pub fn query_observation_event(&self, event: super::QueryObservationEvent) -> Result<()> {
+        self.0.query_observation_event(event)
     }
     #[doc(hidden)]
     pub fn is_active(&self) -> Result<bool> {

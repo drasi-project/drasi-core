@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use drasi_computation_contracts::profiling::timestamp_ns;
+use drasi_computation_contracts::telemetry::{QueryObservationKind, QueryObservationPhase};
 use drasi_computation_contracts::{
     BootstrapCompletion, BootstrapStatus, ChangeEnvelope, GraphChangeCodec, GraphProducerIdentity,
     InputEnvelope, OutputCursor, OutputEnvelope, QueryChangeCodec, QueryExecutionSettings,
@@ -68,6 +69,7 @@ pub(super) struct DurableQuery {
     evaluator: Option<Arc<QueryEvaluator>>,
     capacity: NonZeroUsize,
     schedule: QuerySchedule,
+    telemetry: super::observations::QueryObservations,
 }
 
 fn page_limits() -> OutboxPageLimits {
@@ -166,6 +168,7 @@ impl DurableQuery {
         output: Arc<QueryOutput>,
         execution: &QueryExecutionSettings,
         schedule: QuerySchedule,
+        telemetry: super::observations::QueryObservations,
     ) -> Result<Self> {
         let scope = request
             .scope
@@ -246,6 +249,7 @@ impl DurableQuery {
             evaluator: None,
             capacity: definition.outbox_capacity,
             schedule,
+            telemetry,
         })
     }
 
@@ -655,6 +659,7 @@ impl DurableQuery {
             .evaluator
             .clone()
             .context("indexed evaluator is not initialized")?;
+        let telemetry = self.telemetry.clone();
         let bytes: Option<Vec<u8>> = processing
             .run(move |context| async move {
                 let context = Arc::new(context);
@@ -665,13 +670,15 @@ impl DurableQuery {
                     "bootstrap cannot replace a live output generation"
                 );
                 let operation = QueryOperation::new(&input.envelope)?;
-                let results = evaluator
-                    .evaluate_input_batch::<false>(
+                let results = telemetry
+                    .evaluate::<false>(
+                        &evaluator,
                         QueryInputBatch::new(
                             GraphChangeCodec::decode_changes(&input.envelope)?,
                             input.envelope.system().ordering(),
                         )
                         .with_optional_input_scope(input_scope),
+                        QueryObservationPhase::Bootstrap,
                     )
                     .await?;
                 let Some(envelope) =
@@ -730,6 +737,7 @@ impl DurableQuery {
             }
             self.output.apply_bootstrap(&envelope)?;
         }
+        self.telemetry.input(QueryObservationPhase::Bootstrap)?;
         Ok(())
     }
 
@@ -749,45 +757,58 @@ impl DurableQuery {
                 "query has no configured bootstrap"
             );
             let non_atomic = self.non_atomic;
+            let telemetry = self.telemetry.clone();
             processing
                 .run(move |context| async move {
                     anyhow::ensure!(
                         number(&context, BOOTSTRAP_COMPLETE_CHECKPOINT).await? == 0,
                         "query bootstrap already completed"
                     );
-                    for watermark in completion.watermarks {
-                        watermark.validate()?;
-                        let key = match &watermark.source_id {
-                            Some(source) => SourceProgressKey::Source(source.clone()),
-                            None => SourceProgressKey::Stream(watermark.stream.clone()),
-                        };
-                        if let Some(producer) = &watermark.producer {
-                            context.bind_input_producer(producer, &key).await?;
-                        }
-                        context
-                            .stage_bootstrap_watermark(
-                                &key,
-                                watermark.sequence,
-                                watermark.position.as_deref(),
-                            )
-                            .await?;
-                    }
-                    if let Some(state) = completion.state {
-                        context
-                            .stage_checkpoint(BOOTSTRAP_STATE_CHECKPOINT, 1, Some(&state))
-                            .await?;
-                    }
-                    context.stage_bootstrap_complete(true).await?;
-                    if non_atomic
-                        && context
-                            .state_info()
-                            .await?
-                            .non_atomic_reset
-                            .is_some_and(|marker| marker.in_progress)
-                    {
-                        context.finish_non_atomic_reset().await?;
-                    }
-                    Ok(())
+                    telemetry
+                        .phase(
+                            QueryObservationKind::CommitWork,
+                            QueryObservationPhase::Bootstrap,
+                            async {
+                                for watermark in completion.watermarks {
+                                    watermark.validate()?;
+                                    let key = match &watermark.source_id {
+                                        Some(source) => SourceProgressKey::Source(source.clone()),
+                                        None => SourceProgressKey::Stream(watermark.stream.clone()),
+                                    };
+                                    if let Some(producer) = &watermark.producer {
+                                        context.bind_input_producer(producer, &key).await?;
+                                    }
+                                    context
+                                        .stage_bootstrap_watermark(
+                                            &key,
+                                            watermark.sequence,
+                                            watermark.position.as_deref(),
+                                        )
+                                        .await?;
+                                }
+                                if let Some(state) = completion.state {
+                                    context
+                                        .stage_checkpoint(
+                                            BOOTSTRAP_STATE_CHECKPOINT,
+                                            1,
+                                            Some(&state),
+                                        )
+                                        .await?;
+                                }
+                                context.stage_bootstrap_complete(true).await?;
+                                if non_atomic
+                                    && context
+                                        .state_info()
+                                        .await?
+                                        .non_atomic_reset
+                                        .is_some_and(|marker| marker.in_progress)
+                                {
+                                    context.finish_non_atomic_reset().await?;
+                                }
+                                Ok(())
+                            },
+                        )
+                        .await
                 })
                 .await?;
             self.bootstrap_complete = true;
@@ -854,59 +875,91 @@ impl DurableQuery {
             .clone()
             .context("indexed evaluator is not initialized")?;
         let component = definition.id.clone();
+        let telemetry = self.telemetry.clone();
+        let counts_input =
+            complete_transaction || !GraphChangeCodec::is_futures_due(&input.envelope);
         if non_atomic && Box::pin(non_atomic::begin_input(processing, input.clone())).await? {
             return Ok(None);
         }
         let work = move |context: NativeProcessingContext| async move {
             let context = Arc::new(context);
             let _scope = indexes.bind(context.clone())?;
-            let sequence = context
-                .read_result_sequence()
-                .await?
-                .context("missing query result sequence")?;
-            anyhow::ensure!(
-                sequence == expected && delivered_sequence(&context, volatile).await? == sequence,
-                "query state changed or output remains unconfirmed"
-            );
-            anyhow::ensure!(
-                number(&context, ROW_COUNT).await? == output_state.row_count()?,
-                "query snapshot does not match committed row count"
-            );
-            let progress = context.prepare_input_progress(&input).await?;
-            if progress.duplicate {
-                return Ok(None);
-            }
-            let mut operation = QueryOperation::new(&input.envelope)?;
-            if let Some(source) = prepared_input.source_id.clone().or(progress.source_id) {
-                operation = operation.with_source_id(source);
-            }
-            let changes = prepared_input.into_changes(&input.envelope)?;
-            let batch = QueryInputBatch::new(changes, input.envelope.system().ordering())
-                .with_optional_input_scope(input_scope);
+            let prepared = telemetry
+                .phase(
+                    QueryObservationKind::PrepareInput,
+                    QueryObservationPhase::Steady,
+                    async {
+                        let sequence = context
+                            .read_result_sequence()
+                            .await?
+                            .context("missing query result sequence")?;
+                        anyhow::ensure!(
+                            sequence == expected
+                                && delivered_sequence(&context, volatile).await? == sequence,
+                            "query state changed or output remains unconfirmed"
+                        );
+                        anyhow::ensure!(
+                            number(&context, ROW_COUNT).await? == output_state.row_count()?,
+                            "query snapshot does not match committed row count"
+                        );
+                        let progress = context.prepare_input_progress(&input).await?;
+                        if progress.duplicate {
+                            return Ok(None);
+                        }
+                        let mut operation = QueryOperation::new(&input.envelope)?;
+                        if let Some(source) =
+                            prepared_input.source_id.clone().or(progress.source_id)
+                        {
+                            operation = operation.with_source_id(source);
+                        }
+                        let changes = prepared_input.into_changes(&input.envelope)?;
+                        let batch =
+                            QueryInputBatch::new(changes, input.envelope.system().ordering())
+                                .with_optional_input_scope(input_scope);
+                        Ok(Some((operation, batch, sequence)))
+                    },
+                )
+                .await?;
+            let Some((operation, batch, sequence)) = prepared else {
+                return Ok((None, false));
+            };
             let results = if complete_transaction {
-                evaluator.evaluate_input_batch::<true>(batch).await?
+                telemetry
+                    .evaluate::<true>(&evaluator, batch, QueryObservationPhase::Steady)
+                    .await?
             } else {
-                evaluator.evaluate_input_batch::<false>(batch).await?
+                telemetry
+                    .evaluate::<false>(&evaluator, batch, QueryObservationPhase::Steady)
+                    .await?
             };
-            let next = QueryOperation::output_sequence(sequence, &results)?;
-            let output = operation.project(&definition, &projector, next, &results)?;
-            context.stage_prepared_input_progress().await?;
-            let bytes = match output {
-                Some(output) => Some(
-                    stage_output(
-                        &context,
-                        &output_state,
-                        &projector,
-                        output,
-                        retention,
-                        volatile,
-                        non_atomic,
-                    )
-                    .await?,
-                ),
-                None => None,
-            };
-            Ok(bytes)
+            let bytes = telemetry
+                .phase(
+                    QueryObservationKind::PrepareOutput,
+                    QueryObservationPhase::Steady,
+                    async {
+                        let next = QueryOperation::output_sequence(sequence, &results)?;
+                        let output = operation.project(&definition, &projector, next, &results)?;
+                        context.stage_prepared_input_progress().await?;
+                        let bytes = match output {
+                            Some(output) => Some(
+                                stage_output(
+                                    &context,
+                                    &output_state,
+                                    &projector,
+                                    output,
+                                    retention,
+                                    volatile,
+                                    non_atomic,
+                                )
+                                .await?,
+                            ),
+                            None => None,
+                        };
+                        Ok(bytes)
+                    },
+                )
+                .await?;
+            Ok((bytes, true))
         };
         let work = async {
             if non_atomic {
@@ -915,7 +968,7 @@ impl DurableQuery {
                 processing.run_output(work).await
             }
         };
-        let bytes: Option<Vec<u8>> = match deadline {
+        let (bytes, evaluated): (Option<Vec<u8>>, bool) = match deadline {
             Some(deadline) => tokio::time::timeout(deadline, Box::pin(work))
                 .await
                 .map_err(|_| drasi_computation_contracts::SourceTransactionError::Deadline)??,
@@ -931,19 +984,32 @@ impl DurableQuery {
             }
             None => bytes,
         };
-        let codec = drasi_computation_plugin_sdk::wire::codec(&[GraphChangeCodec::schema()])?;
-        let mut output = bytes.map(|bytes| codec.decode(&bytes)).transpose()?;
-        if let Some(output) = &mut output {
-            QueryOperation::committed(output, &component, core_return_ns)?;
-        }
-        if let Some(output) = &output {
-            self.sequence = QueryChangeCodec::query_sequence(output)?;
-            self.pending = Some(output.clone());
-        }
-        if self.indexes.take_future_changes() {
-            self.refresh_schedule(processing).await?;
-        }
-        Ok(output)
+        let finalization = self.telemetry.clone();
+        finalization
+            .phase(
+                QueryObservationKind::Finalize,
+                QueryObservationPhase::Steady,
+                async {
+                    let codec =
+                        drasi_computation_plugin_sdk::wire::codec(&[GraphChangeCodec::schema()])?;
+                    let mut output = bytes.map(|bytes| codec.decode(&bytes)).transpose()?;
+                    if let Some(output) = &mut output {
+                        QueryOperation::committed(output, &component, core_return_ns)?;
+                    }
+                    if let Some(output) = &output {
+                        self.sequence = QueryChangeCodec::query_sequence(output)?;
+                        self.pending = Some(output.clone());
+                    }
+                    if self.indexes.take_future_changes() {
+                        self.refresh_schedule(processing).await?;
+                    }
+                    if evaluated && counts_input {
+                        self.telemetry.input(QueryObservationPhase::Steady)?;
+                    }
+                    Ok(output)
+                },
+            )
+            .await
     }
 
     pub(super) async fn on_wakeup(
@@ -951,6 +1017,7 @@ impl DurableQuery {
         processing: &NativeProcessing,
         definition: Arc<ContinuousQueryDefinition>,
         projector: ResultNodeProjector,
+        run: super::observations::QueryRun,
     ) -> Result<(Option<ChangeEnvelope>, u64)> {
         anyhow::ensure!(
             self.bootstrap_complete && self.pending.is_none(),
@@ -966,6 +1033,7 @@ impl DurableQuery {
         let state = self.output.clone();
         let retention = u64::try_from(self.capacity.get())?;
         let non_atomic = self.non_atomic;
+        let telemetry = self.telemetry.clone();
         let completion = non_atomic.then(|| (state.clone(), projector.clone()));
         if non_atomic {
             Box::pin(non_atomic::begin(processing)).await?;
@@ -984,28 +1052,40 @@ impl DurableQuery {
             if next_due.is_none_or(|deadline| deadline > now) {
                 return Ok((None, now));
             }
-            let output = match evaluator.evaluate_next_future().await? {
-                Some(due) => {
-                    let sequence = QueryOperation::output_sequence(expected, &due.results)?;
-                    drasi_query_common::project_due_query_output(
-                        &definition,
-                        &projector,
-                        sequence,
-                        &due,
-                    )?
-                }
-                None => None,
-            };
-            let bytes = match output {
-                Some(output) => Some(
-                    stage_output(
-                        &context, &state, &projector, output, retention, volatile, non_atomic,
-                    )
-                    .await?,
-                ),
-                None => None,
-            };
-            Ok((bytes, now))
+            run.start(QueryObservationKind::FutureQueue)?;
+            run.scope(async {
+                let output = match telemetry.future(&evaluator).await? {
+                    Some(due) => {
+                        let sequence = QueryOperation::output_sequence(expected, &due.results)?;
+                        telemetry
+                            .phase(
+                                QueryObservationKind::PrepareOutput,
+                                QueryObservationPhase::Steady,
+                                async {
+                                    Ok(drasi_query_common::project_due_query_output(
+                                        &definition,
+                                        &projector,
+                                        sequence,
+                                        &due,
+                                    )?)
+                                },
+                            )
+                            .await?
+                    }
+                    None => None,
+                };
+                let bytes = match output {
+                    Some(output) => Some(
+                        stage_output(
+                            &context, &state, &projector, output, retention, volatile, non_atomic,
+                        )
+                        .await?,
+                    ),
+                    None => None,
+                };
+                Ok((bytes, now))
+            })
+            .await
         };
         let (bytes, now): (Option<Vec<u8>>, u64) = if non_atomic {
             Box::pin(processing.run_deferred_progress(work)).await?
@@ -1094,6 +1174,7 @@ impl DurableQuery {
         );
         let emission = output.envelope.system().sequence();
         let volatile = self.volatile;
+        let telemetry = self.telemetry.clone();
         processing
             .run(move |context| async move {
                 anyhow::ensure!(
@@ -1103,14 +1184,22 @@ impl DurableQuery {
                             == Some(sequence),
                     "query confirmation would skip retained output"
                 );
-                if volatile {
-                    context
-                        .stage_checkpoint(VOLATILE_DELIVERED, sequence, None)
-                        .await?;
-                } else {
-                    context.stage_delivery_progress(sequence).await?;
-                }
-                Ok(())
+                telemetry
+                    .phase(
+                        QueryObservationKind::CommitWork,
+                        QueryObservationPhase::Steady,
+                        async {
+                            if volatile {
+                                context
+                                    .stage_checkpoint(VOLATILE_DELIVERED, sequence, None)
+                                    .await?;
+                            } else {
+                                context.stage_delivery_progress(sequence).await?;
+                            }
+                            Ok(())
+                        },
+                    )
+                    .await
             })
             .await?;
         self.delivered = sequence;

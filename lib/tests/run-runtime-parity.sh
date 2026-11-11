@@ -89,6 +89,8 @@ for profile in core-types shared-contracts default no-default-features extra-cap
             targets+=(--test native_metrics_telemetry --test native_telemetry --test native_execution_context --test logging_policy)
             sources+=(components/host-sdk/tests/native_handled_branch_latency.rs)
             targets+=(--test native_handled_branch_latency)
+            sources+=(components/host-sdk/tests/native_query_observability.rs)
+            targets+=(--test native_query_observability)
             features+=(--features otel-context)
             test_arguments+=(--test-threads=1)
             ;;

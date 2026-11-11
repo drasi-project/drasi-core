@@ -63,6 +63,7 @@ pub struct NativeFactory {
     telemetry: Option<abi::telemetry::PluginTelemetryV1>,
     telemetry_v2: Option<abi::telemetry::PluginTelemetryV2>,
     telemetry_v3: Option<abi::telemetry::PluginTelemetryV3>,
+    telemetry_v4: Option<abi::telemetry::PluginTelemetryV4>,
     pub(super) query_authoring: std::sync::Mutex<Option<std::sync::Weak<dyn ComponentFactory>>>,
     metadata: FactoryMetadata,
     configuration_details: Option<drasi_computation_plugin_sdk::ConfigDetails>,
@@ -162,6 +163,7 @@ impl NativeFactory {
             telemetry: None,
             telemetry_v2: None,
             telemetry_v3: None,
+            telemetry_v4: None,
             query_authoring: std::sync::Mutex::new(None),
             descriptor,
             port_formats,
@@ -215,7 +217,7 @@ impl NativeFactory {
     }
 
     pub fn telemetry_capabilities(&self) -> u32 {
-        self.telemetry_v2.map_or_else(
+        let capabilities = self.telemetry_v2.map_or_else(
             || {
                 if self.telemetry.is_some() {
                     abi::telemetry::CONTEXT
@@ -224,7 +226,36 @@ impl NativeFactory {
                 }
             },
             |extension| extension.capabilities,
-        )
+        );
+        capabilities | self.telemetry_v4.map_or(0, |table| table.capabilities)
+    }
+
+    pub(super) fn with_telemetry_v4(
+        mut self,
+        extension: Option<abi::telemetry::PluginTelemetryV4>,
+    ) -> anyhow::Result<Self> {
+        if let Some(extension) = extension {
+            let mut supported = u32::MAX;
+            unsafe {
+                take_status(extension.supports_factory.expect("validated")(
+                    self.raw.state,
+                    &mut supported,
+                ))?
+            };
+            anyhow::ensure!(
+                supported <= 1,
+                "invalid native query instrumentation capability"
+            );
+            if supported == 1 {
+                anyhow::ensure!(
+                    self.metadata.role == ComponentRole::Transformer
+                        && self.metadata.semantic_kind() == ComponentSemanticKind::Query,
+                    "query instrumentation requires a semantic query transformer"
+                );
+                self.telemetry_v4 = Some(extension);
+            }
+        }
+        Ok(self)
     }
 
     /// Ask the actual plugin factory to assess a change without constructing or
@@ -1176,8 +1207,9 @@ impl NativeFactory {
                 })
             })
             .transpose()?;
-        let telemetry_binding = super::telemetry::NativeTelemetryBinding::capture(
+        let telemetry_binding = super::telemetry::NativeTelemetryBinding::capture_query(
             self.telemetry_v2,
+            self.telemetry_v4,
             self.metadata.implementation.name.as_ref(),
         )?;
         super::telemetry::scope(telemetry_binding.as_ref(), || {

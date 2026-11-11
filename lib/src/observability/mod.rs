@@ -29,6 +29,7 @@ mod log_runtime;
 mod logging;
 #[cfg(test)]
 mod metric_tests;
+mod native_query;
 mod native_spans;
 mod operations;
 mod plugin_telemetry;
@@ -43,6 +44,7 @@ pub(crate) use detail_metrics::*;
 pub use event_history::*;
 pub use log_runtime::*;
 pub use logging::*;
+pub use native_query::NativeQueryScope;
 pub use native_spans::*;
 pub(crate) use operations::*;
 pub use queues::QueueObservations;

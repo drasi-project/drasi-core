@@ -45,6 +45,7 @@ fn main() -> anyhow::Result<()> {
             tracing: false,
             metrics: true,
             native_metrics_required: false,
+            native_query_observations_required: false,
             trace_directives: "off".into(),
             log_directives: "off".into(),
             metric_exclusions: vec![],

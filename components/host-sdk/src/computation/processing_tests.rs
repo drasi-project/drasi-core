@@ -897,6 +897,7 @@ async fn loaded_plugin_case(plugin: &NativePlugin) -> anyhow::Result<()> {
         let input = InputEnvelope {
             port: PortId::try_new("in")?,
             envelope: super::envelope(&ComponentId::try_new("source")?, sequence),
+            execution_context: Default::default(),
         };
         let result = component.transform(input).await;
         assert_eq!(result.is_err(), fail);
@@ -997,6 +998,7 @@ impl EnvelopeSource for OneSource {
         Ok(self.envelope.take().map(|envelope| OutputEnvelope {
             port: PortId::try_new("out").expect("fixture port"),
             envelope,
+            execution_context: Default::default(),
         }))
     }
 }

@@ -40,6 +40,7 @@ pub(super) fn bind(
             tracing: graph.policy().tracing_enabled(),
             metrics: graph.policy().metrics_enabled(),
             native_metrics_required: graph.policy().native_metrics_required(),
+            native_query_observations_required: graph.policy().native_query_observations_required(),
             trace_directives: graph.trace_directives(),
             log_directives: logging.as_ref().map_or_else(
                 || "off".into(),
@@ -91,6 +92,25 @@ impl RuntimePluginTelemetry {
         self.diagnostics.record(TelemetryLoss::Invalid);
         TelemetrySubmission::Invalid
     }
+
+    fn query_owner(&self) -> Result<Arc<ComponentObservations>> {
+        if self.config.scope.semantic_kind()
+            != Some(drasi_computation_contracts::ComponentSemanticKind::Query)
+        {
+            return Err(TelemetryError::Unsupported(
+                "query observations outside semantic Query scope",
+            ));
+        }
+        if !self.lifetime.is_active()? {
+            return Err(TelemetryError::Retired);
+        }
+        let owner = self.owner.upgrade().ok_or(TelemetryError::Retired)?;
+        if owner.generation != self.config.generation || !owner.lifetime.is_active()? {
+            return Err(TelemetryError::Retired);
+        }
+        owner.bind_query_metrics()?;
+        Ok(owner)
+    }
 }
 
 impl PluginTelemetryBackend for RuntimePluginTelemetry {
@@ -123,6 +143,49 @@ impl PluginTelemetryBackend for RuntimePluginTelemetry {
     }
     fn has_span_collector(&self) -> bool {
         self.spans.is_some()
+    }
+    fn supports_query_observations(&self) -> bool {
+        self.config.scope.semantic_kind()
+            == Some(drasi_computation_contracts::ComponentSemanticKind::Query)
+            && self.owner.upgrade().is_some_and(|owner| {
+                [
+                    "query.evaluate",
+                    "query.commit",
+                    "query.bootstrap",
+                    "component.scheduled",
+                    "query.prepare_input",
+                    "query.prepare_output",
+                    "query.finalize",
+                ]
+                .iter()
+                .any(|name| owner.config.policy().allows_span(name))
+                    || [
+                        "drasi.query.events_processed",
+                        "drasi.query.results_emitted",
+                        "drasi.query.engine.duration",
+                        "drasi.query.commit.duration",
+                        "drasi.query.outbox.entries",
+                        "drasi.query.live_results",
+                    ]
+                    .iter()
+                    .any(|name| owner.config.policy().allows_metric(name))
+            })
+    }
+    fn begin_query_observation(
+        &self,
+        request: &QueryObservationRequest,
+    ) -> Result<Option<Box<dyn QueryObservation>>> {
+        request.validate()?;
+        let owner = self.query_owner()?;
+        if !self.supports_query_observations() {
+            return Ok(None);
+        }
+        super::native_query::RuntimeQueryObservation::begin(owner, self.lifetime.clone(), request)
+    }
+    fn query_observation_event(&self, event: QueryObservationEvent) -> Result<()> {
+        event.validate()?;
+        self.query_owner()?
+            .native_query_event(event, &self.lifetime)
     }
     fn is_active(&self) -> Result<bool> {
         self.lifetime.is_active()
@@ -241,6 +304,64 @@ impl Drop for ComponentObservations {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_boundaries_reject_non_query_identity_and_validate_disabled_requests() {
+        use drasi_computation_contracts::{ComponentRole, ComponentSemanticKind};
+        for (profile, enabled) in [
+            (TelemetryProfile::Off, false),
+            (TelemetryProfile::Off, true),
+            (TelemetryProfile::Debug, false),
+            (TelemetryProfile::Debug, true),
+        ] {
+            let active = profile != TelemetryProfile::Off && enabled;
+            let graph = TelemetryOptions::new(
+                TelemetrySettings::new(profile)
+                    .with_metrics(false)
+                    .with_tracing(enabled),
+            )
+            .with_instance_id("instance")
+            .resolve("graph", None)
+            .unwrap();
+            for kind in [ComponentSemanticKind::Query, ComponentSemanticKind::Transformer] {
+                let id = crate::test_helpers::component_id(kind.as_str());
+                let owner = graph
+                    .observations(id.clone(), ComponentRole::Transformer, kind, 1)
+                    .unwrap();
+                let binding = bind(
+                    &owner,
+                    TelemetryScope::graph("instance", "graph")
+                        .unwrap()
+                        .component(id, ComponentRole::Transformer, kind),
+                    "native",
+                    None,
+                )
+                .unwrap();
+                assert_eq!(
+                    binding.supports_query_observations(),
+                    active && kind == ComponentSemanticKind::Query
+                );
+                let mut request = QueryObservationRequest {
+                    kind: QueryObservationKind::Transaction,
+                    phase: QueryObservationPhase::Steady,
+                    parent: None,
+                    change_count: None,
+                };
+                let result = binding.begin_query_observation(&request);
+                if kind == ComponentSemanticKind::Query {
+                    assert_eq!(result.unwrap().is_some(), active);
+                } else {
+                    assert!(matches!(result, Err(TelemetryError::Unsupported(_))));
+                }
+                request.change_count = Some(u64::MAX);
+                assert!(matches!(
+                    binding.begin_query_observation(&request),
+                    Err(TelemetryError::Invalid(_))
+                ));
+            }
+        }
+    }
+
     #[test]
     fn deferred_resource_bindings_follow_resource_owner_not_component_publications() {
         let graph = GraphTelemetry::default();

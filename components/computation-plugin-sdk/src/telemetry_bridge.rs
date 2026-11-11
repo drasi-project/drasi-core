@@ -43,6 +43,7 @@ impl Drop for BindingSlot {
 #[derive(Debug)]
 struct ClientState {
     host: HostLease,
+    query: Option<Arc<crate::query_transport::QueryClient>>,
     config: Arc<PluginTelemetryConfig>,
     traces: Targets,
     logs: Targets,
@@ -62,6 +63,7 @@ impl Client {
     unsafe fn new(
         host: *const abi::telemetry::HostTelemetryV2,
         bytes: abi::BorrowedBytes,
+        query: Option<Arc<crate::query_transport::QueryClient>>,
     ) -> anyhow::Result<(Self, ExecutionContext)> {
         let host = *unsafe { transport::checked_table(host)? };
         anyhow::ensure!(
@@ -83,6 +85,10 @@ impl Client {
             MAX_TELEMETRY_RECORD_BYTES,
         )?;
         let config = frame.config;
+        anyhow::ensure!(
+            !config.native_query_observations_required || query.is_some(),
+            "required native query observation callbacks are unavailable"
+        );
         let context = frame.context.map(ExecutionContext::new).unwrap_or_default();
         anyhow::ensure!(
             !config.tracing || host.capabilities & abi::telemetry::SPANS != 0,
@@ -111,6 +117,7 @@ impl Client {
         Ok((
             Self(Arc::new(ClientState {
                 host: HostLease(host),
+                query,
                 config: Arc::new(config),
                 traces,
                 logs,
@@ -135,6 +142,28 @@ impl Client {
 }
 
 impl PluginTelemetryBackend for Client {
+    fn supports_query_observations(&self) -> bool {
+        self.0.query.is_some()
+    }
+    fn begin_query_observation(
+        &self,
+        request: &QueryObservationRequest,
+    ) -> Result<Option<Box<dyn QueryObservation>>> {
+        match &self.0.query {
+            Some(query) => query
+                .begin(request, self.0.config.limits.record_bytes)
+                .inspect_err(|_| self.0.diagnostics.record(TelemetryLoss::Invalid)),
+            None => Ok(None),
+        }
+    }
+    fn query_observation_event(&self, event: QueryObservationEvent) -> Result<()> {
+        match &self.0.query {
+            Some(query) => query
+                .event(event, self.0.config.limits.record_bytes)
+                .inspect_err(|_| self.0.diagnostics.record(TelemetryLoss::Invalid)),
+            None => Ok(()),
+        }
+    }
     fn config(&self) -> &PluginTelemetryConfig {
         &self.0.config
     }
@@ -344,7 +373,34 @@ pub unsafe extern "C" fn with_scope(
     state: *mut c_void,
 ) -> abi::Status {
     transport::status_boundary(|| {
-        let (client, context) = unsafe { Client::new(host, config) }.map_err(Failure::from)?;
+        let (client, context) =
+            unsafe { Client::new(host, config, None) }.map_err(Failure::from)?;
+        let _dispatch = tracing::dispatcher::set_default(crate::telemetry_capture::dispatch());
+        let binding = PluginTelemetry::new(Arc::new(client));
+        let scope = ExecutionScope::new(context)
+            .with_component(binding.config().scope.clone(), binding.config().generation)
+            .with_plugin_telemetry(Some(binding))
+            .with_adapter(Some(Arc::new(
+                crate::telemetry_capture::NativeContextAdapter,
+            )));
+        scope.in_scope(|| unsafe { transport::take_status(call(state)) })
+    })
+}
+
+/// # Safety
+/// Both callback tables and the synchronous borrowing callback obey telemetry V4.
+pub unsafe extern "C" fn with_query_scope(
+    host: *const abi::telemetry::HostTelemetryV2,
+    query: *const abi::telemetry::HostQueryTelemetryV4,
+    config: abi::BorrowedBytes,
+    call: abi::telemetry::ScopedCall,
+    state: *mut c_void,
+) -> abi::Status {
+    transport::status_boundary(|| {
+        let query =
+            unsafe { crate::query_transport::QueryClient::new(query) }.map_err(Failure::from)?;
+        let (client, context) =
+            unsafe { Client::new(host, config, Some(query)) }.map_err(Failure::from)?;
         let _dispatch = tracing::dispatcher::set_default(crate::telemetry_capture::dispatch());
         let binding = PluginTelemetry::new(Arc::new(client));
         let scope = ExecutionScope::new(context)

@@ -223,6 +223,26 @@ resource-throughput metrics are created.
 Old hosts retain supported base/V1 behavior with scoped metrics disabled.
 Required native metrics fail before construction when their capability is absent.
 
+Native query instrumentation negotiates telemetry V4, alongside the unchanged
+V1/V2/V3 and native ABI 2/wire 2 contracts. Its separate query table delegates
+allowlisted query boundaries to the host's existing query span and metric
+machinery; it cannot register framework metrics. `query_telemetry::QueryTelemetry`
+captures the current binding and exposes `enabled`, `begin`, and `event`.
+An instrumented semantic-query transformer must explicitly override
+`Factory::supports_query_instrumentation() -> bool`; exporting the SDK's V4
+table alone does not claim evaluator or phase-hook coverage. The host queries
+this opt-in on each validated factory handle before construction. Neither the
+base metadata nor its serialized capabilities gain new fields, so an old host
+can still read a new plugin's base contract while ignoring optional V4.
+An observation guard restores both host and plugin scope on each future poll
+and cancellation; `finish` releases its opaque handle and dropping an unfinished
+guard reports cancellation exactly once. Native processing work retains that
+scope across host-owned transaction callbacks. Handles are binding/generation
+specific and bounded by the existing open-span limits. Missing optional support
+is diagnosed; `TelemetrySettings::require_native_query_observations()` rejects
+an incapable query plugin before construction. Rebuild the actual cdylib to
+enable this optional extension.
+
 The host span handoff defaults to 1,024 records and 16 MiB encoded bytes with a
 64 KiB maximum record; queued, reserved and in-flight work all count. SDK capture
 limits open spans to 256 per binding (4,096 per library), with fixed bounds of 64

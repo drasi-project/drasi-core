@@ -910,7 +910,7 @@ mod tests {
                 scope: TelemetryScope::graph("capture", "graph")
                     .unwrap()
                     .component(
-                        ComponentId::try_new("probe").unwrap(),
+                        ComponentId::try_new("3f89f121-c0a3-476a-b3eb-a2f7ed041d3e").unwrap(),
                         ComponentRole::Service,
                         ComponentSemanticKind::Service,
                     ),
@@ -919,6 +919,7 @@ mod tests {
                 tracing: true,
                 metrics: false,
                 native_metrics_required: false,
+                native_query_observations_required: false,
                 trace_directives: "trace".into(),
                 log_directives: "off".into(),
                 metric_exclusions: vec![],

@@ -137,6 +137,46 @@ activation reuses the evaluator and clears Core's shadow future queue with the
 owned storage reset.
 Scheduled work uses the same Core evaluator and the same scoped indexes.
 
+### Query instrumentation across the native boundary
+
+The optional query-observation extension uses the existing host observability
+owner rather than plugin-prefixed substitutes for framework query metrics.
+It is independent of the output/recovery observations described above.
+
+| Measurement | Owner and boundary |
+|---|---|
+| Evaluation | Native query, through the Core evaluator's backend-neutral observer |
+| Preparation/finalization | Native query around actual input/output work |
+| Commit | Host's actual storage transaction commit, not the plugin call lifetime |
+| Input count | Successfully processed fresh input envelope, not result rows |
+| Result count | Newly published logical row changes, not replayed output |
+| Identity, filters, sampling, export | Host-assigned query generation and existing collection handles |
+
+Bootstrap uses one lazily selected linked root, including empty initialization;
+per-row evaluation detail is suppressed while bootstrap metric phases remain
+distinct. A scheduled root is selected only after due work is confirmed.
+Output replay gets a new attempt context but does not increment fresh-input,
+evaluation or newly published-result counters. Query observations never enter
+envelope encodings, result rows, checkpoint positions or recovery receipts.
+
+The negotiated scope callback is synchronous and entered per poll. Opaque host
+observation handles are bounded, cancelled on abandonment and fenced at component
+retirement. The host can require the new capability before construction; older
+plugins otherwise retain their explicitly diagnosed limitations. Existing base
+ABI and telemetry extension layouts are unchanged.
+
+After rebuilding the actual cdylib from the same SDK/Host contracts:
+
+```bash
+cargo build --locked -p drasi-computation-transformer-query --features dynamic-plugin
+cargo test --locked -p drasi-host-sdk --features otel-context --test native_query_observability
+cargo test --locked -p drasi-host-sdk --no-default-features --test native_query_observability
+```
+
+Both commands accept a shared absolute `CARGO_TARGET_DIR`; use the same directory
+for the library build and tests. The tests load the rebuilt library rather than
+substituting the linked reference query.
+
 From the Core checkout, `bash lib/tests/run-query-plugin.sh evaluator` exercises
 scoped access, actual loaded Core setup counts, SQLite bootstrap, live changes,
 restart, prepared refresh and setup/processing failures.

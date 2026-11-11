@@ -950,8 +950,11 @@ unsafe extern "C" fn run(
         let progress_call = state.progress_call().map_err(Failure::from)?;
         unsafe { work.retain.expect("validated")(work.context) };
         let work = Work(work, kind);
+        let execution_scope = drasi_lib::observability::ExecutionScope::capture();
+        let observer = drasi_lib::observability::NativeQueryScope::current()
+            .and_then(|scope| scope.observer());
         let (start, started) = tokio::sync::oneshot::channel();
-        let task = OperationTask(runtime.spawn(async move {
+        let task = OperationTask(runtime.spawn(execution_scope.scope(async move {
             // Release this task's owner reference before announcing settled work.
             let (_guard, owner) = (guard, owner);
             tokio::select! {
@@ -966,18 +969,18 @@ unsafe extern "C" fn run(
             let result = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => Err(Failure::cancelled()),
-                result = drive(&owner, &work, &_guard.0.component, _guard.0.progress.as_ref(), _guard.0.output.as_ref(), _guard.0.scheduling.as_ref()) => result.map_err(processing_failure),
+                result = drive(&owner, &work, &_guard.0.component, _guard.0.progress.as_ref(), _guard.0.output.as_ref(), _guard.0.scheduling.as_ref(), observer.as_ref()) => result.map_err(processing_failure),
             };
             if result.is_ok() {
                 if let Some(call) = progress_call { call.complete(); }
             }
             result
-        }));
+        })));
         let operation = transport::export_operation(
-            async move {
+            execution_scope.scope(async move {
                 let _ = start.send(());
                 task.result().await
-            },
+            }),
             None,
         );
         unsafe { transport::write_out(out, operation) }
@@ -1032,6 +1035,7 @@ async fn drive(
     progress: Option<&Arc<progress::Progress>>,
     output: Option<&Arc<output::Output>>,
     scheduling: Option<&Arc<scheduling::Scheduling>>,
+    observer: Option<&Arc<dyn drasi_core::computation::QueryObserver>>,
 ) -> drasi_core::computation::Result<Vec<u8>> {
     if let Some(progress) = progress {
         return Box::pin(async {
@@ -1077,6 +1081,7 @@ async fn drive(
                 scheduling.as_deref(),
                 reservations,
                 publication,
+                observer,
             )
             .await?;
             if !owner.is_transaction_group_member() {
@@ -1099,7 +1104,10 @@ async fn drive(
         })
         .await;
     }
-    drive_inner(owner, work, component, None, None, None, None, None).await
+    drive_inner(
+        owner, work, component, None, None, None, None, None, observer,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1112,6 +1120,7 @@ async fn drive_inner(
     scheduling: Option<&scheduling::Draft>,
     reservations: Option<drasi_lib::computation::v1::OutputReservations>,
     publication: Option<Publication>,
+    observer: Option<&Arc<dyn drasi_core::computation::QueryObserver>>,
 ) -> drasi_core::computation::Result<Vec<u8>> {
     let operation = async {
         let mut scope = RequestScope::new(
@@ -1174,25 +1183,28 @@ async fn drive_inner(
     };
     if let Some(publication) = publication {
         owner
-            .run_with_mutations(async {
-                let result = operation.await?;
-                let envelope = output
-                    .map(output::Draft::emission)
-                    .transpose()
-                    .map_err(operation_error)?
-                    .flatten();
-                let mut mutations = match reservations {
-                    Some(reservations) => reservations
-                        .mutations(envelope.as_ref())
-                        .map_err(operation_error)?,
-                    None => Vec::new(),
-                };
-                mutations.push(Box::new(publication));
-                Ok((result, mutations))
-            })
+            .run_with_mutations_observed(
+                async {
+                    let result = operation.await?;
+                    let envelope = output
+                        .map(output::Draft::emission)
+                        .transpose()
+                        .map_err(operation_error)?
+                        .flatten();
+                    let mut mutations = match reservations {
+                        Some(reservations) => reservations
+                            .mutations(envelope.as_ref())
+                            .map_err(operation_error)?,
+                        None => Vec::new(),
+                    };
+                    mutations.push(Box::new(publication));
+                    Ok((result, mutations))
+                },
+                observer,
+            )
             .await
     } else {
-        owner.run(operation).await
+        owner.run_observed(operation, observer).await
     }
 }
 

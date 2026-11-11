@@ -14,6 +14,15 @@ pub(crate) enum QueryPhase {
     Bootstrap = 1,
 }
 
+impl From<super::QueryObservationPhase> for QueryPhase {
+    fn from(phase: super::QueryObservationPhase) -> Self {
+        match phase {
+            super::QueryObservationPhase::Steady => Self::Steady,
+            super::QueryObservationPhase::Bootstrap => Self::Bootstrap,
+        }
+    }
+}
+
 impl QueryPhase {
     pub(crate) fn label(self) -> &'static str {
         match self {

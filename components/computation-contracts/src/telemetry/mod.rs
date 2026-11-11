@@ -18,6 +18,7 @@ mod otel;
 mod otel_completed;
 #[cfg(feature = "metrics-facade")]
 mod plugin;
+mod query;
 mod records;
 mod registration;
 #[cfg(feature = "metrics-facade")]
@@ -35,6 +36,7 @@ pub use otel::*;
 pub use otel_completed::*;
 #[cfg(feature = "metrics-facade")]
 pub use plugin::*;
+pub use query::*;
 pub use records::*;
 pub use registration::*;
 #[cfg(feature = "metrics-facade")]
@@ -175,6 +177,7 @@ impl TelemetryProfile {
             sampling: RootSampling::Always,
             distributed_tracing: false,
             native_metrics: false,
+            native_query_observations: false,
             handled_branch: None,
         }
     }
@@ -226,6 +229,7 @@ pub struct TelemetrySettings {
     sampling: RootSampling,
     distributed_tracing: bool,
     native_metrics: bool,
+    native_query_observations: bool,
     handled_branch: Option<HandledBranchLimits>,
 }
 
@@ -245,6 +249,7 @@ impl TelemetrySettings {
             sampling: RootSampling::Always,
             distributed_tracing: false,
             native_metrics: false,
+            native_query_observations: false,
             handled_branch: None,
         }
     }
@@ -280,6 +285,12 @@ impl TelemetrySettings {
         self
     }
 
+    /// Require the optional native query observation transport before construction.
+    pub fn require_native_query_observations(mut self) -> Self {
+        self.native_query_observations = true;
+        self
+    }
+
     /// Opt-in source-to-handled-sink timing, independent of traces and sampling.
     /// Metric disablement/exclusions still take precedence.
     pub fn with_handled_branch_latency(mut self, limits: HandledBranchLimits) -> Self {
@@ -300,6 +311,7 @@ impl TelemetrySettings {
         policy.sampling = self.sampling;
         policy.distributed_tracing = self.distributed_tracing;
         policy.native_metrics = self.native_metrics;
+        policy.native_query_observations = self.native_query_observations;
         policy.handled_branch = self
             .handled_branch
             .map(HandledBranchLimits::validate)
@@ -307,6 +319,12 @@ impl TelemetrySettings {
         if self.native_metrics && !policy.metrics {
             return Err(TelemetryError::Invalid(
                 "required native metrics need enabled metric collection".into(),
+            ));
+        }
+        if self.native_query_observations && !policy.traces && !policy.metrics {
+            return Err(TelemetryError::Invalid(
+                "required native query observations need enabled tracing or metric collection"
+                    .into(),
             ));
         }
         Ok(policy)
@@ -322,6 +340,7 @@ pub struct ResolvedTelemetry {
     sampling: RootSampling,
     distributed_tracing: bool,
     native_metrics: bool,
+    native_query_observations: bool,
     handled_branch: Option<HandledBranchLimits>,
 }
 
@@ -339,6 +358,9 @@ impl ResolvedTelemetry {
 
     pub fn native_metrics_required(&self) -> bool {
         self.native_metrics
+    }
+    pub fn native_query_observations_required(&self) -> bool {
+        self.native_query_observations
     }
     pub fn metric_exclusions(&self) -> &[String] {
         &self.exclusions
@@ -638,6 +660,30 @@ mod tests {
 
     #[test]
     fn required_context_and_metrics_are_explicit() {
+        assert!(!TelemetrySettings::default()
+            .resolve()
+            .unwrap()
+            .native_query_observations_required());
+        assert!(matches!(
+            TelemetrySettings::default()
+                .require_native_query_observations()
+                .resolve(),
+            Err(TelemetryError::Invalid(_))
+        ));
+        assert!(matches!(
+            TelemetrySettings::new(TelemetryProfile::Basic)
+                .with_tracing(false)
+                .with_metrics(false)
+                .require_native_query_observations()
+                .resolve(),
+            Err(TelemetryError::Invalid(_))
+        ));
+        assert!(TelemetrySettings::new(TelemetryProfile::Basic)
+            .with_metrics(false)
+            .require_native_query_observations()
+            .resolve()
+            .unwrap()
+            .native_query_observations_required());
         assert!(TelemetrySettings::default()
             .require_distributed_tracing()
             .resolve()

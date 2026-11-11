@@ -134,6 +134,7 @@ impl sdk::NativeTransformer for Transformer {
             })
             .await?;
         Ok(vec![OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope: GraphChangeCodec::derive_changes(
                 &input.envelope,

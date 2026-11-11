@@ -75,6 +75,7 @@ impl SnapshotBootstrap {
         evaluator: &QueryEvaluator,
         output: &QueryOutput,
         scopes: Option<&drasi_query_common::QueryInputScopes>,
+        telemetry: &super::observations::QueryObservations,
     ) -> anyhow::Result<(InputCursors, Rows)> {
         let mut cursors = InputCursors::new();
         let mut rows = Rows::new();
@@ -94,16 +95,21 @@ impl SnapshotBootstrap {
             );
             while let Some(record) = snapshot.records.next().await {
                 let element = GraphChangeCodec::decode_element(&record?)?.try_into()?;
-                let results = evaluator
-                    .evaluate_input_batch::<false>(
+                let results = telemetry
+                    .evaluate::<false>(
+                        evaluator,
                         QueryInputBatch::new(
                             vec![SourceChange::Insert { element }],
                             ChangeOrdering::EventTime,
                         )
                         .with_optional_input_scope(scope.clone()),
+                        drasi_computation_contracts::telemetry::QueryObservationPhase::Bootstrap,
                     )
                     .await?;
                 output.apply_initial(&mut rows, &results)?;
+                telemetry.input(
+                    drasi_computation_contracts::telemetry::QueryObservationPhase::Bootstrap,
+                )?;
             }
             cursors.insert(
                 (input.input_port.clone(), input.stream.clone()),

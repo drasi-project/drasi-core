@@ -9,7 +9,7 @@ RUSTFLAGS := -Dwarnings
        build-native-context-fixtures test-native-context observability-demo observability-demo-smoke observability-demo-suite-smoke \
        observability-demo-controls observability-demo-latency observability-demo-postgres observability-demo-postgres-smoke \
        observability-demo-incoming-trace \
-       build-native-telemetry-fixtures test-native-telemetry \
+       build-native-telemetry-fixtures test-native-telemetry test-native-query-observability \
        build-native-plugins build-native-standard-plugins build-native-network-plugins build-native-mysql-plugins build-native-postgres-plugins build-native-sqlite-plugins test-native-network test-native-mysql test-native-sqlite \
        build-plugins build-plugins-release list-plugins \
        publish-plugins publish-plugins-dry-run publish-plugins-release \
@@ -24,6 +24,7 @@ help:
 	@echo "  test-host-sdk             - Build test plugins and run host-sdk integration tests"
 	@echo "  test-native-context       - Build SDK-only context fixtures and qualify the native context ABI"
 	@echo "  test-native-telemetry     - Build real SDK libraries and qualify shared telemetry"
+	@echo "  test-native-query-observability - Rebuild the query library and verify authoritative observations"
 	@echo "  observability-demo        - Run the main HTTP-only telemetry demo; Ctrl-C cleans up"
 	@echo "  observability-demo-controls - Run HTTP-only signal controls"
 	@echo "  observability-demo-incoming-trace - Verify an incoming HTTP trace ID and parent, then leave the demo live"
@@ -139,7 +140,7 @@ build-native-plugins: check-native-dependencies build-native-standard-plugins bu
 
 .PHONY: build-native-query-plugin
 build-native-query-plugin:
-	cargo build --lib -p drasi-computation-transformer-query --features dynamic-plugin
+	cargo build --locked --lib -p drasi-computation-transformer-query --features dynamic-plugin
 
 check-native-dependencies:
 	python3 ci/check_native_dependencies.py
@@ -156,9 +157,13 @@ test-native-context: build-native-context-fixtures
 build-native-telemetry-fixtures: build-native-context-fixtures
 	cargo build -p drasi-computation-plugin-sdk --example telemetry_fixture --example handled_branch_fixture --example handled_branch_v2_fixture --no-default-features --locked
 
-test-native-telemetry: build-native-telemetry-fixtures
+test-native-telemetry: build-native-telemetry-fixtures test-native-query-observability
 	cargo test -p drasi-host-sdk --features otel-context --test native_telemetry --test native_execution_context --test native_handled_branch_latency --test logging_policy --locked -- --test-threads=1
 	cargo test -p drasi-host-sdk --no-default-features --test native_metrics_telemetry --test native_handled_branch_latency --locked -- --test-threads=1
+
+test-native-query-observability: build-native-query-plugin
+	cargo test -p drasi-host-sdk --features otel-context --test native_query_observability --locked -- --test-threads=1
+	cargo test -p drasi-host-sdk --no-default-features --test native_query_observability --locked -- --test-threads=1
 
 .PHONY: test-handled-branch-ownership
 test-handled-branch-ownership:
