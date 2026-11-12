@@ -30,16 +30,22 @@ struct Config {
 }
 
 impl Config {
+    fn releases(&self, package: &Package) -> bool {
+        self.package
+            .iter()
+            .find(|p| p.name == package.name)
+            .and_then(|p| p.policy.release)
+            .or(self.workspace.release)
+            .unwrap_or(true)
+    }
+
     fn publishes(&self, package: &Package) -> bool {
         let policy = self.package.iter().find(|p| p.name == package.name);
-        is_publishable(package)
+        self.releases(package)
+            && is_publishable(package)
             && policy
                 .and_then(|p| p.policy.publish)
                 .or(self.workspace.publish)
-                .unwrap_or(true)
-            && policy
-                .and_then(|p| p.policy.release)
-                .or(self.workspace.release)
                 .unwrap_or(true)
     }
 }
@@ -97,8 +103,12 @@ fn blockers(
     config: &Config,
     mut published: impl FnMut(&str, &VersionReq) -> Result<bool, String>,
 ) -> Result<Vec<String>, String> {
-    let releasing: Vec<_> = packages.iter().filter(|p| config.publishes(p)).collect();
-    let order = release_order(&releasing)?;
+    let releasing: Vec<_> = packages.iter().filter(|p| config.releases(p)).collect();
+    // Non-publishable members can change the relative order of published crates.
+    let order: Vec<_> = release_order(&releasing)?
+        .into_iter()
+        .filter(|p| config.publishes(p))
+        .collect();
     let positions: BTreeMap<_, _> = order
         .iter()
         .enumerate()
@@ -301,6 +311,40 @@ mod tests {
         })
         .unwrap()
         .is_empty());
+    }
+
+    #[test]
+    fn non_publishable_members_affect_order_unless_release_is_disabled() {
+        for (policy, cargo_publish, blocked) in [
+            ("", Some(Vec::new()), true),
+            ("[[package]]\nname='bridge'\npublish=false\n", None, true),
+            ("[[package]]\nname='bridge'\nrelease=false\n", None, false),
+            (
+                "[workspace]\nrelease=false\n[[package]]\nname='application'\nrelease=true\n\
+                 [[package]]\nname='consumer'\nrelease=true\n",
+                None,
+                false,
+            ),
+        ] {
+            let mut packages = vec![
+                package("bridge", json!([dependency("consumer", None, "^0.3.14")])),
+                package("application", json!([])),
+                package(
+                    "consumer",
+                    json!([dependency("application", Some("dev"), "^0.3.14")]),
+                ),
+            ];
+            packages[0].publish = cargo_publish;
+            let config = toml::from_str(policy).unwrap();
+            let failures = blockers(&packages, &config, |_, _| Ok(false)).unwrap();
+            if blocked {
+                assert_eq!(failures.len(), 1, "{policy}");
+                assert!(failures[0].contains("consumer --dev application"));
+                assert!(failures[0].contains("not published earlier"));
+            } else {
+                assert!(failures.is_empty(), "{policy}");
+            }
+        }
     }
 
     #[test]

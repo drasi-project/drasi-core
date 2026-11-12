@@ -160,7 +160,9 @@ Before production crate publication, the shared preflight
 workspace dev-dependencies against the pinned release-plz publish order. Each
 requirement must either match a workspace version published earlier in that
 order or an existing non-yanked crates.io version. The check respects
-`publish = false` and release-plz's release/publish exclusions. Path-only
+`publish = false` and release-plz's release/publish exclusions. Like the pinned
+release-plz, it orders all release-enabled members before filtering publishable
+crates, since non-publishable members can affect their relative order. Path-only
 dev-dependencies are omitted by Cargo when publishing and do not need registry
 versions.
 
