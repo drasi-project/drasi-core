@@ -843,11 +843,15 @@ class WorkflowTests(unittest.TestCase):
         jobs = repair_tests.workflow(ROOT / ".github/workflows/release-plz.yml")["jobs"]
         steps = jobs["release-plz"]["steps"]
         release_pr = next(step for step in steps if "release-plz release-pr " in step.get("run", ""))
+        preflight = next(step for step in steps
+                         if step.get("name") == "Check release dev-dependency availability")
         freeze = next(step for step in steps if step.get("id") == "freeze")
         publish_crates = next(step for step in steps if step.get("name") == "Publish crates")
         published = next(step for step in steps if step.get("id") == "publish_result")
         self.assertIn("release-plz release ", publish_crates["run"])
         self.assertIn("release-candidate.py check", published["run"])
+        self.assertEqual("cargo run --locked -p xtask -- check-publish-dependencies", preflight["run"])
+        self.assertLess(steps.index(preflight), steps.index(freeze))
         self.assertLess(steps.index(freeze), steps.index(publish_crates))
         self.assertLess(steps.index(publish_crates), steps.index(published))
         for release_commit, force, dry_run in (
@@ -863,7 +867,7 @@ class WorkflowTests(unittest.TestCase):
                 }
                 self.assertEqual(not (release_commit or force or dry_run),
                                  repair_tests.expression(release_pr["if"], context))
-                for step in (freeze, publish_crates, published):
+                for step in (preflight, freeze, publish_crates, published):
                     self.assertEqual((release_commit or force) and not dry_run,
                                      repair_tests.expression(step["if"], context))
         self.assertEqual("release-plz", jobs["publish-plugins"]["needs"])
@@ -875,14 +879,53 @@ class WorkflowTests(unittest.TestCase):
         nightly = repair_tests.workflow(ROOT / ".github/workflows/nightly.yml")["jobs"]
         prepare_steps = nightly["prepare"]["steps"]
         update = next(step for step in prepare_steps if step.get("run") == "release-plz update")
+        nightly_preflight = next(step for step in prepare_steps
+                                 if step.get("name") == preflight["name"])
         freeze = next(step for step in prepare_steps if step.get("id") == "freeze")
-        self.assertLess(prepare_steps.index(update), prepare_steps.index(freeze))
+        self.assertEqual(preflight["run"], nightly_preflight["run"])
+        self.assertNotIn("if", nightly_preflight)
+        self.assertLess(prepare_steps.index(update), prepare_steps.index(nightly_preflight))
+        self.assertLess(prepare_steps.index(nightly_preflight), prepare_steps.index(freeze))
         self.assertEqual("prepare", nightly["package"]["needs"])
         self.assertTrue(any("release-candidate.py package " in step.get("run", "")
                             for step in nightly["package"]["steps"]))
         self.assertNotIn("release-plz release", json.dumps(nightly))
         self.assertEqual({"prepare", "package"}, set(nightly["publish-plugins"]["needs"]))
         self.assertEqual({"prepare", "package", "publish-plugins"}, set(nightly["handoff"]["needs"]))
+
+    def test_release_dry_run_checks_prepared_versions_and_stops_on_preflight_failure(self):
+        steps = repair_tests.workflow(
+            ROOT / ".github/workflows/release-plz.yml")["jobs"]["release-plz"]["steps"]
+        dry_run = next(step for step in steps
+                       if step.get("name") == "Dry run - preview version bumps")
+        self.assertTrue(repair_tests.expression(dry_run["if"], {"inputs": {"dry_run": True}}))
+        self.assertFalse(repair_tests.expression(dry_run["if"], {"inputs": {"dry_run": False}}))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calls = root / "calls"
+            for name in ("release-plz", "cargo"):
+                executable = root / name
+                executable.write_text(
+                    "#!/bin/sh\n"
+                    f"echo '{name}' \"$@\" >> \"$CALLS\"\n"
+                    + ('exit "$PREFLIGHT_STATUS"\n' if name == "cargo" else "exit 0\n"))
+                executable.chmod(0o755)
+            for status in (0, 1):
+                with self.subTest(status=status):
+                    calls.write_text("")
+                    result = subprocess.run(
+                        ["bash", "-e", "-c", dry_run["run"]], cwd=ROOT,
+                        capture_output=True, text=True,
+                        env=os.environ | {
+                            "PATH": directory + os.pathsep + os.environ["PATH"],
+                            "CALLS": str(calls), "PREFLIGHT_STATUS": str(status),
+                        })
+                    self.assertEqual(status, result.returncode, result.stderr)
+                    self.assertEqual([
+                        "release-plz update",
+                        "cargo run --locked -p xtask -- check-publish-dependencies",
+                    ], calls.read_text().splitlines())
+                    self.assertEqual(status == 0, "Dry run complete" in result.stdout)
 
     def test_all_targets_consume_same_candidate_and_keep_native_checks(self):
         document = repair_tests.workflow(ROOT / ".github/workflows/publish-plugins.yml")

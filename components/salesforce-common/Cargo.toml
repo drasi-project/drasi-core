@@ -35,8 +35,6 @@ tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 
 [dev-dependencies]
-drasi-reaction-application.workspace = true
-drasi-source-application.workspace = true
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
 tokio-stream = { version = "0.1", features = ["net"] }

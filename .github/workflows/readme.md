@@ -155,6 +155,41 @@ Workspace entries, or dependencies whose changed constraints require it, may
 still change. Generated release PRs must include the corresponding lock changes.
 Review their manifest and lock diffs together.
 
+Before production crate publication, the shared preflight
+`cargo run --locked -p xtask -- check-publish-dependencies` checks versioned
+workspace dev-dependencies against the pinned release-plz publish order. Each
+requirement must either match a workspace version published earlier in that
+order or an existing non-yanked crates.io version. The check respects
+`publish = false` and release-plz's release/publish exclusions. Like the pinned
+release-plz, it orders all release-enabled members before filtering publishable
+crates, since non-publishable members can affect their relative order. Packages
+whose release tag already exists are then skipped, as release-plz will not
+republish them even if their version was yanked. Dependencies on these packages
+must have a matching non-yanked registry version. The preflight reads local tags
+(all callers use a full-history checkout), using release-plz's default tag names;
+custom `git_tag_name` templates fail closed rather than assuming publication.
+Path-only dev-dependencies are omitted by Cargo when publishing and do not need registry
+versions. The preflight checks manifest declarations, including workspace
+inheritance, to distinguish path-only dependencies from explicit `version = "*"`
+requirements, which still require registry resolution.
+
+Release dry runs and nightly preparation run the same check **after**
+`release-plz update`, before declaring the preview complete or freezing the
+candidate. Nightly's multi-crate `cargo package` can resolve unpublished siblings
+locally, so packaging alone does not establish that production's sequential
+publication will succeed. The preflight makes read-only crates.io index requests;
+network, HTTP, or index parsing failures fail the job rather than assuming a
+dependency exists. It performs no publishing and does not change manifests or the
+lockfile. `publish_no_verify = true` skips only Cargo's verification build, not
+registry dependency resolution.
+
+For a failure, prefer moving cross-component tests into a `publish = false` test
+crate, or use a path-only dev-dependency where the tests are deliberately
+workspace-only. Do not weaken the check, change release versions, or add retries
+for an ordering problem. The existing offline
+`check-publish-dependency-cycles` check remains a separate PR gate; the online
+preflight also detects missing later dev-dependencies without a cycle.
+
 To intentionally update dependencies, run `cargo update` (or
 `cargo update -p <package> --precise <version>`), review and commit `Cargo.lock`
 together with any manifest changes, and run the normal tests and release
@@ -240,6 +275,7 @@ rather than duplicating it between callers.
 |------|--------------------|-------------------|
 | Version preparation | `release-plz release-pr` prepares reviewed changes; publishing uses the merged release revision | `release-plz update` prepares changes locally, without a PR or commit |
 | Dependencies | Committed lockfile baseline; release preparation reconciles workspace versions without a broad refresh | Same configuration and baseline policy; no fresh-dependency mode |
+| Publish-order preflight | Shared xtask checks versioned workspace dev-dependencies against release order and read-only crates.io availability before publication; dry run checks after version preparation | Same check after version preparation, before candidate freeze; no crates.io writes |
 | Prepared candidate | Shared freeze helper runs before crate publication; its artifact and hash feed every plugin target | Same helper runs after version preparation; its artifact and hash feed packaging and every plugin target |
 | Crates | `release-plz release` publishes crates and creates official release records; `publish_no_verify = true` skips the isolated verification build | `cargo package --locked` verifies extracted package sources and retains archives; no crates.io writes or official release records |
 | Plugins and catalog | Shared eight-target publisher, native/glibc checks, signing, verification, and public visibility checks | Same implementation and required checks, but plugins, catalog, and signatures use the isolated nightly namespace and unique run/attempt plugin tags |
@@ -278,6 +314,7 @@ cover strict input validation and repair isolation. Both suites already run in
 [test.yml](test.yml). Run them when changing these contracts:
 
 ```bash
+cargo test --locked -p xtask publish_dependencies
 python3 .github/scripts/release-candidate.test.py
 python3 .github/scripts/repair-plugin-signatures.test.py
 actionlint .github/workflows/nightly.yml .github/workflows/release-plz.yml .github/workflows/publish-plugins.yml

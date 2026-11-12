@@ -11,6 +11,7 @@ workspace = true
 # Test dependencies only - this crate has no library code
 drasi-lib.workspace = true
 drasi-core.workspace = true
+drasi-salesforce-common.workspace = true
 drasi-source-postgres.workspace = true
 drasi-source-application.workspace = true
 drasi-source-http = { path = "../components/sources/http" }
