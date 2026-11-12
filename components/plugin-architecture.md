@@ -150,7 +150,9 @@ manifest field from the selected source.
 existing metadata ABI field into that same storage. Shared build/publication
 tooling validates it without loading the binary, including cross-compiled
 targets, before publishing the JSON metadata and OCI annotations. No FFI layout
-change is needed. See the
+change is needed. The reader is inline so MinGW does not auto-export an unused
+copy and retain its search string as a second marker in plugin DLLs. Missing,
+malformed, or multiple markers are rejected. See the
 [host rollout and legacy policy](host-sdk/README.md#registry-compatibility-and-host-migration).
 The 0.15 source subscription ABI carries a separate presence flag for the
 resume sequence. This lets plugins distinguish a completed bootstrap at
