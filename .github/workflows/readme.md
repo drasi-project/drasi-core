@@ -164,7 +164,9 @@ order or an existing non-yanked crates.io version. The check respects
 release-plz, it orders all release-enabled members before filtering publishable
 crates, since non-publishable members can affect their relative order. Path-only
 dev-dependencies are omitted by Cargo when publishing and do not need registry
-versions.
+versions. The preflight checks manifest declarations, including workspace
+inheritance, to distinguish path-only dependencies from explicit `version = "*"`
+requirements, which still require registry resolution.
 
 Release dry runs and nightly preparation run the same check **after**
 `release-plz update`, before declaring the preview complete or freezing the

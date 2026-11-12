@@ -51,6 +51,8 @@ struct Package {
 #[derive(Deserialize, Clone)]
 struct Dependency {
     name: String,
+    rename: Option<String>,
+    target: Option<String>,
     req: String,
     kind: Option<String>,
     path: Option<PathBuf>,
@@ -1861,6 +1863,8 @@ mod tests {
     fn dependency(name: &str, req: &str, kind: Option<&str>) -> Dependency {
         Dependency {
             name: name.to_string(),
+            rename: None,
+            target: None,
             req: req.to_string(),
             kind: kind.map(str::to_string),
             path: Some(PathBuf::from(name)),
