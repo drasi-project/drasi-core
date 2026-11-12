@@ -162,8 +162,13 @@ requirement must either match a workspace version published earlier in that
 order or an existing non-yanked crates.io version. The check respects
 `publish = false` and release-plz's release/publish exclusions. Like the pinned
 release-plz, it orders all release-enabled members before filtering publishable
-crates, since non-publishable members can affect their relative order. Path-only
-dev-dependencies are omitted by Cargo when publishing and do not need registry
+crates, since non-publishable members can affect their relative order. Packages
+whose release tag already exists are then skipped, as release-plz will not
+republish them even if their version was yanked. Dependencies on these packages
+must have a matching non-yanked registry version. The preflight reads local tags
+(all callers use a full-history checkout), using release-plz's default tag names;
+custom `git_tag_name` templates fail closed rather than assuming publication.
+Path-only dev-dependencies are omitted by Cargo when publishing and do not need registry
 versions. The preflight checks manifest declarations, including workspace
 inheritance, to distinguish path-only dependencies from explicit `version = "*"`
 requirements, which still require registry resolution.

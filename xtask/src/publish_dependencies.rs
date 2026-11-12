@@ -13,6 +13,7 @@ use std::process::Command;
 struct Policy {
     publish: Option<bool>,
     release: Option<bool>,
+    git_tag_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -48,6 +49,26 @@ impl Config {
                 .and_then(|p| p.policy.publish)
                 .or(self.workspace.publish)
                 .unwrap_or(true)
+    }
+
+    fn release_tag(&self, package: &Package, multi_package: bool) -> Result<String, String> {
+        let template = self
+            .package
+            .iter()
+            .find(|p| p.name == package.name)
+            .and_then(|p| p.policy.git_tag_name.as_ref())
+            .or(self.workspace.git_tag_name.as_ref());
+        if template.is_some() {
+            return Err(
+                "Dev-dependency preflight does not support custom git_tag_name templates".into(),
+            );
+        }
+        // release-plz v0.3.157 uses the number of release-enabled members.
+        Ok(if multi_package {
+            format!("{}-v{}", package.name, package.version)
+        } else {
+            format!("v{}", package.version)
+        })
     }
 }
 
@@ -171,14 +192,20 @@ fn blockers(
     packages: &[Package],
     config: &Config,
     workspace_root: &Path,
+    tags: &BTreeSet<String>,
     mut published: impl FnMut(&str, &VersionReq) -> Result<bool, String>,
 ) -> Result<Vec<String>, String> {
     let releasing: Vec<_> = packages.iter().filter(|p| config.releases(p)).collect();
     // Non-publishable members can change the relative order of published crates.
-    let order: Vec<_> = release_order(&releasing)?
-        .into_iter()
-        .filter(|p| config.publishes(p))
-        .collect();
+    let mut order = Vec::new();
+    for package in release_order(&releasing)? {
+        // release-plz skips tagged packages, even if their version was yanked.
+        if config.publishes(package)
+            && !tags.contains(&config.release_tag(package, releasing.len() > 1)?)
+        {
+            order.push(package);
+        }
+    }
     let positions: BTreeMap<_, _> = order
         .iter()
         .enumerate()
@@ -216,7 +243,7 @@ fn blockers(
                         local.version
                     ),
                     Some(_) => "not published earlier in release order".into(),
-                    None => "excluded from publication".into(),
+                    None => "excluded from publication or release tag already exists".into(),
                 };
                 failures.push(format!(
                     "{} --dev {} {}: no matching non-yanked crates.io version; {timing}",
@@ -302,6 +329,23 @@ fn parse_registry_response(name: &str, text: &str) -> Result<Vec<Version>, Strin
     }
 }
 
+fn release_tags(workspace_root: &Path) -> Result<BTreeSet<String>, String> {
+    let output = Command::new("git")
+        .current_dir(workspace_root)
+        .args(["for-each-ref", "--format=%(refname:strip=2)", "refs/tags"])
+        .output()
+        .map_err(|error| format!("Cannot read release tags: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Cannot read release tags: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let tags = String::from_utf8(output.stdout)
+        .map_err(|error| format!("Invalid release tags: {error}"))?;
+    Ok(tags.lines().map(str::to_owned).collect())
+}
+
 pub(super) fn check(metadata: &CargoMetadata) -> Result<(), String> {
     let path = metadata.workspace_root.join("release-plz.toml");
     let config = fs::read_to_string(&path)
@@ -313,6 +357,7 @@ pub(super) fn check(metadata: &CargoMetadata) -> Result<(), String> {
         &metadata.packages,
         &config,
         &metadata.workspace_root,
+        &release_tags(&metadata.workspace_root)?,
         |name, requirement| {
             if !cache.contains_key(name) {
                 cache.insert(name.to_string(), registry_versions(name)?);
@@ -345,7 +390,13 @@ mod tests {
         config: &Config,
         published: impl FnMut(&str, &VersionReq) -> Result<bool, String>,
     ) -> Result<Vec<String>, String> {
-        super::blockers(packages, config, Path::new("/fixture"), published)
+        super::blockers(
+            packages,
+            config,
+            Path::new("/fixture"),
+            &BTreeSet::new(),
+            published,
+        )
     }
 
     fn package(name: &str, dependencies: serde_json::Value) -> Package {
@@ -396,6 +447,121 @@ mod tests {
         })
         .unwrap()
         .is_empty());
+    }
+
+    #[test]
+    fn tagged_earlier_dependency_requires_a_non_yanked_registry_match() {
+        let root = std::env::current_dir().unwrap().join(format!(
+            "target/publish-dependency-tags-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        for args in [
+            vec!["init", "--quiet"],
+            vec![
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "--no-gpg-sign",
+                "-m",
+                "fixture",
+            ],
+            vec!["tag", "application-v0.3.14"],
+            vec!["tag", "-a", "consumer-v0.3.13", "-m", "previous release"],
+        ] {
+            let output = Command::new("git")
+                .current_dir(&root)
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "tag.gpgSign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let tags = release_tags(&root).unwrap();
+        let packages = vec![
+            package("application", json!([])),
+            package(
+                "consumer",
+                json!([dependency("application", Some("dev"), "^0.3.14")]),
+            ),
+        ];
+        for (index, allowed) in [
+            ("{\"vers\":\"0.3.14\",\"yanked\":true}", false),
+            (
+                "{\"vers\":\"0.3.14\",\"yanked\":true}\n\
+                 {\"vers\":\"0.3.15\",\"yanked\":false}",
+                true,
+            ),
+            ("{\"vers\":\"0.3.13\",\"yanked\":false}", false),
+            ("{\"vers\":\"0.3.14\",\"yanked\":false}", true),
+        ] {
+            let versions = parse_index(index).unwrap();
+            let mut queried = false;
+            let failures =
+                super::blockers(&packages, &Config::default(), &root, &tags, |name, req| {
+                    queried = true;
+                    assert_eq!(name, "application");
+                    Ok(versions.iter().any(|version| req.matches(version)))
+                })
+                .unwrap();
+            assert!(queried);
+            assert_eq!(failures.is_empty(), allowed, "{index}");
+            if !allowed {
+                assert!(failures[0].contains("release tag already exists"));
+            }
+        }
+        assert_eq!(
+            super::blockers(&packages, &Config::default(), &root, &tags, |_, _| Err(
+                "registry unavailable".into()
+            ),)
+            .unwrap_err(),
+            "registry unavailable"
+        );
+        // A tagged consumer is skipped too, rather than producing a false blocker.
+        let mut tags = tags;
+        tags.insert("consumer-v0.3.14".into());
+        assert!(
+            super::blockers(&packages, &Config::default(), &root, &tags, |_, _| panic!(
+                "tagged consumers are not packaged"
+            ),)
+            .unwrap()
+            .is_empty()
+        );
+        assert!(release_tags(&root.join("missing")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn custom_tag_templates_fail_closed_instead_of_assuming_publication() {
+        let packages = vec![
+            package("application", json!([])),
+            package(
+                "consumer",
+                json!([dependency("application", Some("dev"), "^0.3.14")]),
+            ),
+        ];
+        for policy in [
+            "[workspace]\ngit_tag_name='custom-{{ version }}'\n",
+            "[[package]]\nname='application'\ngit_tag_name='custom-{{ version }}'\n",
+        ] {
+            let config = toml::from_str(policy).unwrap();
+            let error =
+                blockers(&packages, &config, |_, _| panic!("unsupported tag policy")).unwrap_err();
+            assert!(error.contains("custom git_tag_name"), "{policy}");
+        }
     }
 
     #[test]
@@ -574,6 +740,7 @@ mod tests {
                             &metadata.packages,
                             &Config::default(),
                             &root,
+                            &BTreeSet::new(),
                             |name, requirement| {
                                 assert!(versioned, "path-only dependencies need no registry query");
                                 assert_eq!(name, "application");
@@ -593,6 +760,7 @@ mod tests {
                         &metadata.packages,
                         &Config::default(),
                         &root,
+                        &BTreeSet::new(),
                         |_, _| panic!("earlier publication needs no registry query"),
                     )
                     .unwrap()
