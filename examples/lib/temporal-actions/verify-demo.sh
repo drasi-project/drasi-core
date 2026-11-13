@@ -26,34 +26,44 @@ assert_state() {
 import asyncio, os, sys
 import psycopg
 from temporalio.client import Client
-from demo import ORDER_ID, STAGES, drasi_status, progress
+from temporalio.converter import DataConverter
+from demo import ORDER_ID, STAGES, drasi_status, progress_if_exists
 
 async def check():
     client = await Client.connect(os.environ["TEMPORAL_ADDRESS"])
     workflow = client.get_workflow_handle(f"order-{ORDER_ID}")
     current = sys.argv[1]
     expected = list(STAGES[:STAGES.index(current) + 1]) if current in STAGES else []
-    state = await progress(workflow)
-    names = [event["signal"] for event in state["events"]]
-    assert names == expected, (names, expected)
-    assert state["status"] == current, state
-    assert state["workflowStatus"] == ("COMPLETED" if current == "delivered" else "RUNNING"), state
-    assert (await workflow.describe()).run_id == sys.argv[2], "Startup replaced the workflow execution"
-    history_signals = [
-        event.workflow_execution_signaled_event_attributes.signal_name
-        async for event in workflow.fetch_history_events()
-        if event.HasField("workflow_execution_signaled_event_attributes")
-    ]
-    assert history_signals == expected, history_signals
+    state = await progress_if_exists(workflow)
+    if not expected:
+        assert state is None, "A workflow was started before the order was placed"
+    else:
+        assert state is not None, "The order workflow has not started"
+        names = [event["stage"] for event in state["events"]]
+        assert names == expected, (names, expected)
+        assert state["status"] == current, state
+        assert state["workflowStatus"] == ("COMPLETED" if current == "delivered" else "RUNNING"), state
+        assert (await workflow.describe()).run_id == sys.argv[2], "Startup replaced the workflow execution"
+        history = [event async for event in workflow.fetch_history_events()]
+        starts = [event.workflow_execution_started_event_attributes for event in history
+                  if event.HasField("workflow_execution_started_event_attributes")]
+        assert len(starts) == 1
+        assert starts[0].workflow_type.name == "OrderLifecycle"
+        assert starts[0].task_queue.name == "orders"
+        assert starts[0].identity == "drasi-temporal-reaction"
+        assert await DataConverter.default.decode(starts[0].input.payloads) == [state["events"][0]["diff"]]
+        history_signals = [event.workflow_execution_signaled_event_attributes.signal_name for event in history
+                           if event.HasField("workflow_execution_signaled_event_attributes")]
+        assert history_signals == expected[1:], history_signals
+        for event in state["events"]:
+            diff = event["diff"]
+            assert diff["queryId"] == event["stage"]
+            assert diff["operation"] == "ADD"
+            assert diff["sequenceId"] == 1
+            assert diff["after"] == {"orderId": ORDER_ID, "status": event["stage"]}
     with psycopg.connect() as db:
         rows = db.execute("SELECT id, status FROM orders").fetchall()
         assert rows == ([(ORDER_ID, current)] if expected else []), rows
-    for event in state["events"]:
-        diff = event["diff"]
-        assert diff["queryId"] == event["signal"]
-        assert diff["operation"] == "ADD"
-        assert diff["sequenceId"] == 1
-        assert diff["after"] == {"orderId": ORDER_ID, "status": event["signal"]}
     for _ in range(100):
         queries = drasi_status()["queries"]
         settled = True
@@ -67,7 +77,7 @@ async def check():
             break
         await asyncio.sleep(0.1)
     assert settled, queries
-    print(f"PASS: order={current}, signals={names}, execution={state['workflowStatus']}, same run ID")
+    print(f"PASS: order={current}, workflow stages={expected}")
 
 asyncio.run(check())
 PY
@@ -82,24 +92,35 @@ reject_stage() {
     [[ "$failure" == *"Cannot move order"* ]]
 }
 
+run_stage() {
+    local output
+    output="$(./demo.sh "$1")"
+    printf '%s\n' "$output"
+    grep -Fxq "SQL:        $2;" <<< "$output"
+}
+
 ./demo.sh up
 "${compose[@]}" exec -T worker python -m unittest -v test_demo
+run_id=""
+"${compose[@]}" exec -T worker python -c 'from urllib.request import urlopen; response = urlopen("http://temporal:8233", timeout=5); assert response.status == 200; assert b"<html" in response.read(); print("PASS: Temporal Web UI is served")'
+assert_state awaiting_placement
+reject_stage paid
+assert_state awaiting_placement
+./demo.sh stop
+./demo.sh up
+assert_state awaiting_placement
+run_stage placed "INSERT INTO orders (id, status) VALUES ('1001', 'placed')"
 run_id="$("${compose[@]}" exec -T worker python -c 'import asyncio, os; from temporalio.client import Client
 async def run():
     client = await Client.connect(os.environ["TEMPORAL_ADDRESS"])
     print((await client.get_workflow_handle("order-1001").describe()).run_id)
 asyncio.run(run())')"
-"${compose[@]}" exec -T worker python -c 'from urllib.request import urlopen; response = urlopen("http://temporal:8233", timeout=5); assert response.status == 200; assert b"<html" in response.read(); print("PASS: Temporal Web UI is served")'
-assert_state awaiting_placement
-reject_stage paid
-assert_state awaiting_placement
-./demo.sh placed
 assert_state placed
 ./demo.sh placed
 assert_state placed
 reject_stage shipped
 assert_state placed
-./demo.sh paid
+run_stage paid "UPDATE orders SET status = 'paid' WHERE id = '1001'"
 assert_state paid
 if ./demo.sh invalid; then
     echo "An unknown stage was accepted" >&2
@@ -107,7 +128,7 @@ if ./demo.sh invalid; then
 fi
 ./demo.sh up
 assert_state paid
-./demo.sh down
+./demo.sh stop
 ./demo.sh up
 assert_state paid
 "${compose[@]}" stop drasi
@@ -121,17 +142,42 @@ echo "$failure"
 [[ "$failure" == *"Cannot reach Drasi"* ]]
 ./demo.sh up
 assert_state paid
-./demo.sh shipped
+run_stage shipped "UPDATE orders SET status = 'shipped' WHERE id = '1001'"
 assert_state shipped
-./demo.sh delivered
+run_stage delivered "UPDATE orders SET status = 'delivered' WHERE id = '1001'"
 assert_state delivered
 ./demo.sh delivered
 assert_state delivered
 reject_stage placed
-./demo.sh down
+./demo.sh stop
 ./demo.sh up
 assert_state delivered
-echo "PASS: four SQL-driven signals, workflow completion, payloads, no-op, invalid transitions, repeated up, restart before/after completion, and explicit outage failure"
+echo "PASS: SQL-driven workflow start and signals, completion, payloads, restart, and explicit outage failure"
+
+previous_run_id="$run_id"
+./demo.sh down
+if [[ -n "$(docker volume ls --quiet --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME")" ]]; then
+    echo "Demo project volumes remain after down" >&2
+    exit 1
+fi
+./demo.sh up
+run_id=""
+assert_state awaiting_placement
+run_stage placed "INSERT INTO orders (id, status) VALUES ('1001', 'placed')"
+run_id="$("${compose[@]}" exec -T worker python -c 'import asyncio, os; from temporalio.client import Client
+async def run():
+    client = await Client.connect(os.environ["TEMPORAL_ADDRESS"])
+    print((await client.get_workflow_handle("order-1001").describe()).run_id)
+asyncio.run(run())')"
+[[ "$run_id" != "$previous_run_id" ]]
+assert_state placed
+run_stage paid "UPDATE orders SET status = 'paid' WHERE id = '1001'"
+assert_state paid
+run_stage shipped "UPDATE orders SET status = 'shipped' WHERE id = '1001'"
+assert_state shipped
+run_stage delivered "UPDATE orders SET status = 'delivered' WHERE id = '1001'"
+assert_state delivered
+echo "PASS: down removes all demo data and the entire walkthrough can run again"
 
 "${compose[@]}" stop drasi worker
 "${compose[@]}" run --rm --no-deps -T worker python - "$run_id" <<'PY'
@@ -141,8 +187,6 @@ from temporalio.api.common.v1 import WorkflowExecution
 from temporalio.api.workflowservice.v1 import DeleteWorkflowExecutionRequest
 from temporalio.client import Client
 from temporalio.service import RPCError, RPCStatusCode
-from workflow import OrderLifecycle, main
-
 async def check():
     client = await Client.connect(os.environ["TEMPORAL_ADDRESS"])
     handle = client.get_workflow_handle("order-1001")
@@ -161,21 +205,40 @@ async def check():
     async with asyncio.timeout(15):
         while not await missing():
             await asyncio.sleep(0.1)
-        try:
-            await main()
-        except RuntimeError as error:
-            assert "history is missing" in str(error), error
-        else:
-            raise AssertionError("Startup accepted an order whose workflow history was deleted")
     assert await missing(), "Startup recreated the expired workflow"
     with psycopg.connect() as db:
         assert db.execute("SELECT id, status FROM orders").fetchall() == [("1001", "delivered")]
-    print("PASS: missing workflow history fails startup without a replacement or SQL mutation")
-    await client.start_workflow(OrderLifecycle.run, id="order-1001", task_queue="orders")
+    print("PASS: removing workflow history does not create a replacement or mutate SQL")
 
 asyncio.run(check())
 PY
+
 "${compose[@]}" up --detach --wait --wait-timeout 120 worker drasi
+if failure="$("${compose[@]}" exec -T worker python demo.py ready 2>&1)"; then
+    echo "An order with missing workflow history was accepted" >&2
+    exit 1
+fi
+echo "$failure"
+[[ "$failure" == *"history is missing"* ]]
+echo "PASS: missing workflow history fails startup without a replacement"
+
+"${compose[@]}" exec -T worker python - <<'PY'
+import asyncio, os
+from temporalio.client import Client
+from workflow import OrderLifecycle
+
+async def check():
+    client = await Client.connect(os.environ["TEMPORAL_ADDRESS"])
+    handle = await client.start_workflow(
+        OrderLifecycle.run,
+        {"queryId": "placed", "operation": "ADD", "sequenceId": 1,
+         "after": {"orderId": "1001", "status": "placed"}},
+        id="order-1001", task_queue="orders",
+    )
+    await handle.query("progress")
+
+asyncio.run(check())
+PY
 if failure="$("${compose[@]}" exec -T worker python demo.py ready 2>&1)"; then
     echo "An empty replacement workflow was accepted for the delivered order" >&2
     exit 1
@@ -183,3 +246,36 @@ fi
 echo "$failure"
 [[ "$failure" == *"history is missing previously confirmed stages"* ]]
 echo "PASS: an already-replaced workflow is rejected immediately instead of waiting for stale signals"
+
+"${compose[@]}" exec -T worker python - <<'PY'
+import asyncio, os
+import psycopg
+from temporalio.client import Client
+from demo import STAGES, progress_if_exists
+
+async def check():
+    order_id = "2002"
+    client = await Client.connect(os.environ["TEMPORAL_ADDRESS"])
+    handle = client.get_workflow_handle(f"order-{order_id}")
+    assert await progress_if_exists(handle) is None, "Workflow started before its order was placed"
+    with psycopg.connect(autocommit=True) as db:
+        for index, stage in enumerate(STAGES):
+            if index == 0:
+                db.execute("INSERT INTO orders (id, status) VALUES (%s, %s)", (order_id, stage))
+            else:
+                db.execute("UPDATE orders SET status = %s WHERE id = %s", (stage, order_id))
+            async with asyncio.timeout(30):
+                while True:
+                    state = await progress_if_exists(handle)
+                    if (state is not None and state["status"] == stage and
+                            (stage != "delivered" or state["workflowStatus"] == "COMPLETED")):
+                        break
+                    await asyncio.sleep(0.1)
+            assert [event["stage"] for event in state["events"]] == list(STAGES[:index + 1])
+            diff = state["events"][-1]["diff"]
+            assert diff["queryId"] == stage and diff["operation"] == "ADD"
+            assert diff["after"] == {"orderId": order_id, "status": stage}
+    print(f"PASS: query results start and signal order-{order_id}")
+
+asyncio.run(check())
+PY

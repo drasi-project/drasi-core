@@ -54,9 +54,12 @@ async fn main() -> Result<()> {
         .map_err(|error| anyhow::anyhow!("initialize tracing: {error}"))?;
     let dir = PathBuf::from(std::env::var("DATA_DIR").context("DATA_DIR is required")?);
     std::fs::create_dir_all(&dir)?;
-    let raw: Value = serde_json::from_str(&std::fs::read_to_string(
-        std::env::var("TEMPORAL_CONFIG_FILE").context("TEMPORAL_CONFIG_FILE is required")?,
-    )?)?;
+    let config_file =
+        std::env::var("TEMPORAL_CONFIG_FILE").context("TEMPORAL_CONFIG_FILE is required")?;
+    let config = std::fs::read_to_string(&config_file)
+        .with_context(|| format!("failed to read reaction configuration from {config_file}"))?;
+    let raw: Value = serde_yaml::from_str(&config)
+        .with_context(|| format!("failed to parse reaction configuration from {config_file}"))?;
     let reaction = TemporalReactionDescriptor
         .create_reaction(
             "actions",

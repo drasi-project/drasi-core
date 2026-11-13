@@ -66,12 +66,12 @@ services:
       PGTABLE: public.orders
       DATA_DIR: /home/demo/state
       QUERY_DIR: /config/queries
-      TEMPORAL_CONFIG_FILE: /config/reaction.json
+      TEMPORAL_CONFIG_FILE: /config/reaction.yaml
       RUST_LOG: warn
     volumes:
       - drasi:/home/demo
       - ./queries:/config/queries:ro
-      - ./reaction.json:/config/reaction.json:ro
+      - ./reaction.yaml:/config/reaction.yaml:ro
     depends_on:
       worker:
         condition: service_healthy
