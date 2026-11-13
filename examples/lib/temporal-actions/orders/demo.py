@@ -13,8 +13,11 @@ from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 import psycopg
+from temporalio.api.enums.v1 import TaskQueueType
+from temporalio.api.taskqueue.v1 import TaskQueue
+from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
 from temporalio.client import Client, WorkflowExecutionStatus
-from temporalio.service import RPCError
+from temporalio.service import RPCError, RPCStatusCode
 
 ORDER_ID = "1001"
 STAGES = ("placed", "paid", "shipped", "delivered")
@@ -44,13 +47,31 @@ async def progress(handle):
     return {**state, "workflowStatus": execution.status.name}
 
 
+async def progress_if_exists(handle):
+    try:
+        return await progress(handle)
+    except RPCError as error:
+        if error.status != RPCStatusCode.NOT_FOUND:
+            raise
+        return None
+
+
 async def wait_for_stage(handle, stage):
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         status = drasi_status()
-        state = await progress(handle)
+        state = await progress_if_exists(handle)
+        if state is None:
+            checkpoint = status["queries"]["placed"]["checkpoint"]
+            if stage != "placed" or (checkpoint is not None and checkpoint["sequence"] >= 1):
+                raise RuntimeError(
+                    "Order workflow history is missing; it may have expired or been reset. "
+                    "The saved order cannot resume. Run ./demo.sh down, then ./demo.sh up."
+                )
+            await asyncio.sleep(0.1)
+            continue
         for event in state["events"]:
-            if event["signal"] != stage:
+            if event["stage"] != stage:
                 continue
             diff = event["diff"]
             if (diff["queryId"] != stage or diff["operation"] != "ADD"
@@ -64,7 +85,7 @@ async def wait_for_stage(handle, stage):
                 return state
         await asyncio.sleep(0.1)
     raise TimeoutError(
-        f"The database has committed status {stage}, but its Temporal signal was not confirmed "
+        f"The database has committed status {stage}, but its Temporal action was not confirmed "
         "within 30 seconds. Do not assume delivery failed; inspect the workflow and logs before retrying."
     )
 
@@ -76,55 +97,74 @@ async def main():
     client = await Client.connect(os.environ["TEMPORAL_ADDRESS"])
     handle = client.get_workflow_handle(f"order-{ORDER_ID}")
     if action == "health":
-        await progress(handle)
+        response = await client.workflow_service.describe_task_queue(
+            DescribeTaskQueueRequest(
+                namespace="default",
+                task_queue=TaskQueue(name="orders"),
+                task_queue_type=TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
+            ),
+            timeout=RPC_TIMEOUT,
+        )
+        if not response.pollers:
+            raise RuntimeError("The order workflow Worker is not polling its task queue.")
         return
     if action == "inspect":
-        print(json.dumps({"workflow": await progress(handle), "drasi": drasi_status()}))
+        print(json.dumps({"workflow": await progress_if_exists(handle), "drasi": drasi_status()}))
         return
     with psycopg.connect(connect_timeout=5, autocommit=True) as db:
         if not db.execute("SELECT pg_try_advisory_lock(72335432)").fetchone()[0]:
             raise RuntimeError("Another demo command is running; wait for it to finish.")
         drasi_status()
-        state = await progress(handle)
+        state = await progress_if_exists(handle)
         row = db.execute("SELECT status FROM orders WHERE id = %s", (ORDER_ID,)).fetchone()
         before = row[0] if row else None
         if before is not None:
-            confirmed = {event["signal"] for event in state["events"]}
-            if not set(STAGES[:STAGES.index(before)]).issubset(confirmed):
+            confirmed = {event["stage"] for event in state["events"]} if state else set()
+            if state is not None and not set(STAGES[:STAGES.index(before)]).issubset(confirmed):
                 raise RuntimeError(
                     "Order workflow history is missing previously confirmed stages; "
                     "it may have expired or been reset. The saved order cannot resume. "
-                    "Use a fresh Compose project."
+                    "Run ./demo.sh down, then ./demo.sh up."
                 )
             state = await wait_for_stage(handle, before)
-        elif state["status"] != "awaiting_placement":
+        elif state is not None:
             raise RuntimeError("The database and workflow do not match; use a fresh demo project.")
         next_stage = STAGES[0] if before is None else (
             STAGES[STAGES.index(before) + 1] if before != "delivered" else None
         )
         if action == "ready":
             print(f"Ready. Order {ORDER_ID}: {before or 'not placed yet'}.")
-            print(f"Temporal: order-{ORDER_ID} is {state['workflowStatus']}.")
+            print(f"Temporal: order-{ORDER_ID} is {state['workflowStatus'] if state else 'not started'}.")
             if next_stage:
                 print(f"Try: ./demo.sh {next_stage}")
             else:
-                print("This order is delivered. Use a fresh Compose project to run another order.")
+                print("This order is delivered. Run ./demo.sh down, then ./demo.sh up to start again.")
             return
         if before == action:
-            print(f"Order {ORDER_ID} is already {action}; its signal is confirmed. Nothing changed.")
+            print(f"Order {ORDER_ID} is already {action}; its workflow is confirmed. Nothing changed.")
             return
         if action != next_stage:
             expected = f"Run ./demo.sh {next_stage} next." if next_stage else "The order is already delivered."
             raise ValueError(f"Cannot move order {ORDER_ID} from {before or 'not placed'} to {action}. {expected}")
         if before is None:
-            db.execute("INSERT INTO orders (id, status) VALUES (%s, %s)", (ORDER_ID, action))
-            print(f"PostgreSQL: order {ORDER_ID} placed", flush=True)
+            statement = "INSERT INTO orders (id, status) VALUES (%s, %s)"
+            parameters = (ORDER_ID, action)
+            message = f"PostgreSQL: order {ORDER_ID} placed"
         else:
-            db.execute("UPDATE orders SET status = %s WHERE id = %s", (action, ORDER_ID))
-            print(f"PostgreSQL: order {ORDER_ID} changed from {before} to {action}", flush=True)
+            statement = "UPDATE orders SET status = %s WHERE id = %s"
+            parameters = (action, ORDER_ID)
+            message = f"PostgreSQL: order {ORDER_ID} changed from {before} to {action}"
+        with psycopg.ClientCursor(db) as cursor:
+            rendered_statement = cursor.mogrify(statement, parameters)
+        db.execute(statement, parameters)
+        print(f"SQL:        {rendered_statement};", flush=True)
+        print(message, flush=True)
         await wait_for_stage(handle, action)
         print(f"Drasi:     order entered the {action} query")
-        print(f"Temporal:  order-{ORDER_ID} processed {action}")
+        if action == "placed":
+            print(f"Temporal:  order-{ORDER_ID} started from placed")
+        else:
+            print(f"Temporal:  order-{ORDER_ID} processed {action}")
         if action == "delivered":
             print("Temporal:  workflow completed")
 

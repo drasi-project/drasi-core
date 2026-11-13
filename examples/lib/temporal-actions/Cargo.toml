@@ -16,6 +16,7 @@ drasi-source-postgres = { path = "../../../components/sources/postgres" }
 drasi-index-rocksdb = { path = "../../../components/indexes/rocksdb" }
 drasi-state-store-redb = { path = "../../../components/state_stores/redb" }
 serde_json = "1"
+serde_yaml = "0.9"
 tokio = { version = "1", features = ["macros", "rt", "io-util", "net", "signal", "time"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

@@ -1,0 +1,24 @@
+endpoint: http://temporal:7233
+outputTemplates:
+  routes:
+    placed:
+      added:
+        action: start
+        workflowId: "order-{{after.orderId}}"
+        workflowType: OrderLifecycle
+        taskQueue: orders
+    paid:
+      added:
+        action: signal
+        workflowId: "order-{{after.orderId}}"
+        signalName: paid
+    shipped:
+      added:
+        action: signal
+        workflowId: "order-{{after.orderId}}"
+        signalName: shipped
+    delivered:
+      added:
+        action: signal
+        workflowId: "order-{{after.orderId}}"
+        signalName: delivered

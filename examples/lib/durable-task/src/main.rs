@@ -9,8 +9,23 @@ use drasi_reaction_durable_task::descriptor::DurableTaskReactionDescriptor;
 use drasi_source_postgres::{PostgresReplicationSource, SslMode};
 use drasi_state_store_redb::RedbStateStoreProvider;
 use serde_json::{json, Value};
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::io::{AsyncBufReadExt, BufReader};
+
+fn load_reaction_config(path: &Path) -> Result<Value> {
+    let contents =
+        std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    serde_yaml::from_slice(&contents).with_context(|| {
+        format!(
+            "failed to parse reaction configuration from {}",
+            path.display()
+        )
+    })
+}
 
 async fn ready(drasi: &DrasiLib) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -51,7 +66,7 @@ async fn main() -> Result<()> {
     let state_path =
         PathBuf::from(std::env::var("APP_STATE_DIR").context("APP_STATE_DIR is required")?);
     std::fs::create_dir_all(&state_path)?;
-    let config: Value = serde_json::from_slice(&std::fs::read(root.join("reaction.json"))?)?;
+    let config = load_reaction_config(&root.join("reaction.yaml"))?;
     let reaction = DurableTaskReactionDescriptor
         .create_reaction("dts", vec!["order-status".into()], &config, true)
         .await?;
@@ -108,4 +123,40 @@ async fn main() -> Result<()> {
     .await;
     drasi.stop().await?;
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn yaml_reaction_has_the_expected_routes_and_templates() {
+        let config =
+            load_reaction_config(&Path::new(env!("CARGO_MANIFEST_DIR")).join("reaction.yaml"))
+                .unwrap();
+        assert_eq!(
+            config,
+            json!({
+                "endpoint": "${DTS_ENDPOINT}",
+                "taskHub": "${DTS_TASKHUB:-default}",
+                "producerId": "${DTS_PRODUCER_ID:-orders-example-v1}",
+                "authentication": "none",
+                "defaultTemplate": {
+                    "added": {
+                        "action": "start",
+                        "orchestration": "OrderWorkflow",
+                        "instanceId": "{{after.orderId}}",
+                        "template": r#"{"orderId":{{json after.orderId}},"status":{{json after.status}}}"#
+                    },
+                    "updated": {
+                        "action": "raiseEvent",
+                        "instanceId": "{{after.orderId}}",
+                        "eventName": "{{after.status}}",
+                        "template": r#"{"orderId":{{json after.orderId}},"status":{{json after.status}}}"#
+                    },
+                    "deleted": {"action": "ignore"}
+                }
+            })
+        );
+    }
 }

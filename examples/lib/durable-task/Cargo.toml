@@ -15,5 +15,6 @@ drasi-reaction-durable-task = { path = "../../../components/reactions/durable-ta
 drasi-source-postgres = { path = "../../../components/sources/postgres" }
 drasi-state-store-redb = { path = "../../../components/state_stores/redb" }
 serde_json = "1"
+serde_yaml = "0.9"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time", "io-std", "io-util"] }
 tracing-subscriber = "0.3"
